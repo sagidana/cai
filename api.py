@@ -7,19 +7,24 @@ class OpenAiApi:
         self.base_url = base_url
         self.api_key = api_key
 
-    def chat(self, messages):
+    def chat(self, messages, model, system_prompt=None, tools=None):
         url = f"{self.base_url}/chat/completions"
         headers = {}
         headers['Authorization'] = f"Bearer {self.api_key}"
         headers['Content-Type'] = "application/json"
 
         data = {}
-        data['model'] = "gpt-4o-mini"
-        data['messages'] = []
 
-        # data['messages'].append() # add system prompt?
+        data['model'] = model
+        data['messages'] = []
+        if tools:
+            data['tools'] = tools
+
+        if system_prompt:
+            data['messages'].append(system_prompt)
 
         data['messages'].extend(messages)
+        data['tool_choice'] = "auto"
 
         r = requests.post(url, headers=headers, json=data)
         if r.status_code != 200:
@@ -33,6 +38,7 @@ class OpenAiApi:
             return
 
         choice = choices[0]
+
         message = choice.get('message', None)
         if not message:
             print(f"[!] choice message is None")
@@ -40,8 +46,9 @@ class OpenAiApi:
 
         content = message.get('content', "")
         reasoning = message.get('reasoning', "")
+        tool_calls = message.get('tool_calls', None)
 
-        return content, reasoning
+        return content, reasoning, tool_calls
 
 class AnthropicApi:
     def __init__(self, api_key):
