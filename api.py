@@ -2,6 +2,20 @@ import json
 import requests
 
 
+class OpenRouterApi:
+    def __init__(self):
+        pass
+
+    def get_models(self):
+        url = "https://openrouter.ai/api/v1/models"
+        r = requests.get(url)
+        if r.status_code != 200:
+            print(f"[!] request {url} failed with {r.status_code}, {r.text}")
+            return
+        response = r.json()
+
+        return response.get('data')
+
 class OpenAiApi:
     def __init__(self, base_url, api_key):
         self.base_url = base_url
