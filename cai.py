@@ -165,7 +165,10 @@ def action_impl(args):
 
     messages.append({ "role": "user", "content": args.prompt })
 
-    result = openai_api.chat(messages, model=args.model, tools=tools)
+    # use relevant tools only
+    impl_tools = [tool for tool in tools if tool.get('function',{}).get('name') in ("fetch_codebase_infra")]
+
+    result = openai_api.chat(messages, model=args.model, tools=impl_tools)
     if not result: return
     content, reasoning, tool_calls = result
 
@@ -230,8 +233,8 @@ def main():
     parser.add_argument("--location", help="the location in the codebase to be used by the action. in the format of => <file_path>:<line_num>:<col_num>")
     parser.add_argument("--stdin", help="for internal use.")
     parser.add_argument("--model",
-                        default="arcee-ai/trinity-mini:free",
-                        # default="anthropic/claude-opus-4.6",
+                        # default="arcee-ai/trinity-mini:free",
+                        default="anthropic/claude-opus-4.6",
                         help="the model to be used by the LLM")
     parser.add_argument("--output-language", default="python", help="the programming language the model will output.")
 
