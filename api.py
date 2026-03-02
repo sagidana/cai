@@ -3,8 +3,8 @@ import requests
 
 
 class OpenRouterApi:
-    def __init__(self):
-        pass
+    def __init__(self, api_key):
+        self.api_key = api_key
 
     def get_models(self):
         url = "https://openrouter.ai/api/v1/models"
@@ -15,6 +15,18 @@ class OpenRouterApi:
         response = r.json()
 
         return response.get('data')
+
+    def get_account_stats(self):
+        url = "https://openrouter.ai/api/v1/auth/key"
+        headers = {}
+        headers['Authorization'] = f"Bearer {self.api_key}"
+
+        r = requests.get(url, headers=headers)
+        if r.status_code != 200:
+            print(f"[!] request {url} failed with {r.status_code}, {r.text}")
+            return
+
+        return r.json()
 
 class OpenAiApi:
     def __init__(self, base_url, api_key):

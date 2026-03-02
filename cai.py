@@ -11,9 +11,12 @@ config_dir = os.path.expanduser("~/.config/cai")
 
 config = json.loads(open(os.path.join(config_dir, "config.json")).read())
 tools = get_tools()
-openai_api = OpenAiApi(config.get('base_url'),
-                       open(os.path.join(config_dir, "api_key")).read().strip())
-models = OpenRouterApi().get_models()
+api_key = open(os.path.join(config_dir, "api_key")).read().strip()
+openai_api = OpenAiApi(config.get('base_url'), api_key)
+openrouter_api = OpenRouterApi(api_key)
+models = openrouter_api.get_models()
+# stats = openrouter_api.get_account_stats()
+# price_so_far = stats.get('data', {}).get('usage')
 
 def get_model_context_length(model):
     global models
@@ -241,8 +244,8 @@ def main():
     parser.add_argument("--location", help="the location in the codebase to be used by the action. in the format of => <file_path>:<line_num>:<col_num>")
     parser.add_argument("--stdin", help="for internal use.")
     parser.add_argument("--model",
-                        # default="arcee-ai/trinity-mini:free",
-                        default="anthropic/claude-opus-4.6",
+                        default="arcee-ai/trinity-mini:free",
+                        # default="anthropic/claude-opus-4.6",
                         help="the model to be used by the LLM")
     parser.add_argument("--output-language", default="python", help="the programming language the model will output.")
 
