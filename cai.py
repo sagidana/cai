@@ -39,6 +39,14 @@ def action_prompt(args):
         messages.append({ "role": "system", "content": args.system_prompt })
     if args.stdin:
         messages.append({ "role": "user", "content": args.stdin })
+    if args.file:
+        file_content = []
+        i = 1
+        for line in open(args.file).readlines():
+            file_content.append(f"{i}: {line}")
+            i += 1
+        file_content = '\n'.join(file_content)
+        messages.append({ "role": "user", "content": f"<file_content> {file_content} </file_content>" })
 
     messages.append({ "role": "user", "content": args.prompt })
 
