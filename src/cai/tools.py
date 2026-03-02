@@ -1,5 +1,6 @@
 from mcp.server.fastmcp import FastMCP
 import subprocess
+import sys
 import json
 
 # ─── Language registry ─────────────────────────────────────────────────────────
@@ -214,7 +215,7 @@ def send_rpc(process, method, params, request_id):
 def call_tool(tool_name, arguments):
     print(f"[-] about to call {tool_name} ({arguments})")
     process = subprocess.Popen(
-        ["python", __file__],
+        [sys.executable, "-m", "cai.tools"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -252,7 +253,7 @@ def call_tool(tool_name, arguments):
 
 def get_tools():
     process = subprocess.Popen(
-        ["python", __file__],
+        [sys.executable, "-m", "cai.tools"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

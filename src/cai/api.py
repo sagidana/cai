@@ -97,17 +97,3 @@ class AnthropicApi:
             print(f"[!] request {url} failed: {r.status_code}, {r.text}")
             return
         print(r.json())
-
-
-def main():
-    api = OpenAiApi("https://openrouter.ai/api/v1", open('./api_key').read().strip())
-
-    api.chat([
-            {
-                "role": "user",
-                "content": "is this working?",
-            }
-        ])
-
-if __name__ == "__main__":
-    main()

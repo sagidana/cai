@@ -4,8 +4,8 @@ import sys
 import os
 import re
 
-from api import OpenAiApi, OpenRouterApi
-from tools import get_tools, call_tool
+from cai.api import OpenAiApi, OpenRouterApi
+from cai.tools import get_tools, call_tool
 
 config_dir = os.path.expanduser("~/.config/cai")
 
