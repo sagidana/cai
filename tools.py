@@ -2,6 +2,204 @@ from mcp.server.fastmcp import FastMCP
 import subprocess
 import json
 
+# ─── Language registry ─────────────────────────────────────────────────────────
+#
+# To add a new language:
+#   1. Add one entry to LANGUAGE_CONFIGS below.
+#   2. No other code changes are needed.
+#
+# Required capture names:
+#   class_query  →  @class_def, @class_name, @method_name, @method_params
+#   func_query   →  @func_name, @func_params
+#
+# Set class_query or func_query to None when the language has no classes /
+# no top-level functions.
+#
+# Smali note: every .smali file is exactly one class.  The trick is to capture
+# the root `source_file` node as @class_def — the ancestor walk from any method
+# node then correctly terminates there.
+
+LANGUAGE_CONFIGS = {
+    'python': {
+        'parser_name': 'python',
+        'extensions': ['.py'],
+        'method_prefix': 'def ',
+        'class_query': """
+            (class_definition
+                name: (identifier) @class_name
+                body: (block
+                    (function_definition
+                        name: (identifier) @method_name
+                        parameters: (parameters) @method_params
+                    )
+                )
+            ) @class_def
+        """,
+        'func_query': """
+            (module
+                (function_definition
+                    name: (identifier) @func_name
+                    parameters: (parameters) @func_params
+                )
+            )
+        """,
+    },
+
+    'java': {
+        'parser_name': 'java',
+        'extensions': ['.java'],
+        'method_prefix': '',
+        'class_query': """
+            (class_declaration
+                name: (identifier) @class_name
+                body: (class_body
+                    (method_declaration
+                        name: (identifier) @method_name
+                        parameters: (formal_parameters) @method_params
+                    )
+                )
+            ) @class_def
+        """,
+        'func_query': None,
+    },
+
+    'c': {
+        'parser_name': 'c',
+        'extensions': ['.c', '.h'],
+        'method_prefix': '',
+        'class_query': None,
+        'func_query': """
+            (translation_unit
+                (function_definition
+                    declarator: (function_declarator
+                        declarator: (identifier) @func_name
+                        parameters: (parameter_list) @func_params
+                    )
+                )
+            )
+        """,
+    },
+
+    'cpp': {
+        'parser_name': 'cpp',
+        'extensions': ['.cpp', '.cc', '.cxx', '.c++', '.hpp', '.hh', '.h++'],
+        'method_prefix': '',
+        'class_query': """
+            (class_specifier
+                name: (type_identifier) @class_name
+                body: (field_declaration_list
+                    (function_definition
+                        declarator: (function_declarator
+                            declarator: (field_identifier) @method_name
+                            parameters: (parameter_list) @method_params
+                        )
+                    )
+                )
+            ) @class_def
+        """,
+        'func_query': """
+            (translation_unit
+                (function_definition
+                    declarator: (function_declarator
+                        declarator: (identifier) @func_name
+                        parameters: (parameter_list) @func_params
+                    )
+                )
+            )
+        """,
+    },
+
+    'smali': {
+        'parser_name': 'smali',
+        'extensions': ['.smali'],
+        'method_prefix': '',
+        # Capture source_file as @class_def so the ancestor walk from any
+        # method node terminates at the file root, which holds the class name.
+        'class_query': """
+            (source_file
+                (class_header
+                    (class_identifier) @class_name
+                )
+                (method
+                    (method_name) @method_name
+                    (method_signature) @method_params
+                )
+            ) @class_def
+        """,
+        'func_query': None,
+    },
+}
+
+# Flat extension → language name map built once at import time.
+EXT_TO_LANG = {
+    ext: lang
+    for lang, cfg in LANGUAGE_CONFIGS.items()
+    for ext in cfg['extensions']
+}
+
+
+def _parse_file(source: bytes, config: dict) -> dict:
+    """Return {class: {method: prototype}, func: prototype} for one source file."""
+    from tree_sitter_language_pack import get_language, get_parser
+    import tree_sitter
+
+    try:
+        parser   = get_parser(config['parser_name'])
+        language = get_language(config['parser_name'])
+    except Exception:
+        return {}
+
+    root   = parser.parse(source).root_node
+    prefix = config.get('method_prefix', '')
+    info   = {}
+
+    # ── Class methods ──────────────────────────────────────────────────────────
+    cq_src = config.get('class_query')
+    if cq_src:
+        try:
+            caps = tree_sitter.QueryCursor(language.query(cq_src)).captures(root)
+
+            class_defs    = caps.get('class_def',     [])
+            class_names   = caps.get('class_name',    [])
+            method_names  = caps.get('method_name',   [])
+            method_params = caps.get('method_params', [])
+
+            # Build ID → class-name map (same node appears once per method, idempotent).
+            class_node_map = {}
+            for cls_node, cls_name_node in zip(class_defs, class_names):
+                name = cls_name_node.text.decode()
+                class_node_map[cls_node.id] = name
+                info.setdefault(name, {})
+
+            # Walk ancestors from each method node to find its owning class.
+            for meth_node, param_node in zip(method_names, method_params):
+                meth   = meth_node.text.decode()
+                params = param_node.text.decode()
+                anc    = meth_node.parent
+                while anc is not None and anc.id not in class_node_map:
+                    anc = anc.parent
+                if anc is not None:
+                    info[class_node_map[anc.id]][meth] = f"{prefix}{meth}{params}"
+        except Exception:
+            pass
+
+    # ── Top-level functions ────────────────────────────────────────────────────
+    fq_src = config.get('func_query')
+    if fq_src:
+        try:
+            caps = tree_sitter.QueryCursor(language.query(fq_src)).captures(root)
+
+            for fn_node, fp_node in zip(caps.get('func_name', []),
+                                        caps.get('func_params', [])):
+                name   = fn_node.text.decode()
+                params = fp_node.text.decode()
+                info[name] = f"{prefix}{name}{params}"
+        except Exception:
+            pass
+
+    return info
+
+
 def send_rpc(process, method, params, request_id):
     message = {
         "jsonrpc": "2.0",
@@ -45,7 +243,6 @@ def call_tool(tool_name, arguments):
                             }, 2)
 
         result = response.get("result", {}).get("content", [{}])[0].get("text")
-        print(f"[-] result: {result}")
 
         return result
     except Exception as e:
@@ -93,39 +290,19 @@ if __name__ == '__main__':
     mcp = FastMCP(name="Tools Server")
 
     @mcp.tool()
-    def fetch_codebase_infra(cwd: str = '.') -> str:
-        """Iterate through all Python files in the given directory and extract all classes and their methods using tree-sitter."""
+    def fetch_codebase_metadata(cwd: str = '.') -> str:
+        """Walk the working directory and extract class/method/function structure
+        from Python, Java, C, C++, and Smali source files.  Language is
+        auto-detected from file extension; mixed-language projects are handled
+        transparently.  Returns JSON: {file: {class: {method: prototype}}}."""
         import os
-        from tree_sitter_language_pack import(get_language, get_parser)
-        import tree_sitter
         infra = {}
-        parser = get_parser('python')
-        language = get_language('python')
-
-        class_query = language.query("""
-            (class_definition
-                name: (identifier) @class_name
-                body: (block
-                    (function_definition
-                        name: (identifier) @method_name
-                        parameters: (parameters) @method_params
-                    )
-                )
-            ) @class_def
-        """)
-
-        func_query = language.query("""
-            (module
-                (function_definition
-                    name: (identifier) @func_name
-                    parameters: (parameters) @func_params
-                )
-            )
-        """)
 
         for root, dirs, files in os.walk(cwd):
             for filename in files:
-                if not filename.endswith('.py'): continue
+                ext = os.path.splitext(filename)[1].lower()
+                if ext not in EXT_TO_LANG:
+                    continue
 
                 filepath = os.path.join(root, filename)
                 try:
@@ -134,52 +311,9 @@ if __name__ == '__main__':
                 except (IOError, OSError):
                     continue
 
-                tree = parser.parse(source)
-                root_node = tree.root_node
-
-                file_info = {}
-
-                cursor = tree_sitter.QueryCursor(class_query)
-                class_captures = cursor.captures(root_node)
-
-                class_defs = class_captures.get("class_def", [])
-                class_names = class_captures.get("class_name", [])
-                method_names = class_captures.get("method_name", [])
-                method_params = class_captures.get("method_params", [])
-
-                class_node_map = {}
-                for cls_node, cls_name_node in zip(class_defs, class_names):
-                    cls_name = cls_name_node.text.decode('utf-8')
-                    class_node_map[cls_node.id] = cls_name
-                    if cls_name not in file_info:
-                        file_info[cls_name] = {}
-
-                for meth_node, param_node in zip(method_names, method_params):
-                    meth_name = meth_node.text.decode('utf-8')
-                    param_text = param_node.text.decode('utf-8')
-                    parent = meth_node.parent
-                    while parent is not None:
-                        if parent.type == 'class_definition': break
-                        parent = parent.parent
-                    if parent is not None and parent.id in class_node_map:
-                        cls_name = class_node_map[parent.id]
-                        prototype = f"def {meth_name}{param_text}"
-                        file_info[cls_name][meth_name] = prototype
-
-                cursor = tree_sitter.QueryCursor(func_query)
-                func_captures = cursor.captures(root_node)
-                func_names = func_captures.get("func_name", [])
-                func_params_list = func_captures.get("func_params", [])
-
-                for fn_node, fp_node in zip(func_names, func_params_list):
-                    fn_name = fn_node.text.decode('utf-8')
-                    fp_text = fp_node.text.decode('utf-8')
-                    prototype = f"def {fn_name}{fp_text}"
-                    file_info[fn_name] = prototype
-
+                file_info = _parse_file(source, LANGUAGE_CONFIGS[EXT_TO_LANG[ext]])
                 if file_info:
-                    rel_path = os.path.relpath(filepath, cwd)
-                    infra[rel_path] = file_info
+                    infra[os.path.relpath(filepath, cwd)] = file_info
 
         return json.dumps(infra, indent=2)
 

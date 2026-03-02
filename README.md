@@ -1,15 +1,13 @@
 # cai — Command-line AI
 
-`cai` is a lightweight CLI tool that brings LLM intelligence into your terminal and editor workflow. It supports plain prompts, tool-assisted reasoning, and context-aware code generation — all powered by any OpenAI-compatible API (defaults to [OpenRouter](https://openrouter.ai)).
+`cai` is a lightweight CLI tool that brings LLM intelligence into your terminal and editor workflow. It supports plain prompts, cursor-aware code generation, and optional codebase introspection — all powered by any OpenAI-compatible API (defaults to [OpenRouter](https://openrouter.ai)).
 
 ---
 
 ## Features
 
-- **`prompt`** — Send a prompt with optional file or stdin context.
-- **`knowit`** — Prompt the LLM with tool-calling support (MCP-based tools).
-- **`impl`** — Generate code at a specific cursor location, with optional codebase introspection.
-- **MCP tool server** — Built-in `fetch_codebase_infra` tool that parses Python files via tree-sitter and returns class/method structure.
+- **`prompt`** — Send a prompt with optional file, stdin, cursor location, and codebase context.
+- **MCP tool server** — Built-in `fetch_codebase_metadata` tool that parses source files via tree-sitter and returns class/method structure. Supports Python, Java, C, C++, and Smali; auto-detects language from file extension.
 - Works with any OpenAI-compatible endpoint (OpenRouter, local Ollama, etc.).
 
 ---
@@ -52,22 +50,22 @@ python cai.py -a <action> [options]
 
 | Flag | Description |
 |------|-------------|
-| `-a`, `--action` | Action to perform: `prompt`, `knowit`, `impl` |
+| `-a`, `--action` | Action to perform: `prompt` |
 | `-p`, `--prompt` | The prompt text to send to the LLM |
 | `--system-prompt` | Optional system prompt |
 | `--file` | Path to a file to include in the LLM context (with line numbers) |
-| `--location` | Cursor location in format `<file>:<line>:<col>` (used by `impl`) |
-| `--model` | Model ID to use (default: `arcee-ai/trinity-mini:free`) |
-| `--output-language` | Programming language for `impl` output (default: `python`) |
+| `--location` | Cursor location in format `<file>:<line>:<col>` — includes that file with the cursor position highlighted |
+| `--codebase` | Give the LLM access to the `fetch_codebase_metadata` tool so it can inspect project structure |
+| `--model` | Model ID to use (default: `anthropic/claude-opus-4.6`) |
 | `--cwd` | Working directory for tools (default: `.`) |
 
 ---
 
 ## Actions
 
-### `prompt` — Simple LLM prompt
+### `prompt` — LLM prompt with optional context
 
-Send a plain prompt, optionally with file content or stdin piped in.
+Send a prompt, optionally enriched with file content, stdin, a cursor position, or full codebase introspection.
 
 ```bash
 # Basic prompt
@@ -79,59 +77,27 @@ python cai.py -a prompt -p "Summarize what this file does." --file ./cai.py
 # Piped stdin
 cat error.log | python cai.py -a prompt -p "What is causing this error?"
 
-# Use a specific model
-python cai.py -a prompt -p "Explain recursion." --model "anthropic/claude-opus-4-6"
-```
-
----
-
-### `knowit` — Prompt with tool calling
-
-Like `prompt`, but the LLM can invoke MCP tools to gather more information before answering.
-
-```bash
-# Ask a question where the LLM may need to inspect your codebase
-python cai.py -a knowit -p "What classes are defined in this project?"
-
-# With stdin
-cat myfile.py | python cai.py -a knowit -p "Are there any issues with this code?"
-```
-
-The LLM has access to the `fetch_codebase_infra` tool, which parses all Python files in the current directory and returns a structured map of classes, methods, and top-level functions.
-
----
-
-### `impl` — Code generation at cursor location
-
-Generate code to insert at a specific location in a file. Provide the file content and cursor position so the LLM has full context. The LLM can also call `fetch_codebase_infra` to understand the rest of the project.
-
-```bash
-# Generate a method body at line 42, column 4
-python cai.py -a impl \
-  --file ./mymodule.py \
+# With a cursor location — includes the file and marks the position
+python cai.py -a prompt \
   --location "./mymodule.py:42:4" \
   --prompt "implement a method that returns the sorted list of keys"
 
-# Generate in a different language
-python cai.py -a impl \
-  --file ./server.js \
-  --location "./server.js:10:0" \
-  --prompt "add an express route that returns all users" \
-  --output-language javascript
+# With codebase awareness — LLM can call fetch_codebase_metadata as needed
+python cai.py -a prompt \
+  --file ./api.py \
+  --location "./api.py:30:4" \
+  --codebase \
+  --prompt "add a post method that sends a JSON body to a given endpoint"
 
-# Pipe file content via stdin instead of --file
-cat ./mymodule.py | python cai.py -a impl \
-  --location "./mymodule.py:20:0" \
-  --prompt "add input validation to this function"
+# Use a specific model
+python cai.py -a prompt -p "Explain recursion." --model "anthropic/claude-sonnet-4-6"
 ```
-
-The output is raw source code ready to be pasted or inserted at the cursor position.
 
 ---
 
-## MCP Tool: `fetch_codebase_infra`
+## MCP Tool: `fetch_codebase_metadata`
 
-Available to `knowit` and `impl` actions. Walks the working directory, parses every `.py` file with tree-sitter, and returns a JSON structure:
+Available when `--codebase` is passed. Walks the working directory, auto-detects the language of each source file from its extension, parses it with tree-sitter, and returns a JSON structure:
 
 ```json
 {
@@ -149,6 +115,18 @@ Available to `knowit` and `impl` actions. Walks the working directory, parses ev
 }
 ```
 
+**Supported languages and extensions:**
+
+| Language | Extensions |
+|----------|-----------|
+| Python   | `.py` |
+| Java     | `.java` |
+| C        | `.c`, `.h` |
+| C++      | `.cpp`, `.cc`, `.cxx`, `.c++`, `.hpp`, `.hh`, `.h++` |
+| Smali    | `.smali` |
+
+Mixed-language projects are handled transparently — each file is classified and parsed independently.
+
 ---
 
 ## Examples
@@ -158,32 +136,28 @@ Available to `knowit` and `impl` actions. Walks the working directory, parses ev
 ```bash
 python cai.py -a prompt \
   --file ./tools.py \
-  --prompt "Explain what the call_tool function does."
+  --prompt "Explain what the _parse_file function does."
 ```
 
-### Generate a new class method
+### Generate code at a cursor position
 
 ```bash
-python cai.py -a impl \
-  --file ./api.py \
+python cai.py -a prompt \
   --location "./api.py:30:4" \
+  --codebase \
   --prompt "add a post method that sends a JSON body to a given endpoint"
 ```
 
 ### Ask about your project structure
 
 ```bash
-python cai.py -a knowit -p "List all classes and their methods in this project."
+python cai.py -a prompt --codebase -p "List all classes and their methods in this project."
 ```
 
-### Use a stronger model for complex tasks
+### Use stdin as context
 
 ```bash
-python cai.py -a impl \
-  --file ./cai.py \
-  --location "./cai.py:65:0" \
-  --prompt "implement the action_grep function to search files using ripgrep" \
-  --model "anthropic/claude-sonnet-4-6"
+cat myfile.py | python cai.py -a prompt -p "Are there any issues with this code?"
 ```
 
 ---
@@ -195,7 +169,7 @@ cai/
 ├── cai.py          # CLI entry point and action handlers
 ├── api.py          # OpenAI-compatible and Anthropic API clients
 ├── tools.py        # MCP tool server + tool dispatch logic
-├── config.json     # Local config (copied to ~/.config/cai/)
+├── config.json     # Local config template (copy to ~/.config/cai/)
 └── requirements.txt
 ```
 
