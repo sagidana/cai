@@ -2,6 +2,7 @@ from mcp.server.fastmcp import FastMCP
 import subprocess
 import sys
 import json
+import os
 
 # ─── Language registry ─────────────────────────────────────────────────────────
 #
@@ -291,12 +292,13 @@ if __name__ == '__main__':
     mcp = FastMCP(name="Tools Server")
 
     @mcp.tool()
-    def fetch_codebase_metadata(cwd: str = '.') -> str:
+    def fetch_codebase_metadata() -> str:
         """Walk the working directory and extract class/method/function structure
         from Python, Java, C, C++, and Smali source files.  Language is
         auto-detected from file extension; mixed-language projects are handled
         transparently.  Returns JSON: {file: {class: {method: prototype}}}."""
-        import os
+
+        cwd = "."
         infra = {}
 
         for root, dirs, files in os.walk(cwd):
