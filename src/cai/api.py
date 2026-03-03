@@ -144,7 +144,6 @@ class OpenAiApi:
                     yield content, finished_tool_calls
             yield None, finished_tool_calls
 
-
 class AnthropicApi:
     def __init__(self, api_key):
         self.api_key = api_key

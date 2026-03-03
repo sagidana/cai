@@ -171,25 +171,51 @@ def action_prompt(args):
         mcp_tools = external_mcps[mcp_path]
         included_tools.extend(mcp_tools)
 
-    tool_calls_happened = False
-    for content, tool_calls in openai_api.chat_stream(messages,
-                                                      model=args.model,
-                                                      tools=included_tools):
-        if tool_calls:
-            print("\n", end="", flush=True)
-            handle_tool_calls(tool_calls, messages) # updates the messages
-            print("\n", end="", flush=True)
-            tool_calls_happened = True
+    if args.non_streaming:
+        result = openai_api.chat(messages, model=args.model, tools=included_tools)
+        if not result: return
 
+        content, reasoning, tool_calls = result
+
+        if reasoning:
+            print("----------------------------------------------------------------------------------------------------")
+            print(reasoning)
+            print("----------------------------------------------------------------------------------------------------")
         if content:
-            print(content, end="", flush=True)
+            print(content)
 
-    if tool_calls_happened:
-        for content, _ in openai_api.chat_stream(messages, model=args.model):
+        if tool_calls:
+            handle_tool_calls(tool_calls, messages) # updates the messages
+            result = openai_api.chat(messages, model=args.model) # no tools this time
+            if not result: return
+
+            content, reasoning, tool_calls = result
+            if reasoning:
+                print("----------------------------------------------------------------------------------------------------")
+                print(reasoning)
+                print("----------------------------------------------------------------------------------------------------")
+            if content:
+                print(content)
+    else:
+        tool_calls_happened = False
+        for content, tool_calls in openai_api.chat_stream(messages,
+                                                          model=args.model,
+                                                          tools=included_tools):
+            if tool_calls:
+                print("\n", end="", flush=True)
+                handle_tool_calls(tool_calls, messages) # updates the messages
+                print("\n", end="", flush=True)
+                tool_calls_happened = True
+
             if content:
                 print(content, end="", flush=True)
 
-    print('\n', end='', flush=True)
+        if tool_calls_happened:
+            for content, _ in openai_api.chat_stream(messages, model=args.model):
+                if content:
+                    print(content, end="", flush=True)
+
+        print('\n', end='', flush=True)
 
 ACTION_GREP = "grep"
 def action_grep(args):
@@ -226,6 +252,7 @@ def main():
     # default_model = config.get('model', "anthropic/claude-opus-4.6")
     parser.add_argument("--model", default=default_model, help="the model to be used by the LLM")
     parser.add_argument("--codebase", action="store_true", help="let the action be aware of the codebase")
+    parser.add_argument("--non-streaming", action="store_true", help="the the action know whether or not to use the non-streaming api.")
     parser.add_argument('-t',
                         '--tools',
                         nargs='+',
