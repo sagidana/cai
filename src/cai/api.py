@@ -76,6 +76,75 @@ class OpenAiApi:
 
         return content, reasoning, tool_calls
 
+    def chat_stream(self, messages, model, system_prompt=None, tools=None):
+        url = f"{self.base_url}/chat/completions"
+        headers = {}
+        headers['Authorization'] = f"Bearer {self.api_key}"
+        headers['Content-Type'] = "application/json"
+
+        data = {}
+
+        data['model'] = model
+        data['messages'] = []
+        if tools:
+            data['tools'] = tools
+
+        if system_prompt:
+            data['messages'].append(system_prompt)
+
+        data['messages'].extend(messages)
+        data['tool_choice'] = "auto"
+        data['stream'] = True
+
+        finished_tool_calls = None
+        tool_calls = {}
+
+        with requests.post(url, headers=headers, json=data, stream=True) as response:
+            response.raise_for_status()
+            for line in response.iter_lines():
+                if not line: continue
+
+                if not line.startswith(b"data: "): continue
+
+                response_data = line[len(b"data: "):]
+
+                if response_data == b"[DONE]": break
+                chunk = json.loads(response_data)
+                if len(chunk["choices"]) != 1: continue
+
+                choice = chunk["choices"][0]
+                finish_reason = choice.get('finish_reason', None)
+                if finish_reason == "tool_calls":
+                    finished_tool_calls = list(tool_calls.values())
+                    tool_calls = {}
+
+                delta = choice["delta"]
+
+                if "tool_calls" in delta:
+                    for tool_call in delta['tool_calls']:
+                        idx = tool_call['index']
+                        if idx not in tool_calls:
+                            tool_calls[idx] = {}
+                            tool_calls[idx]['index'] = tool_call.get('index')
+                            tool_calls[idx]['id'] = tool_call.get('id')
+                            tool_calls[idx]['type'] = "function"
+                            tool_calls[idx]['function'] = {}
+
+                            tool_calls[idx]['function']['name'] = tool_call.get('function', {}).get('name')
+                            tool_calls[idx]['function']['arguments'] = ""
+
+                        args = tool_call.get('function', {}).get('arguments')
+                        if not args: continue
+
+                        tool_calls[idx]['function']['arguments'] += args
+
+                content = delta.get('content', None)
+
+                if content or tool_calls:
+                    yield content, finished_tool_calls
+            yield None, finished_tool_calls
+
+
 class AnthropicApi:
     def __init__(self, api_key):
         self.api_key = api_key
@@ -97,3 +166,37 @@ class AnthropicApi:
             print(f"[!] request {url} failed: {r.status_code}, {r.text}")
             return
         print(r.json())
+
+
+def main():
+    import os
+    api_key = open(os.path.expanduser('~/.config/cai/api_key')).read().strip()
+    api = OpenAiApi("https://openrouter.ai/api/v1", api_key)
+
+    tools = [{ "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get weather by city",
+                    "parameters": {
+                        "type": "object",
+                        "properties": { "city": {"type": "string"} },
+                        "required": ["city"]
+                    }
+                } }]
+
+    model = "arcee-ai/trinity-mini:free"
+    # model = "anthropic/claude-opus-4.6"
+
+    content, reasoning, tool_calls = api.chat([{ "role":"user", "content":"write python script the print the current weather at London" }], model=model, tools=tools)
+    print(f"{content=}")
+    print(f"{reasoning=}")
+    print(f"{tool_calls=}")
+
+    # for content, tool_calls in api.chat_stream([{ "role":"user", "content":"write python script the print the current weather at London" }], model=model, tools=tools):
+        # if tool_calls:
+            # print(f"{tool_calls=}")
+        # if content:
+            # print(content, end="", flush=True)
+
+if __name__ == "__main__":
+    main()

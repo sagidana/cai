@@ -60,7 +60,7 @@ def read_stdin_if_available():
         return sys.stdin.read()
     return None
 
-def handle_tool_calls(args, tool_calls, messages):
+def handle_tool_calls(tool_calls, messages):
     for call in tool_calls:
         if call.get('type') != 'function':
             print(f"[!] got tool call with invalid type: {call.get('type')}")
@@ -96,7 +96,6 @@ def handle_tool_calls(args, tool_calls, messages):
         except Exception as e:
             print(f"[!] tool_call exception: {e} {json.dumps(call, indent=2)}")
             continue
-    return openai_api.chat(messages, model=args.model) # no tools this time!
 
 ACTION_PROMPT = "prompt"
 def action_prompt(args):
@@ -144,17 +143,25 @@ def action_prompt(args):
             if tool_name in ("fetch_codebase_metadata"):
                 included_tools.append(tool)
 
-    result = openai_api.chat(messages, model=args.model, tools=included_tools)
-    if not result: return
-    content, reasoning, tool_calls = result
+    tool_calls_happened = False
+    for content, tool_calls in openai_api.chat_stream(messages,
+                                                      model=args.model,
+                                                      tools=included_tools):
+        if tool_calls:
+            print("\n", end="", flush=True)
+            handle_tool_calls(tool_calls, messages) # updates the messages
+            print("\n", end="", flush=True)
+            tool_calls_happened = True
 
-    if tool_calls:
-        result = handle_tool_calls(args, tool_calls, messages)
-        if not result: return
+        if content:
+            print(content, end="", flush=True)
 
-        content, reasoning, tool_calls = result
+    if tool_calls_happened:
+        for content, _ in openai_api.chat_stream(messages, model=args.model):
+            if content:
+                print(content, end="", flush=True)
 
-    print(f"{content}")
+    print('\n', end='', flush=True)
 
 ACTION_GREP = "grep"
 def action_grep(args):
