@@ -202,6 +202,7 @@ def action_knowit(args):
 
 def main():
     global external_mcps
+    global config
     init()
 
     parser = argparse.ArgumentParser(description="cai is a command line utility to make use of LLM intelegent in multiple cases.")
@@ -220,10 +221,10 @@ def main():
     parser.add_argument("--file", help="file path to include in the LLM context.")
     parser.add_argument("--location", help="the location in the codebase to be used by the action. in the format of => <file_path>:<line_num>:<col_num>")
     parser.add_argument("--stdin", help="for internal use.")
-    parser.add_argument("--model",
-                        default="arcee-ai/trinity-mini:free",
-                        # default="anthropic/claude-opus-4.6",
-                        help="the model to be used by the LLM")
+
+    default_model = config.get('model', "arcee-ai/trinity-mini:free")
+    # default_model = config.get('model', "anthropic/claude-opus-4.6")
+    parser.add_argument("--model", default=default_model, help="the model to be used by the LLM")
     parser.add_argument("--codebase", action="store_true", help="let the action be aware of the codebase")
     parser.add_argument('-t',
                         '--tools',
