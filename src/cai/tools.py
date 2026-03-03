@@ -287,6 +287,79 @@ def get_tools():
     finally:
         process.terminate()
 
+def call_external_tool(server_path, tool_name, arguments):
+    print(f"[-] about to call {tool_name} ({arguments})")
+    process = subprocess.Popen(
+        ["python", server_path],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1
+    )
+
+    try:
+        send_rpc(process,
+                 "initialize", {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": { "name": "manual-subproc-client", "version": "1.0" }
+                 }, 1)
+
+
+        process.stdin.write(json.dumps({
+            "jsonrpc": "2.0", "method": "notifications/initialized"
+        }) + "\n")
+        process.stdin.flush()
+
+        response = send_rpc(process,
+                            "tools/call", {
+                                "name": tool_name,
+                                "arguments": arguments
+                            }, 2)
+
+        result = response.get("result", {}).get("content", [{}])[0].get("text")
+
+        return result
+    except Exception as e:
+        print(f"[!] call_tool exception: {e}")
+    finally:
+        process.terminate()
+
+def get_external_tools(server_path):
+    process = subprocess.Popen(
+        ["python", server_path],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1
+    )
+
+    try:
+        send_rpc(process,
+                 "initialize", {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "tool-lister", "version": "1.0"}
+                }, 1)
+
+        response = send_rpc(process, "tools/list", {}, 2)
+
+        mcp_tools = response.get("result", {}).get("tools", [])
+        openai_tools = []
+        for tool in mcp_tools:
+            openai_tools.append({
+                "type": "function",
+                "function":{
+                    "name": tool["name"],
+                    "description": tool["description"],
+                    "parameters": tool["inputSchema"]
+                    }
+                })
+        return openai_tools
+    finally:
+        process.terminate()
 
 if __name__ == '__main__':
     mcp = FastMCP(name="Tools Server")

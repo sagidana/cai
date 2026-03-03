@@ -5,13 +5,19 @@ import os
 import re
 
 from cai.api import OpenAiApi, OpenRouterApi
-from cai.tools import get_tools, call_tool
+from cai.tools import (get_tools,
+                       call_tool,
+                       get_external_tools,
+                       call_external_tool)
 
 global config
 global tools
 global api_key
 global openai_api
 global openrouter_api
+global external_mcps
+external_mcps = {}
+
 
 def init():
     global config
@@ -61,6 +67,7 @@ def read_stdin_if_available():
     return None
 
 def handle_tool_calls(tool_calls, messages):
+    global external_mcps
     for call in tool_calls:
         if call.get('type') != 'function':
             print(f"[!] got tool call with invalid type: {call.get('type')}")
@@ -75,7 +82,21 @@ def handle_tool_calls(tool_calls, messages):
             else:
                 call_args = {}
 
-            result = call_tool(call_name, call_args)
+            called_external = False
+            result = None
+
+            for mcp_path in external_mcps:
+                tools = external_mcps[mcp_path]
+                for tool in tools:
+                    tool_name = tool.get('function',{}).get('name')
+                    if tool_name == call_name:
+                        result = call_external_tool(mcp_path, call_name, call_args)
+                        called_external = True
+
+            if not called_external:
+                result = call_tool(call_name, call_args)
+
+            assert result is not None, "[!] failed to call tool: {call=}"
 
             request_message = {}
             request_message['role'] = 'assistant'
@@ -99,6 +120,8 @@ def handle_tool_calls(tool_calls, messages):
 
 ACTION_PROMPT = "prompt"
 def action_prompt(args):
+    global external_mcps
+
     if not args.prompt:
         print("this action require --prompt to be provided.")
         return
@@ -143,6 +166,11 @@ def action_prompt(args):
             if tool_name in ("fetch_codebase_metadata"):
                 included_tools.append(tool)
 
+    # adding external tools
+    for mcp_path in external_mcps:
+        mcp_tools = external_mcps[mcp_path]
+        included_tools.extend(mcp_tools)
+
     tool_calls_happened = False
     for content, tool_calls in openai_api.chat_stream(messages,
                                                       model=args.model,
@@ -173,6 +201,7 @@ def action_knowit(args):
 
 
 def main():
+    global external_mcps
     init()
 
     parser = argparse.ArgumentParser(description="cai is a command line utility to make use of LLM intelegent in multiple cases.")
@@ -196,10 +225,19 @@ def main():
                         # default="anthropic/claude-opus-4.6",
                         help="the model to be used by the LLM")
     parser.add_argument("--codebase", action="store_true", help="let the action be aware of the codebase")
+    parser.add_argument('-t',
+                        '--tools',
+                        nargs='+',
+                        default=[],
+                        help="list of mcp tools to give the LLM. the tools come in the form of abosult paths to the python files implementing the mcp server.")
 
     args = parser.parse_args()
 
     args.stdin = read_stdin_if_available()
+
+    external_mcps = {}
+    for mcp_server_path in args.tools:
+        external_mcps[mcp_server_path] = get_external_tools(mcp_server_path)
 
     if args.action == ACTION_PROMPT:
         action_prompt(args)
