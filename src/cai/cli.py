@@ -219,8 +219,8 @@ def action_prompt(args):
 
         print('\n', end='', flush=True)
 
-ACTION_GREP = "grep"
-def action_grep(args):
+ACTION_VIMGREP = "vimgrep"
+def action_vimgrep(args):
     if not args.prompt:
         print("this action requires --prompt to be provided.")
         return
@@ -239,15 +239,15 @@ def action_grep(args):
     print_lock = threading.Lock()
 
     def update_progress(completed):
-        bar_len = 30
-        filled = int(bar_len * completed / total)
-        bar = '█' * filled + '░' * (bar_len - filled)
-        print(f'\rProgress: [{bar}] {completed}/{total}', end='', flush=True, file=sys.stderr)
-        if completed == total:
-            print(file=sys.stderr)
+        if args.progress:
+            bar_len = 30
+            filled = int(bar_len * completed / total)
+            bar = '█' * filled + '░' * (bar_len - filled)
+            print(f'\rProgress: [{bar}] {completed}/{total} ', end='', flush=True, file=sys.stderr)
+            if completed == total:
+                print(file=sys.stderr)
 
     def process_line(rg_line):
-        # vimgrep format: file:line:col:text  (split at most 3 times to preserve colons in matched text)
         parts = rg_line.split(':', 3)
         if len(parts) < 4:
             with print_lock:
@@ -286,23 +286,37 @@ def action_grep(args):
         })
         messages.append({"role": "user", "content": args.prompt})
 
-        result = openai_api.chat(messages, model=args.model)
+        if args.strict_format == 'json':
+            while True:
+                result = openai_api.chat(messages, model=args.model)
+                if not result: return
+                content, reasoning, tool_calls = result
+                try:
+                    content = json.dumps(json.loads(content))
+                    break
+                except Exception as e:
+                    print(f'failed to recieve response in the requested format: {args.strict_format}', flush=True, file=sys.stderr)
+                    continue
+        else:
+            result = openai_api.chat(messages, model=args.model)
+            if not result: return
+            content, reasoning, tool_calls = result
 
         with print_lock:
             completed_count[0] += 1
             update_progress(completed_count[0])
-            print(f"\n{'─' * 80}")
-            print(f"[{completed_count[0]}/{total}] {file_path}:{line_num}:{col_num}  match: {match_text.strip()}")
-            print('─' * 80)
-            if result:
-                content, reasoning, _ = result
+            if args.oneline:
+                oneline_content = content.replace('\n', ' ')
+                print(f"{file_path}:{line_num}:{col_num}:{oneline_content}")
+            else:
+                print(f"\n{'─' * 80}")
+                print(f"[{completed_count[0]}/{total}] {file_path}:{line_num}:{col_num}  match: '{match_text.strip()}'")
+                print('─' * 80)
                 if args.include_reasoning and reasoning:
                     print(reasoning)
                     print('─' * 40)
                 if content:
                     print(content)
-            else:
-                print("[!] no response from LLM")
 
     with ThreadPoolExecutor(max_workers=args.cores) as executor:
         futures = [executor.submit(process_line, line) for line in lines]
@@ -328,7 +342,7 @@ def main():
     parser.add_argument("-a", "--action",
                         choices=[
                             ACTION_PROMPT,
-                            ACTION_GREP,
+                            ACTION_VIMGREP,
                             ACTION_KNOWIT,
                             ],
                         default=ACTION_PROMPT,
@@ -343,7 +357,11 @@ def main():
     default_model = config.get('model', "arcee-ai/trinity-mini:free")
     # default_model = config.get('model', "anthropic/claude-opus-4.6")
     parser.add_argument("--model", default=default_model, help="the model to be used by the LLM")
-    parser.add_argument("--codebase", action="store_true", help="let the action be aware of the codebase")
+
+    parser.add_argument("--progress", action="store_true", help="show progess bar.")
+    parser.add_argument("--oneline", action="store_true", help="print results in a vimgrep style format, oneline all data.")
+    parser.add_argument("--strict-format", choices=['json'], help="the expected format provided from the LLM response.")
+    parser.add_argument("--codebase", action="store_true", help="let the action be aware of the codebase.")
     parser.add_argument("--include-reasoning", action="store_true", help="let the action know whether or not to include reasoning in the output.")
     parser.add_argument("--non-streaming", action="store_true", help="let the action know whether or not to use the non-streaming api.")
     parser.add_argument('-t',
@@ -366,8 +384,8 @@ def main():
 
     if args.action == ACTION_PROMPT:
         action_prompt(args)
-    if args.action == ACTION_GREP:
-        action_grep(args)
+    if args.action == ACTION_VIMGREP:
+        action_vimgrep(args)
     if args.action == ACTION_KNOWIT:
         action_knowit(args)
 
