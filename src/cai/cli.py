@@ -295,7 +295,7 @@ def action_vimgrep(args):
                     content = json.dumps(json.loads(content))
                     break
                 except Exception as e:
-                    print(f'failed to recieve response in the requested format: {args.strict_format}', flush=True, file=sys.stderr)
+                    # print(f'[!] {file_path}:{line_num}:{col_num} - failed to recieve response in the requested format: {args.strict_format}', flush=True, file=sys.stderr)
                     continue
         else:
             result = openai_api.chat(messages, model=args.model)
@@ -307,7 +307,7 @@ def action_vimgrep(args):
             update_progress(completed_count[0])
             if args.oneline:
                 oneline_content = content.replace('\n', ' ')
-                print(f"{file_path}:{line_num}:{col_num}:{oneline_content}")
+                print(f"{file_path}:{line_num}:{col_num}:{oneline_content}", flush=True)
             else:
                 print(f"\n{'─' * 80}")
                 print(f"[{completed_count[0]}/{total}] {file_path}:{line_num}:{col_num}  match: '{match_text.strip()}'")
