@@ -220,8 +220,6 @@ def call_llm(messages, args, stream_callback=None):
         tool_name = tool.get('function', {}).get('name')
         if tool_name in internal_tool_names:
             included_tools.append(tool)
-        elif args.codebase and tool_name == "fetch_codebase_metadata":
-            included_tools.append(tool)
 
     for mcp_path in external_mcps:
         included_tools.extend(external_mcps[mcp_path])
@@ -555,7 +553,6 @@ def main():
     parser.add_argument("--progress", action="store_true", help="show progess bar.")
     parser.add_argument("--oneline", action="store_true", help="print results in a vimgrep style format, oneline all data.")
     parser.add_argument("--strict-format", choices=['json'], help="the expected format provided from the LLM response.")
-    parser.add_argument("--codebase", action="store_true", help="let the action be aware of the codebase.")
     parser.add_argument("--include-reasoning", action="store_true", help="let the action know whether or not to include reasoning in the output.")
     parser.add_argument("--non-streaming", action="store_true", help="let the action know whether or not to use the non-streaming api.")
     tools_arg = parser.add_argument('-t',
