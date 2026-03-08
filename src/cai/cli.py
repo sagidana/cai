@@ -441,10 +441,6 @@ def action_prompt(args):
             content = content.replace('\n', ' ')
         print(content)
 
-ACTION_KNOWIT = "knowit"
-def action_knowit(args):
-    pass
-
 def main():
     global external_mcps
     global config
@@ -454,7 +450,6 @@ def main():
     parser.add_argument("-a", "--action",
                         choices=[
                             ACTION_PROMPT,
-                            ACTION_KNOWIT,
                             ],
                         default=ACTION_PROMPT,
                         help="the actiont to be performed.")
@@ -508,8 +503,6 @@ def main():
 
     if args.action == ACTION_PROMPT:
         action_prompt(args)
-    if args.action == ACTION_KNOWIT:
-        action_knowit(args)
 
 
 if __name__ == "__main__":

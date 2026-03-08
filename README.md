@@ -1,13 +1,16 @@
 # cai — Command-line AI
 
-`cai` is a lightweight CLI tool that brings LLM intelligence into your terminal and editor workflow. It supports plain prompts, cursor-aware code generation, and optional codebase introspection — all powered by any OpenAI-compatible API (defaults to [OpenRouter](https://openrouter.ai)).
+`cai` is a lightweight CLI tool that brings LLM intelligence into your terminal and editor workflow. It supports plain prompts, cursor-aware code generation, line-by-line batch processing, and MCP tool integration — all powered by any OpenAI-compatible API (defaults to [OpenRouter](https://openrouter.ai)).
 
 ---
 
 ## Features
 
-- **`prompt`** — Send a prompt with optional file, stdin, cursor location, and codebase context.
-- **MCP tool server** — Built-in `fetch_codebase_metadata` tool that parses source files via tree-sitter and returns class/method structure. Supports Python, Java, C, C++, and Smali; auto-detects language from file extension.
+- **`prompt`** — Send a prompt with optional file, stdin, cursor location, and tool context.
+- **MCP tool support** — Pass external MCP server scripts via `-t`; the LLM can call their tools automatically.
+- **Line-by-line batch mode** — Process stdin or a file one line at a time, calling the LLM per line (with optional parallelism via `--cores`).
+- **vimgrep integration** — Feed `vimgrep`-format output directly; `cai` loads each matched file's context automatically.
+- **Tab completion** — Auto-installs shell completion for bash, zsh, and fish on first run.
 - Works with any OpenAI-compatible endpoint (OpenRouter, local Ollama, etc.).
 
 ---
@@ -17,25 +20,24 @@
 ```bash
 git clone https://github.com/youruser/cai
 cd cai
-pip install -r requirements.txt
+pip install -e .
 ```
 
 ### Configuration
 
-Create the config directory and add your API key and base URL:
+Config files are auto-created on first run under `~/.config/cai/`. You only need to add your API key:
 
 ```bash
-mkdir -p ~/.config/cai
-
-# API key (OpenRouter or any OpenAI-compatible provider)
 echo "sk-or-..." > ~/.config/cai/api_key
+```
 
-# Base URL config
-cat > ~/.config/cai/config.json <<EOF
+`~/.config/cai/config.json` is created automatically with defaults. You can edit it to set a permanent base URL or default model:
+
+```json
 {
-    "base_url": "https://openrouter.ai/api/v1"
+  "base_url": "https://openrouter.ai/api/v1",
+  "model": "arcee-ai/trinity-mini:free"
 }
-EOF
 ```
 
 ---
@@ -43,21 +45,29 @@ EOF
 ## Usage
 
 ```
-python cai.py -a <action> [options]
+cai -a <action> [options]
 ```
 
 ### Global Options
 
-| Flag | Description |
-|------|-------------|
-| `-a`, `--action` | Action to perform: `prompt` |
-| `-p`, `--prompt` | The prompt text to send to the LLM |
-| `--system-prompt` | Optional system prompt |
-| `--file` | Path to a file to include in the LLM context (with line numbers) |
-| `--location` | Cursor location in format `<file>:<line>:<col>` — includes that file with the cursor position highlighted |
-| `--codebase` | Give the LLM access to the `fetch_codebase_metadata` tool so it can inspect project structure |
-| `--model` | Model ID to use (default: `anthropic/claude-opus-4.6`) |
-| `--cwd` | Working directory for tools (default: `.`) |
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-a`, `--action` | `prompt` | Action to perform (currently only `prompt`) |
+| `-p`, `--prompt` | — | The prompt text to send to the LLM |
+| `--system-prompt` | — | Optional system prompt |
+| `--file` | — | Path to a file to include in the LLM context (with line numbers) |
+| `--location` | — | Cursor location in format `<file>:<line>:<col>` — includes that file with cursor position |
+| `--model` | from config, else `arcee-ai/trinity-mini:free` | Model ID to use |
+| `--cwd` | `.` | Working directory for tool execution |
+| `-t`, `--tools` | — | One or more paths to external MCP server Python files, or internal tool names |
+| `--non-streaming` | off | Use blocking (non-streaming) API call |
+| `--strict-format` | — | Enforce LLM output format: `json` |
+| `--include-reasoning` | off | Include reasoning in output |
+| `--oneline` | off | Collapse response to a single line (vimgrep-friendly) |
+| `--progress` | off | Show a progress bar (for `--line-by-line`) |
+| `--line-by-line` | off | Process stdin or `--file` one line at a time, calling LLM per line |
+| `--vimgrep` | off | Treat each input line as `file:line:col:text`; loads file context automatically (implies `--line-by-line`) |
+| `--cores` | `1` | Number of parallel threads for `--line-by-line` processing |
 
 ---
 
@@ -65,99 +75,84 @@ python cai.py -a <action> [options]
 
 ### `prompt` — LLM prompt with optional context
 
-Send a prompt, optionally enriched with file content, stdin, a cursor position, or full codebase introspection.
+Send a prompt, optionally enriched with file content, stdin, or a cursor position.
 
 ```bash
 # Basic prompt
-python cai.py -a prompt -p "What is a closure in Python?"
+cai -a prompt -p "What is a closure in Python?"
 
 # With a file attached
-python cai.py -a prompt -p "Summarize what this file does." --file ./cai.py
+cai -a prompt -p "Summarize what this file does." --file ./src/cai/cli.py
 
 # Piped stdin
-cat error.log | python cai.py -a prompt -p "What is causing this error?"
+cat error.log | cai -a prompt -p "What is causing this error?"
 
 # With a cursor location — includes the file and marks the position
-python cai.py -a prompt \
+cai -a prompt \
   --location "./mymodule.py:42:4" \
   --prompt "implement a method that returns the sorted list of keys"
 
-# With codebase awareness — LLM can call fetch_codebase_metadata as needed
-python cai.py -a prompt \
-  --file ./api.py \
-  --location "./api.py:30:4" \
-  --codebase \
-  --prompt "add a post method that sends a JSON body to a given endpoint"
+# Use an external MCP tool server
+cai -a prompt -p "Use this tool" -t /path/to/mcp_server.py
 
 # Use a specific model
-python cai.py -a prompt -p "Explain recursion." --model "anthropic/claude-sonnet-4-6"
+cai -a prompt -p "Explain recursion." --model "anthropic/claude-sonnet-4-6"
 ```
 
 ---
 
-## MCP Tool: `fetch_codebase_metadata`
+## Line-by-line & vimgrep Mode
 
-Available when `--codebase` is passed. Walks the working directory, auto-detects the language of each source file from its extension, parses it with tree-sitter, and returns a JSON structure:
+Process many inputs in a batch, calling the LLM once per line:
 
-```json
-{
-  "api.py": {
-    "OpenAiApi": {
-      "chat": "def chat(self, messages, model, system_prompt=None, tools=None)"
-    },
-    "OpenRouterApi": {
-      "get_models": "def get_models(self)"
-    }
-  },
-  "cai.py": {
-    "main": "def main()"
-  }
-}
+```bash
+# Process each line of a file
+cai -a prompt --file ./lines.txt --line-by-line -p "Classify this line."
+
+# Read from stdin line by line, 4 threads
+cat items.txt | cai -a prompt --line-by-line --cores 4 -p "Translate to French."
+
+# Feed vimgrep output — file context is loaded automatically per match
+grep -rn "TODO" . --include="*.py" | \
+  cai -a prompt --vimgrep --oneline -p "Suggest a fix for this TODO."
 ```
 
-**Supported languages and extensions:**
-
-| Language | Extensions |
-|----------|-----------|
-| Python   | `.py` |
-| Java     | `.java` |
-| C        | `.c`, `.h` |
-| C++      | `.cpp`, `.cc`, `.cxx`, `.c++`, `.hpp`, `.hh`, `.h++` |
-| Smali    | `.smali` |
-
-Mixed-language projects are handled transparently — each file is classified and parsed independently.
+In `--vimgrep` mode, each input line must be in `file:line:col:text` format (standard `vimgrep` / `grep -n` output). The matched file's full content is included in the LLM context alongside the match location.
 
 ---
 
-## Examples
+## MCP Tools
 
-### Explain a function
+Pass one or more MCP server scripts with `-t`. The LLM can call their tools automatically during a session:
 
 ```bash
-python cai.py -a prompt \
-  --file ./tools.py \
-  --prompt "Explain what the _parse_file function does."
+cai -a prompt -p "Use this tool" -t /path/to/mcp_server.py
 ```
 
-### Generate code at a cursor position
+Internal tool names (non-path values) are also accepted to enable built-in tools:
 
 ```bash
-python cai.py -a prompt \
-  --location "./api.py:30:4" \
-  --codebase \
-  --prompt "add a post method that sends a JSON body to a given endpoint"
+cai -a prompt -p "Inspect the project" -t fetch_codebase_metadata
 ```
 
-### Ask about your project structure
+Tab completion for `-t` completes both file paths and internal tool names.
+
+---
+
+## Shell Completion
+
+Tab completion is installed automatically on first run for bash, zsh, and fish. To set it up manually:
 
 ```bash
-python cai.py -a prompt --codebase -p "List all classes and their methods in this project."
-```
+# bash
+eval "$(register-python-argcomplete cai)"
 
-### Use stdin as context
+# zsh
+autoload -U bashcompinit && bashcompinit
+eval "$(register-python-argcomplete cai)"
 
-```bash
-cat myfile.py | python cai.py -a prompt -p "Are there any issues with this code?"
+# fish
+register-python-argcomplete --shell fish cai | source
 ```
 
 ---
@@ -166,11 +161,11 @@ cat myfile.py | python cai.py -a prompt -p "Are there any issues with this code?
 
 ```
 cai/
-├── cai.py          # CLI entry point and action handlers
-├── api.py          # OpenAI-compatible and Anthropic API clients
-├── tools.py        # MCP tool server + tool dispatch logic
-├── config.json     # Local config template (copy to ~/.config/cai/)
-└── requirements.txt
+├── src/cai/
+│   ├── cli.py      # CLI entry point and action handlers
+│   ├── api.py      # OpenAI-compatible API clients (OpenAiApi, OpenRouterApi, AnthropicApi)
+│   └── tools.py    # MCP tool server + tool dispatch logic (tree-sitter codebase parsing)
+└── pyproject.toml  # Build config; entry point: cai = "cai.cli:main"
 ```
 
 ---
