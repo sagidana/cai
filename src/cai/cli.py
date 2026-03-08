@@ -138,7 +138,7 @@ def read_stdin_if_available():
         return sys.stdin.read()
     return None
 
-def handle_tool_calls(tool_calls, messages):
+def handle_tool_calls(tool_calls, messages, call_content):
     global external_mcps
     for call in tool_calls:
         if call.get('type') != 'function':
@@ -157,6 +157,7 @@ def handle_tool_calls(tool_calls, messages):
             called_external = False
             result = None
 
+            # external tools takes precedent.
             for mcp_path in external_mcps:
                 tools = external_mcps[mcp_path]
                 for tool in tools:
@@ -172,6 +173,7 @@ def handle_tool_calls(tool_calls, messages):
 
             request_message = {}
             request_message['role'] = 'assistant'
+            request_message['content'] = call_content
             request_message['tool_calls'] = [{}]
             request_message['tool_calls'][0]['id'] = call_id
             request_message['tool_calls'][0]['type'] = "function"
@@ -188,7 +190,6 @@ def handle_tool_calls(tool_calls, messages):
             messages.append(response_message)
         except Exception as e:
             log.error("tool_call exception: %s %s", e, json.dumps(call, indent=2))
-            print(f"[!] tool_call exception: {e} {json.dumps(call, indent=2)}")
             continue
 
 def enforce_strict_format(call_fn, strict_format):
@@ -214,6 +215,7 @@ def enforce_strict_format(call_fn, strict_format):
 def call_llm(messages, args, stream_callback=None):
     global external_mcps
 
+    # handling available tools for LLM.
     included_tools = []
     internal_tool_names = getattr(args, 'internal_tools', set())
     for tool in tools:
@@ -224,26 +226,28 @@ def call_llm(messages, args, stream_callback=None):
     for mcp_path in external_mcps:
         included_tools.extend(external_mcps[mcp_path])
 
-    strict_format = getattr(args, 'strict_format', None)
-
     # Streaming cannot enforce output format because the response is assembled
-    # incrementally and validated only after completion. Fall back to non-streaming
+    # incrementally and validated only after completion. Fallback to non-streaming
     # when strict_format is requested so enforcement actually works.
-    use_non_streaming = args.non_streaming or bool(strict_format)
+    use_non_streaming = args.non_streaming or bool(args.strict_format)
 
     if use_non_streaming:
         result = enforce_strict_format(
-            lambda: openai_api.chat(messages, model=args.model, tools=included_tools),
-            strict_format,
+            lambda: openai_api.chat(messages,
+                                    model=args.model,
+                                    tools=included_tools),
+            args.strict_format,
         )
         if not result:
             return ""
+
         content, reasoning, tool_calls = result
         if tool_calls:
-            handle_tool_calls(tool_calls, messages)
+            handle_tool_calls(tool_calls, messages, content) # updates messages.
+
             result = enforce_strict_format(
-                lambda: openai_api.chat(messages, model=args.model),
-                strict_format,
+                lambda: openai_api.chat(messages, model=args.model), # no tools available this time.
+                args.strict_format,
             )
             if not result:
                 return content or ""
@@ -253,22 +257,24 @@ def call_llm(messages, args, stream_callback=None):
         # Streaming path — no strict_format enforcement (see above).
         accumulated = []
         tool_calls_happened = False
-        for content, tool_calls in openai_api.chat_stream(messages, model=args.model, tools=included_tools):
-            if tool_calls:
-                handle_tool_calls(tool_calls, messages)
-                tool_calls_happened = True
+        for content, tool_calls in openai_api.chat_stream(messages,
+                                                          model=args.model,
+                                                          tools=included_tools):
             if content:
                 accumulated.append(content)
-                if stream_callback:
-                    stream_callback(content)
+                if stream_callback: stream_callback(content)
+
+            if tool_calls:
+                handle_tool_calls(tool_calls, messages, "".join(accumulated))
+                tool_calls_happened = True
+
 
         if tool_calls_happened:
             accumulated = []
-            for content, _ in openai_api.chat_stream(messages, model=args.model):
+            for content, _ in openai_api.chat_stream(messages, model=args.model): # no tools available this time.
                 if content:
                     accumulated.append(content)
-                    if stream_callback:
-                        stream_callback(content)
+                    if stream_callback: stream_callback(content)
 
         return "".join(accumulated)
 
@@ -412,13 +418,13 @@ def action_prompt(args):
 
     messages.append({"role": "user", "content": args.prompt})
 
-    if not args.non_streaming and not args.oneline:
+    if not args.non_streaming and not args.oneline:         # streaming flow
         def _write(chunk):
             sys.stdout.write(chunk)
             sys.stdout.flush()
         call_llm(messages, args, stream_callback=_write)
         print()
-    else:
+    else:                                                   # non-streaming flow
         content = call_llm(messages, args)
         if args.oneline:
             content = content.replace('\n', ' ')
@@ -552,7 +558,7 @@ def main():
     parser.add_argument("--model", default=None, help="the model to be used by the LLM")
     parser.add_argument("--progress", action="store_true", help="show progess bar.")
     parser.add_argument("--oneline", action="store_true", help="print results in a vimgrep style format, oneline all data.")
-    parser.add_argument("--strict-format", choices=['json'], help="the expected format provided from the LLM response.")
+    parser.add_argument("--strict-format", default=None, choices=['json'], help="the expected format provided from the LLM response.")
     parser.add_argument("--include-reasoning", action="store_true", help="let the action know whether or not to include reasoning in the output.")
     parser.add_argument("--non-streaming", action="store_true", help="let the action know whether or not to use the non-streaming api.")
     tools_arg = parser.add_argument('-t',

@@ -253,7 +253,7 @@ def call_tool(tool_name, arguments):
                             }, 2)
 
         result = response.get("result", {}).get("content", [{}])[0].get("text")
-        log.info("call_tool result: %s: %s", tool_name, result)
+        # log.info("call_tool result: %s: %s", tool_name, result)
         return result
     except Exception as e:
         log.error("call_tool exception: %s", e)
@@ -327,7 +327,7 @@ def call_external_tool(server_path, tool_name, arguments):
                             }, 2)
 
         result = response.get("result", {}).get("content", [{}])[0].get("text")
-        log.info("call_external_tool result: %s: %s", tool_name, result)
+        # log.info("call_external_tool result: %s: %s", tool_name, result)
         return result
     except Exception as e:
         log.error("call_external_tool exception: %s", e)
