@@ -1,4 +1,5 @@
 import argparse
+import argcomplete
 import json
 import sys
 import os
@@ -7,11 +8,6 @@ import threading
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from cai.api import OpenAiApi, OpenRouterApi
-from cai.tools import (get_tools,
-                       call_tool,
-                       get_external_tools,
-                       call_external_tool)
 
 global config
 global tools
@@ -29,12 +25,57 @@ logging.basicConfig(
 log = logging.getLogger("cai")
 
 
+def setup_shell_completion():
+    config_dir = os.path.expanduser("~/.config/cai")
+    flag = os.path.join(config_dir, "completion_setup")
+    if os.path.exists(flag):
+        return
+
+    shell = os.path.basename(os.environ.get("SHELL", ""))
+    eval_line = None
+    rc_file = None
+
+    if shell == "bash":
+        eval_line = 'eval "$(register-python-argcomplete cai)"\n'
+        rc_file = os.path.expanduser("~/.bashrc")
+    elif shell == "zsh":
+        eval_line = (
+            'autoload -U bashcompinit && bashcompinit\n'
+            'eval "$(register-python-argcomplete cai)"\n'
+        )
+        rc_file = os.path.expanduser("~/.zshrc")
+    elif shell == "fish":
+        eval_line = 'register-python-argcomplete --shell fish cai | source\n'
+        rc_file = os.path.expanduser("~/.config/fish/config.fish")
+
+    if rc_file and eval_line:
+        try:
+            with open(rc_file, "a") as f:
+                f.write(f"\n# cai shell completion\n{eval_line}")
+            open(flag, "w").close()
+            print(f"[*] Shell completion added to {rc_file}. Run: source {rc_file}")
+        except OSError:
+            pass
+
+
 def init():
     global config
     global tools
     global api_key
     global openai_api
     global openrouter_api
+    global call_tool
+    global call_external_tool
+    global get_external_tools
+
+    import cai.api as _cai_api
+    import cai.tools as _cai_tools
+    OpenAiApi = _cai_api.OpenAiApi
+    OpenRouterApi = _cai_api.OpenRouterApi
+    get_tools = _cai_tools.get_tools
+    call_tool = _cai_tools.call_tool
+    get_external_tools = _cai_tools.get_external_tools
+    call_external_tool = _cai_tools.call_external_tool
 
     config_dir = os.path.expanduser("~/.config/cai")
     if not os.path.exists(config_dir):
@@ -467,7 +508,6 @@ def action_knowit(args):
 def main():
     global external_mcps
     global config
-    init()
 
     parser = argparse.ArgumentParser(description="cai is a command line utility to make use of LLM intelegent in multiple cases.")
 
@@ -484,11 +524,7 @@ def main():
     parser.add_argument("--cwd", default=".", help="the current working for the script to operate at.")
     parser.add_argument("--file", help="file path to include in the LLM context.")
     parser.add_argument("--location", help="the location in the codebase to be used by the action. in the format of => <file_path>:<line_num>:<col_num>")
-
-    default_model = config.get('model', "arcee-ai/trinity-mini:free")
-    # default_model = config.get('model', "anthropic/claude-opus-4.6")
-    parser.add_argument("--model", default=default_model, help="the model to be used by the LLM")
-
+    parser.add_argument("--model", default=None, help="the model to be used by the LLM")
     parser.add_argument("--progress", action="store_true", help="show progess bar.")
     parser.add_argument("--oneline", action="store_true", help="print results in a vimgrep style format, oneline all data.")
     parser.add_argument("--strict-format", choices=['json'], help="the expected format provided from the LLM response.")
@@ -507,7 +543,16 @@ def main():
     parser.add_argument('--line-by-line', action='store_true', default=False,
                         help="process stdin (or --file) one line at a time, calling LLM per line.")
 
+    # Must be called before init() so tab completion exits immediately without
+    # running any heavy initialization (API clients, tree-sitter, etc.).
+    argcomplete.autocomplete(parser)
+
+    init()
+    setup_shell_completion()
+
     args = parser.parse_args()
+    if args.model is None:
+        args.model = config.get('model', "arcee-ai/trinity-mini:free")
 
     external_mcps = {}
     for mcp_server_path in args.tools:
