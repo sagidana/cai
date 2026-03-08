@@ -365,6 +365,12 @@ if __name__ == '__main__':
     mcp = FastMCP(name="Tools Server")
 
     @mcp.tool()
+    def cat(file_path: str) -> str:
+        """Read and return the contents of a file."""
+        with open(file_path, 'r') as f:
+            return f.read()
+
+    @mcp.tool()
     def fetch_codebase_metadata() -> str:
         """Walk the working directory and extract class/method/function structure
         from Python, Java, C, C++, and Smali source files.  Language is
