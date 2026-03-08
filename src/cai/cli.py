@@ -178,12 +178,15 @@ def enforce_strict_format(call_fn, strict_format):
         while True:
             result = call_fn()
             if not result: return result
-            content, reasoning, tool_calls = result
+            orig_content, reasoning, tool_calls = result
+            if tool_calls: # do not enforce format in case of tool calls
+                return orig_content, reasoning, tool_calls
+
             try:
-                content = json.dumps(json.loads(content))
-                log.info(f"{content=}")
+                content = json.dumps(json.loads(orig_content))
                 return content, reasoning, tool_calls
             except Exception:
+                log.error(f"failed to get requested format from LLM: {strict_format=} -> {orig_content=}, {reasoning=}, {tool_calls=}")
                 continue
     return call_fn()
 
