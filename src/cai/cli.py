@@ -4,6 +4,7 @@ import sys
 import os
 import re
 import threading
+import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from cai.api import OpenAiApi, OpenRouterApi
@@ -19,6 +20,13 @@ global openai_api
 global openrouter_api
 global external_mcps
 external_mcps = {}
+
+logging.basicConfig(
+    filename="/tmp/cai.log",
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+)
+log = logging.getLogger("cai")
 
 
 def init():
@@ -117,23 +125,201 @@ def handle_tool_calls(tool_calls, messages):
             messages.append(request_message)
             messages.append(response_message)
         except Exception as e:
+            log.error("tool_call exception: %s %s", e, json.dumps(call, indent=2))
             print(f"[!] tool_call exception: {e} {json.dumps(call, indent=2)}")
             continue
 
-ACTION_PROMPT = "prompt"
-def action_prompt(args):
+def enforce_strict_format(call_fn, strict_format):
+    """Retry call_fn() until its content matches strict_format.
+    call_fn must return (content, reasoning, tool_calls) or None/falsy."""
+
+    if strict_format == 'json':
+        while True:
+            result = call_fn()
+            if not result: return result
+            content, reasoning, tool_calls = result
+            try:
+                content = json.dumps(json.loads(content))
+                log.info(f"{content=}")
+                return content, reasoning, tool_calls
+            except Exception:
+                continue
+    return call_fn()
+
+def call_llm(messages, args, stream_callback=None):
     global external_mcps
 
+    included_tools = []
+    for tool in tools:
+        tool_name = tool.get('function', {}).get('name')
+        if args.codebase and tool_name in ("fetch_codebase_metadata"):
+            included_tools.append(tool)
+
+    for mcp_path in external_mcps:
+        included_tools.extend(external_mcps[mcp_path])
+
+    strict_format = getattr(args, 'strict_format', None)
+
+    # Streaming cannot enforce output format because the response is assembled
+    # incrementally and validated only after completion. Fall back to non-streaming
+    # when strict_format is requested so enforcement actually works.
+    use_non_streaming = args.non_streaming or bool(strict_format)
+
+    if use_non_streaming:
+        result = enforce_strict_format(
+            lambda: openai_api.chat(messages, model=args.model, tools=included_tools),
+            strict_format,
+        )
+        if not result:
+            return ""
+        content, reasoning, tool_calls = result
+        if tool_calls:
+            handle_tool_calls(tool_calls, messages)
+            result = enforce_strict_format(
+                lambda: openai_api.chat(messages, model=args.model),
+                strict_format,
+            )
+            if not result:
+                return content or ""
+            content, reasoning, tool_calls = result
+        return content or ""
+    else:
+        # Streaming path — no strict_format enforcement (see above).
+        accumulated = []
+        tool_calls_happened = False
+        for content, tool_calls in openai_api.chat_stream(messages, model=args.model, tools=included_tools):
+            if tool_calls:
+                handle_tool_calls(tool_calls, messages)
+                tool_calls_happened = True
+            if content:
+                accumulated.append(content)
+                if stream_callback:
+                    stream_callback(content)
+
+        if tool_calls_happened:
+            accumulated = []
+            for content, _ in openai_api.chat_stream(messages, model=args.model):
+                if content:
+                    accumulated.append(content)
+                    if stream_callback:
+                        stream_callback(content)
+
+        return "".join(accumulated)
+
+def prompt_line_by_line(args):
+    if not sys.stdin.isatty():
+        mode = "stdin"
+        streaming_stdin = True
+        lines = None
+    elif args.file:
+        mode = "file"
+        streaming_stdin = False
+        with open(args.file) as f:
+            lines = [l.rstrip('\n') for l in f if l.strip()]
+    else:
+        print("--line-by-line requires piped stdin or --file.")
+        return
+
+    if lines is not None and not lines:
+        print("[!] no lines to process.")
+        return
+
+    total = None if streaming_stdin else len(lines)
+    completed_count = [0]
+    lock = threading.Lock()
+
+    def update_progress(completed):
+        if args.progress:
+            if total is not None:
+                bar_len = 30
+                filled = int(bar_len * completed / total)
+                bar = '█' * filled + '░' * (bar_len - filled)
+                print(f'\rProgress: [{bar}] {completed}/{total} ', end='', flush=True, file=sys.stderr)
+                if completed == total:
+                    print(file=sys.stderr)
+
+    def process_line(line):
+        messages = []
+
+        if args.system_prompt:
+            messages.append({"role": "system", "content": args.system_prompt})
+
+        if mode == "stdin":
+            if args.file:
+                file_content = []
+                i = 1
+                for fl in open(args.file).readlines():
+                    file_content.append(f"{i}: {fl}")
+                    i += 1
+                messages.append({"role": "user", "content": f"<file_content> {''.join(file_content)} </file_content>"})
+
+        if args.location:
+            m = re.match(r"^(?P<file_path>.*):(?P<line_num>\d+):(?P<col_num>\d+)$", args.location)
+            if m:
+                fp = m.group('file_path')
+                ln = m.group('line_num')
+                cn = m.group('col_num')
+                fc = []
+                i = 1
+                for fl in open(fp).readlines():
+                    fc.append(f"{i}: {fl}")
+                    i += 1
+                messages.append({"role": "user", "content": f"<file_content> {''.join(fc)} </file_content>"})
+                messages.append({"role": "user", "content": f"<cursor_location> line number: {ln}, column number: {cn} </cursor_location>"})
+        messages.append({"role": "user", "content": line})
+
+        messages.append({"role": "user", "content": args.prompt})
+
+        response = call_llm(messages, args)
+
+        with lock:
+            completed_count[0] += 1
+            update_progress(completed_count[0])
+            if args.oneline:
+                oneline_response = response.replace('\n', ' ')
+                print(f"{line}:{oneline_response}", flush=True)
+            else:
+                count_str = f"{completed_count[0]}/{total}" if total is not None else str(completed_count[0])
+                print(f"\n{'─' * 80}")
+                print(f"[{count_str}] {line}")
+                print('─' * 80)
+                if response:
+                    print(response)
+
+    with ThreadPoolExecutor(max_workers=args.cores) as executor:
+        if streaming_stdin:
+            futures = []
+            for raw_line in sys.stdin:
+                line = raw_line.rstrip('\n')
+                if line.strip():
+                    futures.append(executor.submit(process_line, line))
+        else:
+            futures = [executor.submit(process_line, line) for line in lines]
+        for future in as_completed(futures):
+            try:
+                future.result()
+            except Exception as e:
+                log.error("thread error in prompt_line_by_line: %s", e)
+                with lock:
+                    print(f"[!] thread error: {e}")
+
+ACTION_PROMPT = "prompt"
+def action_prompt(args):
     if not args.prompt:
         print("this action require --prompt to be provided.")
         return
 
+    if args.line_by_line:
+        return prompt_line_by_line(args)
+
     messages = []
 
     if args.system_prompt:
-        messages.append({ "role": "system", "content": args.system_prompt })
-    if args.stdin:
-        messages.append({ "role": "user", "content": args.stdin })
+        messages.append({"role": "system", "content": args.system_prompt})
+
+    stdin = read_stdin_if_available()
+    if stdin:
+        messages.append({"role": "user", "content": stdin})
     if args.file:
         file_content = []
         i = 1
@@ -141,7 +327,7 @@ def action_prompt(args):
             file_content.append(f"{i}: {line}")
             i += 1
         file_content = '\n'.join(file_content)
-        messages.append({ "role": "user", "content": f"<file_content> {file_content} </file_content>" })
+        messages.append({"role": "user", "content": f"<file_content> {file_content} </file_content>"})
     if args.location:
         m = re.match(r"^(?P<file_path>.*):(?P<line_num>\d+):(?P<col_num>\d+)$", args.location)
         if m:
@@ -155,69 +341,22 @@ def action_prompt(args):
                 file_content.append(f"{i}: {line}")
                 i += 1
             file_content = '\n'.join(file_content)
-            messages.append({ "role": "user", "content": f"<file_content> {file_content} </file_content>" })
-            messages.append({ "role": "user", "content": f"<cursor_location> line number: {line_num}, column number: {col_num} </cursor_location>" })
+            messages.append({"role": "user", "content": f"<file_content> {file_content} </file_content>"})
+            messages.append({"role": "user", "content": f"<cursor_location> line number: {line_num}, column number: {col_num} </cursor_location>"})
 
-    messages.append({ "role": "user", "content": args.prompt })
+    messages.append({"role": "user", "content": args.prompt})
 
-    included_tools = []
-    for tool in tools:
-        tool_name = tool.get('function',{}).get('name')
-
-        if args.codebase:
-            if tool_name in ("fetch_codebase_metadata"):
-                included_tools.append(tool)
-
-    # adding external tools
-    for mcp_path in external_mcps:
-        mcp_tools = external_mcps[mcp_path]
-        included_tools.extend(mcp_tools)
-
-    if args.non_streaming:
-        result = openai_api.chat(messages, model=args.model, tools=included_tools)
-        if not result: return
-
-        content, reasoning, tool_calls = result
-
-        if args.include_reasoning and reasoning:
-            print("----------------------------------------------------------------------------------------------------")
-            print(reasoning)
-            print("----------------------------------------------------------------------------------------------------")
-        if content:
-            print(content)
-
-        if tool_calls:
-            handle_tool_calls(tool_calls, messages) # updates the messages
-            result = openai_api.chat(messages, model=args.model) # no tools this time
-            if not result: return
-
-            content, reasoning, tool_calls = result
-            if args.include_reasoning and reasoning:
-                print("----------------------------------------------------------------------------------------------------")
-                print(reasoning)
-                print("----------------------------------------------------------------------------------------------------")
-            if content:
-                print(content)
+    if not args.non_streaming and not args.oneline:
+        def _write(chunk):
+            sys.stdout.write(chunk)
+            sys.stdout.flush()
+        call_llm(messages, args, stream_callback=_write)
+        print()
     else:
-        tool_calls_happened = False
-        for content, tool_calls in openai_api.chat_stream(messages,
-                                                          model=args.model,
-                                                          tools=included_tools):
-            if tool_calls:
-                print("\n", end="", flush=True)
-                handle_tool_calls(tool_calls, messages) # updates the messages
-                print("\n", end="", flush=True)
-                tool_calls_happened = True
-
-            if content:
-                print(content, end="", flush=True)
-
-        if tool_calls_happened:
-            for content, _ in openai_api.chat_stream(messages, model=args.model):
-                if content:
-                    print(content, end="", flush=True)
-
-        print('\n', end='', flush=True)
+        content = call_llm(messages, args)
+        if args.oneline:
+            content = content.replace('\n', ' ')
+        print(content)
 
 ACTION_VIMGREP = "vimgrep"
 def action_vimgrep(args):
@@ -269,6 +408,7 @@ def action_vimgrep(args):
                 "content": f"<file_content>\n{''.join(numbered_lines)}</file_content>"
             })
         except (IOError, OSError) as e:
+            log.error("could not read %s: %s", file_path, e)
             with print_lock:
                 print(f"[!] could not read {file_path}: {e}")
             return
@@ -286,21 +426,13 @@ def action_vimgrep(args):
         })
         messages.append({"role": "user", "content": args.prompt})
 
-        if args.strict_format == 'json':
-            while True:
-                result = openai_api.chat(messages, model=args.model)
-                if not result: return
-                content, reasoning, tool_calls = result
-                try:
-                    content = json.dumps(json.loads(content))
-                    break
-                except Exception as e:
-                    # print(f'[!] {file_path}:{line_num}:{col_num} - failed to recieve response in the requested format: {args.strict_format}', flush=True, file=sys.stderr)
-                    continue
-        else:
-            result = openai_api.chat(messages, model=args.model)
-            if not result: return
-            content, reasoning, tool_calls = result
+        result = enforce_strict_format(
+            lambda: openai_api.chat(messages, model=args.model),
+            args.strict_format,
+        )
+        if not result:
+            return
+        content, reasoning, tool_calls = result
 
         with print_lock:
             completed_count[0] += 1
@@ -324,13 +456,13 @@ def action_vimgrep(args):
             try:
                 future.result()
             except Exception as e:
+                log.error("thread error in action_vimgrep: %s", e)
                 with print_lock:
                     print(f"[!] thread error: {e}")
 
 ACTION_KNOWIT = "knowit"
 def action_knowit(args):
     pass
-
 
 def main():
     global external_mcps
@@ -352,7 +484,6 @@ def main():
     parser.add_argument("--cwd", default=".", help="the current working for the script to operate at.")
     parser.add_argument("--file", help="file path to include in the LLM context.")
     parser.add_argument("--location", help="the location in the codebase to be used by the action. in the format of => <file_path>:<line_num>:<col_num>")
-    parser.add_argument("--stdin", help="for internal use.")
 
     default_model = config.get('model', "arcee-ai/trinity-mini:free")
     # default_model = config.get('model', "anthropic/claude-opus-4.6")
@@ -373,10 +504,10 @@ def main():
                         type=int,
                         default=4,
                         help="number of parallel threads for the grep action (default: 4).")
+    parser.add_argument('--line-by-line', action='store_true', default=False,
+                        help="process stdin (or --file) one line at a time, calling LLM per line.")
 
     args = parser.parse_args()
-
-    args.stdin = read_stdin_if_available()
 
     external_mcps = {}
     for mcp_server_path in args.tools:
