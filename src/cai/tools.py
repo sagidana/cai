@@ -3,6 +3,14 @@ import subprocess
 import sys
 import json
 import os
+import logging
+
+logging.basicConfig(
+    filename="/tmp/cai.log",
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+)
+log = logging.getLogger("cai.tools")
 
 # ─── Language registry ─────────────────────────────────────────────────────────
 #

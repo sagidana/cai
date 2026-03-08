@@ -191,9 +191,12 @@ def call_llm(messages, args, stream_callback=None):
     global external_mcps
 
     included_tools = []
+    internal_tool_names = getattr(args, 'internal_tools', set())
     for tool in tools:
         tool_name = tool.get('function', {}).get('name')
-        if args.codebase and tool_name in ("fetch_codebase_metadata"):
+        if tool_name in internal_tool_names:
+            included_tools.append(tool)
+        elif args.codebase and tool_name == "fetch_codebase_metadata":
             included_tools.append(tool)
 
     for mcp_path in external_mcps:
@@ -555,8 +558,12 @@ def main():
         args.model = config.get('model', "arcee-ai/trinity-mini:free")
 
     external_mcps = {}
-    for mcp_server_path in args.tools:
-        external_mcps[mcp_server_path] = get_external_tools(mcp_server_path)
+    args.internal_tools = set()
+    for entry in args.tools:
+        if os.path.isfile(entry) or entry.endswith('.py'):
+            external_mcps[entry] = get_external_tools(entry)
+        else:
+            args.internal_tools.add(entry)
 
     if args.action == ACTION_PROMPT:
         action_prompt(args)
