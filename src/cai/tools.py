@@ -222,7 +222,7 @@ def send_rpc(process, method, params, request_id):
     return json.loads(process.stdout.readline())
 
 def call_tool(tool_name, arguments):
-    print(f"[-] about to call {tool_name} ({arguments})")
+    log.info("call_tool: %s %s", tool_name, arguments)
     process = subprocess.Popen(
         [sys.executable, "-m", "cai.tools"],
         stdin=subprocess.PIPE,
@@ -253,10 +253,10 @@ def call_tool(tool_name, arguments):
                             }, 2)
 
         result = response.get("result", {}).get("content", [{}])[0].get("text")
-
+        log.info("call_tool result: %s: %s", tool_name, result)
         return result
     except Exception as e:
-        print(f"[!] call_tool exception: {e}")
+        log.error("call_tool exception: %s", e)
     finally:
         process.terminate()
 
@@ -296,7 +296,7 @@ def get_tools():
         process.terminate()
 
 def call_external_tool(server_path, tool_name, arguments):
-    print(f"[-] about to call {tool_name} ({arguments})")
+    log.info("call_external_tool: %s %s %s", server_path, tool_name, arguments)
     process = subprocess.Popen(
         ["python", server_path],
         stdin=subprocess.PIPE,
@@ -327,10 +327,10 @@ def call_external_tool(server_path, tool_name, arguments):
                             }, 2)
 
         result = response.get("result", {}).get("content", [{}])[0].get("text")
-
+        log.info("call_external_tool result: %s: %s", tool_name, result)
         return result
     except Exception as e:
-        print(f"[!] call_tool exception: {e}")
+        log.error("call_external_tool exception: %s", e)
     finally:
         process.terminate()
 
