@@ -278,7 +278,7 @@ def call_llm(messages, args, stream_callback=None):
 
         return "".join(accumulated)
 
-def prompt_line_by_line(args):
+def prompt_line_by_line(args, messages):
     if not sys.stdin.isatty():
         mode = "stdin"
         streaming_stdin = True
@@ -311,49 +311,62 @@ def prompt_line_by_line(args):
                     print(file=sys.stderr)
 
     def process_line(line):
-        messages = []
+        local_messages = messages.copy()
+        file_path = line_num = col_num = match_text = None
 
-        if args.system_prompt:
-            messages.append({"role": "system", "content": args.system_prompt})
+        if args.vimgrep:
+            parts = line.split(':', 3)
+            if len(parts) < 4:
+                with lock:
+                    print(f"[!] skipping malformed vimgrep line: {line}")
+                return
+            file_path, line_num, col_num, match_text = parts[0], parts[1], parts[2], parts[3]
+            try:
+                with open(file_path) as f:
+                    numbered_lines = [f"{i + 1}: {l}" for i, l in enumerate(f.readlines())]
+                messages.append({
+                    "role": "user",
+                    "content": f"<file_content>\n{''.join(numbered_lines)}</file_content>"
+                })
+            except (IOError, OSError) as e:
+                log.error("could not read %s: %s", file_path, e)
+                with lock:
+                    print(f"[!] could not read {file_path}: {e}")
+                return
+            local_messages.append({
+                "role": "user",
+                "content": (
+                    f"<match_location>\n"
+                    f"  file: {file_path}\n"
+                    f"  line: {line_num}\n"
+                    f"  column: {col_num}\n"
+                    f"  matched text: {match_text.strip()}\n"
+                    f"</match_location>"
+                )
+            })
+        else:
+            local_messages.append({"role": "user", "content": line})
 
-        if mode == "stdin":
-            if args.file:
-                file_content = []
-                i = 1
-                for fl in open(args.file).readlines():
-                    file_content.append(f"{i}: {fl}")
-                    i += 1
-                messages.append({"role": "user", "content": f"<file_content> {''.join(file_content)} </file_content>"})
+        local_messages.append({"role": "user", "content": args.prompt})
 
-        if args.location:
-            m = re.match(r"^(?P<file_path>.*):(?P<line_num>\d+):(?P<col_num>\d+)$", args.location)
-            if m:
-                fp = m.group('file_path')
-                ln = m.group('line_num')
-                cn = m.group('col_num')
-                fc = []
-                i = 1
-                for fl in open(fp).readlines():
-                    fc.append(f"{i}: {fl}")
-                    i += 1
-                messages.append({"role": "user", "content": f"<file_content> {''.join(fc)} </file_content>"})
-                messages.append({"role": "user", "content": f"<cursor_location> line number: {ln}, column number: {cn} </cursor_location>"})
-        messages.append({"role": "user", "content": line})
-
-        messages.append({"role": "user", "content": args.prompt})
-
-        response = call_llm(messages, args)
+        response = call_llm(local_messages, args)
 
         with lock:
             completed_count[0] += 1
             update_progress(completed_count[0])
             if args.oneline:
                 oneline_response = response.replace('\n', ' ')
-                print(f"{line}:{oneline_response}", flush=True)
+                if args.vimgrep:
+                    print(f"{file_path}:{line_num}:{col_num}:{oneline_response}", flush=True)
+                else:
+                    print(f"{line}:{oneline_response}", flush=True)
             else:
                 count_str = f"{completed_count[0]}/{total}" if total is not None else str(completed_count[0])
                 print(f"\n{'─' * 80}")
-                print(f"[{count_str}] {line}")
+                if args.vimgrep:
+                    print(f"[{count_str}] {file_path}:{line_num}:{col_num}  match: '{match_text.strip()}'")
+                else:
+                    print(f"[{count_str}] {line}")
                 print('─' * 80)
                 if response:
                     print(response)
@@ -381,40 +394,38 @@ def action_prompt(args):
         print("this action require --prompt to be provided.")
         return
 
-    if args.line_by_line:
-        return prompt_line_by_line(args)
-
     messages = []
-
     if args.system_prompt:
         messages.append({"role": "system", "content": args.system_prompt})
 
-    stdin = read_stdin_if_available()
-    if stdin:
-        messages.append({"role": "user", "content": stdin})
-    if args.file:
+    if not args.line_by_line:
+        stdin = read_stdin_if_available()
+        if stdin: messages.append({"role": "user", "content": stdin})
+
+    if args.file and ((not args.line_by_line) or not sys.stdin.isatty()):
         file_content = []
         i = 1
-        for line in open(args.file).readlines():
-            file_content.append(f"{i}: {line}")
+        for fl in open(args.file).readlines():
+            file_content.append(f"{i}: {fl}")
             i += 1
-        file_content = '\n'.join(file_content)
-        messages.append({"role": "user", "content": f"<file_content> {file_content} </file_content>"})
+        messages.append({"role": "user", "content": f"<file_content> {''.join(file_content)} </file_content>"})
+
     if args.location:
         m = re.match(r"^(?P<file_path>.*):(?P<line_num>\d+):(?P<col_num>\d+)$", args.location)
         if m:
-            file_path = m.group('file_path')
-            line_num = m.group('line_num')
-            col_num = m.group('col_num')
-
-            file_content = []
+            fp = m.group('file_path')
+            ln = m.group('line_num')
+            cn = m.group('col_num')
+            fc = []
             i = 1
-            for line in open(file_path).readlines():
-                file_content.append(f"{i}: {line}")
+            for fl in open(fp).readlines():
+                fc.append(f"{i}: {fl}")
                 i += 1
-            file_content = '\n'.join(file_content)
-            messages.append({"role": "user", "content": f"<file_content> {file_content} </file_content>"})
-            messages.append({"role": "user", "content": f"<cursor_location> line number: {line_num}, column number: {col_num} </cursor_location>"})
+            messages.append({"role": "user", "content": f"<file_content> {''.join(fc)} </file_content>"})
+            messages.append({"role": "user", "content": f"<cursor_location> line number: {ln}, column number: {cn} </cursor_location>"})
+
+    if args.line_by_line:
+        return prompt_line_by_line(args, messages)
 
     messages.append({"role": "user", "content": args.prompt})
 
@@ -430,108 +441,6 @@ def action_prompt(args):
             content = content.replace('\n', ' ')
         print(content)
 
-ACTION_VIMGREP = "vimgrep"
-def action_vimgrep(args):
-    if not args.prompt:
-        print("this action requires --prompt to be provided.")
-        return
-
-    if not args.stdin:
-        print("this action requires input piped from: rg --vimgrep <pattern>")
-        return
-
-    lines = [l for l in args.stdin.strip().split('\n') if l.strip()]
-    if not lines:
-        print("[!] no ripgrep lines found in stdin.")
-        return
-
-    total = len(lines)
-    completed_count = [0]
-    print_lock = threading.Lock()
-
-    def update_progress(completed):
-        if args.progress:
-            bar_len = 30
-            filled = int(bar_len * completed / total)
-            bar = '█' * filled + '░' * (bar_len - filled)
-            print(f'\rProgress: [{bar}] {completed}/{total} ', end='', flush=True, file=sys.stderr)
-            if completed == total:
-                print(file=sys.stderr)
-
-    def process_line(rg_line):
-        parts = rg_line.split(':', 3)
-        if len(parts) < 4:
-            with print_lock:
-                print(f"[!] skipping malformed line: {rg_line}")
-            return
-
-        file_path, line_num, col_num, match_text = parts[0], parts[1], parts[2], parts[3]
-
-        messages = []
-
-        if args.system_prompt:
-            messages.append({ "role": "system", "content": args.system_prompt })
-
-        try:
-            with open(file_path) as f:
-                numbered_lines = [f"{i + 1}: {line}" for i, line in enumerate(f.readlines())]
-            messages.append({
-                "role": "user",
-                "content": f"<file_content>\n{''.join(numbered_lines)}</file_content>"
-            })
-        except (IOError, OSError) as e:
-            log.error("could not read %s: %s", file_path, e)
-            with print_lock:
-                print(f"[!] could not read {file_path}: {e}")
-            return
-
-        messages.append({
-            "role": "user",
-            "content": (
-                f"<match_location>\n"
-                f"  file: {file_path}\n"
-                f"  line: {line_num}\n"
-                f"  column: {col_num}\n"
-                f"  matched text: {match_text.strip()}\n"
-                f"</match_location>"
-            )
-        })
-        messages.append({"role": "user", "content": args.prompt})
-
-        result = enforce_strict_format(
-            lambda: openai_api.chat(messages, model=args.model),
-            args.strict_format,
-        )
-        if not result:
-            return
-        content, reasoning, tool_calls = result
-
-        with print_lock:
-            completed_count[0] += 1
-            update_progress(completed_count[0])
-            if args.oneline:
-                oneline_content = content.replace('\n', ' ')
-                print(f"{file_path}:{line_num}:{col_num}:{oneline_content}", flush=True)
-            else:
-                print(f"\n{'─' * 80}")
-                print(f"[{completed_count[0]}/{total}] {file_path}:{line_num}:{col_num}  match: '{match_text.strip()}'")
-                print('─' * 80)
-                if args.include_reasoning and reasoning:
-                    print(reasoning)
-                    print('─' * 40)
-                if content:
-                    print(content)
-
-    with ThreadPoolExecutor(max_workers=args.cores) as executor:
-        futures = [executor.submit(process_line, line) for line in lines]
-        for future in as_completed(futures):
-            try:
-                future.result()
-            except Exception as e:
-                log.error("thread error in action_vimgrep: %s", e)
-                with print_lock:
-                    print(f"[!] thread error: {e}")
-
 ACTION_KNOWIT = "knowit"
 def action_knowit(args):
     pass
@@ -545,7 +454,6 @@ def main():
     parser.add_argument("-a", "--action",
                         choices=[
                             ACTION_PROMPT,
-                            ACTION_VIMGREP,
                             ACTION_KNOWIT,
                             ],
                         default=ACTION_PROMPT,
@@ -569,10 +477,12 @@ def main():
     tools_arg.completer = _tools_completer
     parser.add_argument('--cores',
                         type=int,
-                        default=4,
+                        default=1,
                         help="number of parallel threads for the grep action (default: 4).")
     parser.add_argument('--line-by-line', action='store_true', default=False,
                         help="process stdin (or --file) one line at a time, calling LLM per line.")
+    parser.add_argument('--vimgrep', action='store_true', default=False,
+                        help="treat each input line as vimgrep format (file:line:col:text), load file context automatically. implies --line-by-line.")
 
     # Must be called before init() so tab completion exits immediately without
     # running any heavy initialization (API clients, tree-sitter, etc.).
@@ -593,10 +503,11 @@ def main():
         else:
             args.internal_tools.add(entry)
 
+    if args.vimgrep:
+        args.line_by_line = True
+
     if args.action == ACTION_PROMPT:
         action_prompt(args)
-    if args.action == ACTION_VIMGREP:
-        action_vimgrep(args)
     if args.action == ACTION_KNOWIT:
         action_knowit(args)
 
