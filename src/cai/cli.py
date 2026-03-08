@@ -25,6 +25,27 @@ logging.basicConfig(
 log = logging.getLogger("cai")
 
 
+def _tools_completer(prefix, **kwargs):
+    """Completer for --tools: file paths for external MCPs, tool names for internal."""
+    import glob as _glob
+    import re as _re
+
+    # If it looks like a path, complete as file
+    if prefix.startswith('/') or prefix.startswith('./') or prefix.startswith('../') or os.sep in prefix:
+        matches = _glob.glob(prefix + '*')
+        return matches
+
+    # Otherwise complete internal tool names from tools.py
+    tools_file = os.path.join(os.path.dirname(__file__), 'tools.py')
+    try:
+        with open(tools_file) as f:
+            content = f.read()
+        names = _re.findall(r'@mcp\.tool\(\)\s+def\s+(\w+)', content)
+        return [n for n in names if n.startswith(prefix)]
+    except Exception:
+        return []
+
+
 def setup_shell_completion():
     config_dir = os.path.expanduser("~/.config/cai")
     flag = os.path.join(config_dir, "completion_setup")
@@ -537,11 +558,12 @@ def main():
     parser.add_argument("--codebase", action="store_true", help="let the action be aware of the codebase.")
     parser.add_argument("--include-reasoning", action="store_true", help="let the action know whether or not to include reasoning in the output.")
     parser.add_argument("--non-streaming", action="store_true", help="let the action know whether or not to use the non-streaming api.")
-    parser.add_argument('-t',
+    tools_arg = parser.add_argument('-t',
                         '--tools',
                         nargs='+',
                         default=[],
                         help="list of mcp tools to give the LLM. the tools come in the form of abosult paths to the python files implementing the mcp server.")
+    tools_arg.completer = _tools_completer
     parser.add_argument('--cores',
                         type=int,
                         default=4,
