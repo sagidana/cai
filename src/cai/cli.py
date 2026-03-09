@@ -89,6 +89,8 @@ def init():
     global call_external_tool
     global get_external_tools
 
+    log.info("init: starting")
+
     import cai.api as _cai_api
     import cai.tools as _cai_tools
     OpenAiApi = _cai_api.OpenAiApi
@@ -122,6 +124,7 @@ def init():
     api_key = open(api_key_path).read().strip()
     openai_api = OpenAiApi(config.get('base_url'), api_key)
     openrouter_api = OpenRouterApi(api_key)
+    log.info("init: done (base_url=%s, tools=%d)", config.get('base_url'), len(tools))
 
     # models = openrouter_api.get_models()
     # stats = openrouter_api.get_account_stats()
@@ -140,6 +143,7 @@ def read_stdin_if_available():
 
 def handle_tool_calls(tool_calls, messages, call_content):
     global external_mcps
+    log.info("handle_tool_calls: dispatching %d tool call(s)", len(tool_calls))
     for call in tool_calls:
         if call.get('type') != 'function':
             print(f"[!] got tool call with invalid type: {call.get('type')}")
@@ -163,12 +167,15 @@ def handle_tool_calls(tool_calls, messages, call_content):
                 for tool in tools:
                     tool_name = tool.get('function',{}).get('name')
                     if tool_name == call_name:
+                        log.info("tool call: %s (external, mcp=%s) args=%s", call_name, mcp_path, call_args)
                         result = call_external_tool(mcp_path, call_name, call_args)
                         called_external = True
 
             if not called_external:
+                log.info("tool call: %s (internal) args=%s", call_name, call_args)
                 result = call_tool(call_name, call_args)
 
+            log.info("tool call: %s -> result length=%d", call_name, len(result) if result else 0)
             assert result is not None, "[!] failed to call tool: {call=}"
 
             request_message = {}
@@ -231,6 +238,10 @@ def call_llm(messages, args, stream_callback=None):
     # when strict_format is requested so enforcement actually works.
     use_non_streaming = args.non_streaming or bool(args.strict_format)
 
+    log.info("call_llm: model=%s messages=%d tools=%d streaming=%s strict_format=%s",
+             args.model, len(messages), len(included_tools), not use_non_streaming,
+             args.strict_format or "none")
+
     if use_non_streaming:
         result = enforce_strict_format(
             lambda: openai_api.chat(messages,
@@ -244,7 +255,7 @@ def call_llm(messages, args, stream_callback=None):
         content, reasoning, tool_calls = result
         if tool_calls:
             handle_tool_calls(tool_calls, messages, content) # updates messages.
-
+            log.info("call_llm: tool calls handled, making follow-up LLM call")
             result = enforce_strict_format(
                 lambda: openai_api.chat(messages, model=args.model), # no tools available this time.
                 args.strict_format,
@@ -252,6 +263,7 @@ def call_llm(messages, args, stream_callback=None):
             if not result:
                 return content or ""
             content, reasoning, tool_calls = result
+        log.info("call_llm: done (non-streaming), response length=%d", len(content) if content else 0)
         return content or ""
     else:
         # Streaming path — no strict_format enforcement (see above).
@@ -268,26 +280,27 @@ def call_llm(messages, args, stream_callback=None):
                 handle_tool_calls(tool_calls, messages, "".join(accumulated))
                 tool_calls_happened = True
 
-
         if tool_calls_happened:
+            log.info("call_llm: tool calls handled, making follow-up streaming call")
             accumulated = []
             for content, _ in openai_api.chat_stream(messages, model=args.model): # no tools available this time.
                 if content:
                     accumulated.append(content)
                     if stream_callback: stream_callback(content)
 
+        log.info("call_llm: done (streaming), response length=%d", len("".join(accumulated)))
         return "".join(accumulated)
 
 def prompt_line_by_line(args, messages):
     if not sys.stdin.isatty():
-        mode = "stdin"
+        log.info("prompt_line_by_line: mode=streaming_stdin")
         streaming_stdin = True
         lines = None
     elif args.file:
-        mode = "file"
         streaming_stdin = False
         with open(args.file) as f:
             lines = [l.rstrip('\n') for l in f if l.strip()]
+        log.info("prompt_line_by_line: mode=file file=%s lines=%d", args.file, len(lines))
     else:
         print("--line-by-line requires piped stdin or --file.")
         return
@@ -394,15 +407,21 @@ def action_prompt(args):
         print("this action require --prompt to be provided.")
         return
 
+    log.info("action_prompt: model=%s file=%s location=%s line_by_line=%s vimgrep=%s oneline=%s",
+             args.model, args.file, args.location, args.line_by_line, args.vimgrep, args.oneline)
+
     messages = []
     if args.system_prompt:
         messages.append({"role": "system", "content": args.system_prompt})
 
     if not args.line_by_line:
         stdin = read_stdin_if_available()
-        if stdin: messages.append({"role": "user", "content": stdin})
+        if stdin:
+            log.info("action_prompt: including stdin (%d bytes)", len(stdin))
+            messages.append({"role": "user", "content": stdin})
 
     if args.file and ((not args.line_by_line) or not sys.stdin.isatty()):
+        log.info("action_prompt: including file %s", args.file)
         file_content = []
         i = 1
         for fl in open(args.file).readlines():
@@ -416,6 +435,7 @@ def action_prompt(args):
             fp = m.group('file_path')
             ln = m.group('line_num')
             cn = m.group('col_num')
+            log.info("action_prompt: including location %s:%s:%s", fp, ln, cn)
             fc = []
             i = 1
             for fl in open(fp).readlines():
@@ -430,12 +450,14 @@ def action_prompt(args):
     messages.append({"role": "user", "content": args.prompt})
 
     if not args.non_streaming and not args.oneline:         # streaming flow
+        log.info("action_prompt: calling LLM (streaming)")
         def _write(chunk):
             sys.stdout.write(chunk)
             sys.stdout.flush()
         call_llm(messages, args, stream_callback=_write)
         print()
     else:                                                   # non-streaming flow
+        log.info("action_prompt: calling LLM (non-streaming)")
         content = call_llm(messages, args)
         if args.oneline:
             content = content.replace('\n', ' ')
@@ -513,12 +535,17 @@ def main():
     args.internal_tools = set()
     for entry in args.tools:
         if os.path.isfile(entry) or entry.endswith('.py'):
+            log.info("main: loading external MCP %s", entry)
             external_mcps[entry] = get_external_tools(entry)
         else:
+            log.info("main: enabling internal tool %s", entry)
             args.internal_tools.add(entry)
 
     if args.vimgrep:
         args.line_by_line = True
+
+    log.info("main: action=%s model=%s internal_tools=%s external_mcps=%s",
+             args.action, args.model, sorted(args.internal_tools), list(external_mcps.keys()))
 
     if args.action == ACTION_PROMPT:
         action_prompt(args)
