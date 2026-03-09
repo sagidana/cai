@@ -519,6 +519,8 @@ def main():
                         help="process stdin (or --file) one line at a time, calling LLM per line.")
     parser.add_argument('--vimgrep', action='store_true', default=False,
                         help="treat each input line as vimgrep format (file:line:col:text), load file context automatically. implies --line-by-line.")
+    parser.add_argument('prompt_words', nargs='*',
+                        help="prompt words after -- (alternative to -p)")
 
     # Must be called before init() so tab completion exits immediately without
     # running any heavy initialization (API clients, tree-sitter, etc.).
@@ -528,6 +530,10 @@ def main():
     setup_shell_completion()
 
     args = parser.parse_args()
+    if args.prompt_words:
+        if args.prompt:
+            parser.error("cannot use both -p/--prompt and trailing words after --")
+        args.prompt = " ".join(args.prompt_words)
     if args.model is None:
         args.model = config.get('model', "arcee-ai/trinity-mini:free")
 
