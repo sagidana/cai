@@ -441,6 +441,13 @@ def action_prompt(args):
             content = content.replace('\n', ' ')
         print(content)
 
+ACTION_INDEX = "index"
+def action_index(args):
+    if not args.index:
+        print("this action require --index to be provided.")
+        return
+    pass
+
 def main():
     global external_mcps
     global config
@@ -450,29 +457,41 @@ def main():
     parser.add_argument("-a", "--action",
                         choices=[
                             ACTION_PROMPT,
+                            ACTION_INDEX,
                             ],
                         default=ACTION_PROMPT,
                         help="the actiont to be performed.")
-    parser.add_argument("-p", "--prompt", help="the prompt to send to the LLM.")
-    parser.add_argument("--system-prompt", help="the system prompt to send to the LLM.")
-    parser.add_argument("--cwd", default=".", help="the current working for the script to operate at.")
-    parser.add_argument("--file", help="file path to include in the LLM context.")
-    parser.add_argument("--location", help="the location in the codebase to be used by the action. in the format of => <file_path>:<line_num>:<col_num>")
-    parser.add_argument("--model", default=None, help="the model to be used by the LLM")
-    parser.add_argument("--progress", action="store_true", help="show progess bar.")
-    parser.add_argument("--oneline", action="store_true", help="print results in a vimgrep style format, oneline all data.")
-    parser.add_argument("--strict-format", default=None, choices=['json'], help="the expected format provided from the LLM response.")
-    parser.add_argument("--include-reasoning", action="store_true", help="let the action know whether or not to include reasoning in the output.")
-    parser.add_argument("--non-streaming", action="store_true", help="let the action know whether or not to use the non-streaming api.")
+    parser.add_argument("-p", "--prompt",
+                        help="the prompt to send to the LLM.")
+    parser.add_argument("--system-prompt",
+                        help="the system prompt to send to the LLM.")
+    parser.add_argument("--cwd", default=".",
+                        help="the current working for the script to operate at.")
+    parser.add_argument("--index",
+                        help="the index name for the index action to index into.")
+    parser.add_argument("--file",
+                        help="file path to include in the LLM context.")
+    parser.add_argument("--location",
+                        help="the location in the codebase to be used by the action. in the format of => <file_path>:<line_num>:<col_num>")
+    parser.add_argument("--model", default=None,
+                        help="the model to be used by the LLM")
+    parser.add_argument("--progress", action="store_true",
+                        help="show progess bar.")
+    parser.add_argument("--oneline", action="store_true",
+                        help="print results in a vimgrep style format, oneline all data.")
+    parser.add_argument("--strict-format", default=None, choices=['json'],
+                        help="the expected format provided from the LLM response.")
+    parser.add_argument("--include-reasoning", action="store_true",
+                        help="let the action know whether or not to include reasoning in the output.")
+    parser.add_argument("--non-streaming", action="store_true",
+                        help="let the action know whether or not to use the non-streaming api.")
     tools_arg = parser.add_argument('-t',
                         '--tools',
                         nargs='+',
                         default=[],
                         help="list of mcp tools to give the LLM. the tools come in the form of abosult paths to the python files implementing the mcp server.")
     tools_arg.completer = _tools_completer
-    parser.add_argument('--cores',
-                        type=int,
-                        default=1,
+    parser.add_argument('--cores', type=int, default=1,
                         help="number of parallel threads for the grep action (default: 4).")
     parser.add_argument('--line-by-line', action='store_true', default=False,
                         help="process stdin (or --file) one line at a time, calling LLM per line.")
@@ -503,6 +522,8 @@ def main():
 
     if args.action == ACTION_PROMPT:
         action_prompt(args)
+    if args.action == ACTION_INDEX:
+        action_index(args)
 
 
 if __name__ == "__main__":
