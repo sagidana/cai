@@ -449,14 +449,14 @@ def action_prompt(args):
 
     messages.append({"role": "user", "content": args.prompt})
 
-    if not args.non_streaming and not args.oneline:         # streaming flow
+    if not args.non_streaming and not args.oneline and not args.strict_format: # streaming flow
         log.info("action_prompt: calling LLM (streaming)")
         def _write(chunk):
             sys.stdout.write(chunk)
             sys.stdout.flush()
         call_llm(messages, args, stream_callback=_write)
         print()
-    else:                                                   # non-streaming flow
+    else:                                                                      # non-streaming flow
         log.info("action_prompt: calling LLM (non-streaming)")
         content = call_llm(messages, args)
         if args.oneline:
