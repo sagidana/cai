@@ -1,5 +1,8 @@
 import json
+import logging
 import requests
+
+log = logging.getLogger("cai")
 
 
 class OpenRouterApi:
@@ -33,7 +36,7 @@ class OpenAiApi:
         self.base_url = base_url
         self.api_key = api_key
 
-    def chat(self, messages, model, system_prompt=None, tools=None):
+    def chat(self, messages, model, system_prompt=None, tools=None, tool_choice="auto"):
         url = f"{self.base_url}/chat/completions"
         headers = {}
         headers['Authorization'] = f"Bearer {self.api_key}"
@@ -45,7 +48,7 @@ class OpenAiApi:
         data['messages'] = []
         if tools:
             data['tools'] = tools
-            data['tool_choice'] = "auto"
+            data['tool_choice'] = tool_choice
 
         if system_prompt:
             data['messages'].append(system_prompt)
@@ -77,7 +80,7 @@ class OpenAiApi:
 
         return content, reasoning, tool_calls, usage
 
-    def chat_stream(self, messages, model, system_prompt=None, tools=None):
+    def chat_stream(self, messages, model, system_prompt=None, tools=None, tool_choice="auto"):
         url = f"{self.base_url}/chat/completions"
         headers = {}
         headers['Authorization'] = f"Bearer {self.api_key}"
@@ -89,7 +92,7 @@ class OpenAiApi:
         data['messages'] = []
         if tools:
             data['tools'] = tools
-            data['tool_choice'] = "auto"
+            data['tool_choice'] = tool_choice
 
         if system_prompt:
             data['messages'].append(system_prompt)
@@ -97,6 +100,8 @@ class OpenAiApi:
         data['messages'].extend(messages)
         data['stream'] = True
         data['stream_options'] = {"include_usage": True}
+
+        log.info("chat_stream: model=%s tools=%d tool_choice=%s", model, len(tools or []), tool_choice)
 
         finished_tool_calls = None
         tool_calls = {}
@@ -122,29 +127,37 @@ class OpenAiApi:
 
                 choice = chunk["choices"][0]
                 finish_reason = choice.get('finish_reason', None)
-                if finish_reason == "tool_calls":
-                    finished_tool_calls = list(tool_calls.values())
-                    tool_calls = {}
-
                 delta = choice["delta"]
 
+                # Process tool call delta fragments BEFORE snapshotting finish_reason,
+                # so the snapshot captures data from the final chunk too.
                 if "tool_calls" in delta:
                     for tool_call in delta['tool_calls']:
                         idx = tool_call['index']
                         if idx not in tool_calls:
-                            tool_calls[idx] = {}
-                            tool_calls[idx]['index'] = tool_call.get('index')
-                            tool_calls[idx]['id'] = tool_call.get('id')
-                            tool_calls[idx]['type'] = "function"
-                            tool_calls[idx]['function'] = {}
-
-                            tool_calls[idx]['function']['name'] = tool_call.get('function', {}).get('name')
-                            tool_calls[idx]['function']['arguments'] = ""
-
+                            tool_calls[idx] = {
+                                'index': tool_call.get('index'),
+                                'id': tool_call.get('id'),
+                                'type': "function",
+                                'function': {
+                                    'name': tool_call.get('function', {}).get('name'),
+                                    'arguments': "",
+                                },
+                            }
                         args = tool_call.get('function', {}).get('arguments')
-                        if not args: continue
+                        if args:
+                            tool_calls[idx]['function']['arguments'] += args
 
-                        tool_calls[idx]['function']['arguments'] += args
+                # "tool_calls" (OpenAI) and "tool_use" (Anthropic native) are both valid.
+                # Guard: only snapshot when tool_calls is non-empty — some providers fire
+                # finish_reason="tool_calls" twice, and the second time tool_calls is already
+                # reset to {}, which would overwrite the valid snapshot with an empty list.
+                if finish_reason in ("tool_calls", "tool_use") and tool_calls:
+                    log.info("chat_stream: finish_reason=%s tool_calls_count=%d", finish_reason, len(tool_calls))
+                    finished_tool_calls = list(tool_calls.values())
+                    tool_calls = {}
+                elif finish_reason:
+                    log.info("chat_stream: finish_reason=%s", finish_reason)
 
                 content = delta.get('content', None)
 

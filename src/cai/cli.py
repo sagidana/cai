@@ -52,6 +52,27 @@ MODEL_PROFILES = {
     "_default":                       {"tier": "mid",   "context": 16000,  "tool_calling": True},
 }
 
+AGENTIC_SYSTEM_PROMPTS = {
+    'small': (
+        "You are a CLI assistant with access to tools. "
+        "You MUST use the available tools to answer questions — do not guess or make up information. "
+        "Follow this process: 1) Call the appropriate tool. 2) Read the result carefully. "
+        "3) Answer based only on what the tool returned. "
+        "Do not ask clarifying questions. Output only the final answer, nothing else."
+    ),
+    'mid': (
+        "You are a CLI assistant with access to tools. "
+        "Use tools to gather information before answering. "
+        "Do not ask clarifying questions — make reasonable assumptions. "
+        "Be concise in your final response."
+    ),
+    'large': (
+        "You are a CLI assistant. Use available tools to answer accurately. "
+        "Do not ask clarifying questions. Be concise."
+    ),
+}
+
+
 def get_model_profile(model_id):
     """Return capability profile for model_id.
 
@@ -286,10 +307,11 @@ def enforce_strict_format(call_fn, strict_format):
                 continue
     return call_fn()
 
-def _run_nonstreaming_turn(messages, args, included_tools, stream_callback=None):
+def _run_nonstreaming_turn(messages, args, included_tools, stream_callback=None, tool_choice="auto"):
     """Single non-streaming LLM call. Returns (content, tool_calls, usage)."""
     result = enforce_strict_format(
-        lambda: openai_api.chat(messages, model=args.model, tools=included_tools),
+        lambda: openai_api.chat(messages, model=args.model, tools=included_tools,
+                                tool_choice=tool_choice),
         args.strict_format,
     )
     if not result:
@@ -297,13 +319,13 @@ def _run_nonstreaming_turn(messages, args, included_tools, stream_callback=None)
     content, _reasoning, tool_calls, usage = result
     return content or "", tool_calls, usage
 
-def _run_streaming_turn(messages, args, included_tools, stream_callback):
+def _run_streaming_turn(messages, args, included_tools, stream_callback, tool_choice="auto"):
     """Single streaming LLM call. Returns (accumulated_text, tool_calls, usage)."""
     accumulated = []
     last_tool_calls = None
     usage = {}
     for chunk, tool_calls, usage in openai_api.chat_stream(
-            messages, model=args.model, tools=included_tools):
+            messages, model=args.model, tools=included_tools, tool_choice=tool_choice):
         if chunk:
             accumulated.append(chunk)
             if stream_callback:
@@ -311,6 +333,63 @@ def _run_streaming_turn(messages, args, included_tools, stream_callback):
         if tool_calls:
             last_tool_calls = tool_calls
     return "".join(accumulated), last_tool_calls, usage
+
+CONTEXT_BUDGET_THRESHOLDS = {'small': 0.60, 'mid': 0.75, 'large': 0.80}
+
+
+def _compact_messages(messages, model):
+    """Summarize middle turns into a memory message to free up context space."""
+    # Determine the slice to compact: after [system?][first_user], before last 4 messages
+    start_idx = 0
+    if messages and messages[0].get('role') == 'system':
+        start_idx = 1
+    if start_idx < len(messages) and messages[start_idx].get('role') == 'user':
+        start_idx += 1
+
+    end_idx = max(start_idx, len(messages) - 4)
+    compactable = messages[start_idx:end_idx]
+    if len(compactable) < 2:
+        log.info("compaction: not enough messages to compact (%d)", len(compactable))
+        return
+
+    compaction_msgs = [{"role": "user", "content": (
+        "Summarize the following conversation turns into a concise memory entry. "
+        "Preserve all key facts, tool results, findings, and decisions. "
+        "Be specific and concrete. Output only the summary, no preamble.\n\n"
+        f"{json.dumps(compactable, indent=2)}"
+    )}]
+
+    result = openai_api.chat(compaction_msgs, model=model)
+    if not result:
+        log.warning("compaction: LLM call failed, skipping")
+        return
+
+    summary, _, _, _ = result
+    memory = {"role": "system", "content": f"[memory from compacted turns]: {summary}"}
+    log.info("compaction: replaced %d messages with memory (%d chars)", len(compactable), len(summary))
+    messages[start_idx:end_idx] = [memory]
+
+
+def _check_context_budget(messages, usage, profile, args):
+    """Compact messages if prompt token usage exceeds the tier threshold."""
+    prompt_tokens = usage.get('prompt_tokens', 0)
+    context_limit = profile.get('context', 16000)
+    if not prompt_tokens or not context_limit:
+        return
+
+    budget_pct = prompt_tokens / context_limit
+    default_threshold = CONTEXT_BUDGET_THRESHOLDS.get(profile['tier'], 0.75)
+    threshold = config.get('context_budget_pct', default_threshold) \
+        if 'config' in globals() and config else default_threshold
+
+    if budget_pct >= threshold:
+        log.warning("context budget: %.0f%% used (%d/%d tokens), compacting",
+                    budget_pct * 100, prompt_tokens, context_limit)
+        if getattr(args, 'debug', False):
+            print(f"\n[debug] context {budget_pct:.0%} >= threshold {threshold:.0%}, compacting...",
+                  file=sys.stderr, flush=True)
+        _compact_messages(messages, args.model)
+
 
 def _warn_if_stuck(tool_calls, call_history, messages):
     """Track repeated identical tool calls and inject a warning into messages when stuck."""
@@ -368,9 +447,20 @@ def call_llm(messages, args, stream_callback=None):
         if agentic and not getattr(args, 'oneline', False):
             print(f"[turn {turn}/{max_turns}]", end="\r", file=sys.stderr, flush=True)
 
-        content, tool_calls, usage = run_turn(messages, args, included_tools, stream_callback)
+        # Force at least one tool call on turn 1 in agentic mode so the model
+        # doesn't skip tools and answer directly from training data.
+        tool_choice = "required" if (agentic and turn == 1 and included_tools) else "auto"
+        content, tool_calls, usage = run_turn(messages, args, included_tools, stream_callback,
+                                              tool_choice=tool_choice)
         log.info("call_llm: turn=%d tokens prompt=%s completion=%s total=%s",
                  turn, usage.get('prompt_tokens'), usage.get('completion_tokens'), usage.get('total_tokens'))
+
+        if getattr(args, 'debug', False):
+            prompt_tokens = usage.get('prompt_tokens', 0)
+            tool_names = [c.get('function', {}).get('name', '?') for c in (tool_calls or [])]
+            pct = f"{prompt_tokens / profile['context']:.0%}" if profile['context'] else "?"
+            print(f"[debug] turn={turn}/{max_turns} tokens={prompt_tokens}/{profile['context']} ({pct})"
+                  f" tools={tool_names}", file=sys.stderr, flush=True)
 
         if not tool_calls:
             log.info("call_llm: done turn=%d length=%d", turn, len(content))
@@ -378,6 +468,9 @@ def call_llm(messages, args, stream_callback=None):
 
         handle_tool_calls(tool_calls, messages, content)
         _warn_if_stuck(tool_calls, call_history, messages)
+
+        if agentic:
+            _check_context_budget(messages, usage, profile, args)
 
         if not agentic:
             # Non-agentic: one follow-up call without tools, then done
@@ -532,6 +625,11 @@ def action_prompt(args):
     messages = []
     if args.system_prompt:
         messages.append({"role": "system", "content": args.system_prompt})
+    elif getattr(args, 'agentic', False):
+        profile = get_model_profile(args.model)
+        prompt_text = AGENTIC_SYSTEM_PROMPTS.get(profile['tier'], AGENTIC_SYSTEM_PROMPTS['mid'])
+        messages.append({"role": "system", "content": prompt_text})
+        log.info("action_prompt: injected agentic system prompt (tier=%s)", profile['tier'])
 
     if not args.line_by_line:
         stdin = read_stdin_if_available()
@@ -615,6 +713,8 @@ def main():
                         help="enable multi-turn agentic loop: LLM keeps calling tools until done.")
     parser.add_argument("--max-turns", type=int, default=None,
                         help="max tool-call turns in agentic mode (default: 5/10/20 by model tier).")
+    parser.add_argument("--debug", action="store_true",
+                        help="print per-turn token counts and tool calls to stderr.")
     tools_arg = parser.add_argument('-t',
                         '--tools',
                         nargs='+',
