@@ -45,12 +45,12 @@ class OpenAiApi:
         data['messages'] = []
         if tools:
             data['tools'] = tools
+            data['tool_choice'] = "auto"
 
         if system_prompt:
             data['messages'].append(system_prompt)
 
         data['messages'].extend(messages)
-        data['tool_choice'] = "auto"
 
         r = requests.post(url, headers=headers, json=data)
         if r.status_code != 200:
@@ -88,12 +88,12 @@ class OpenAiApi:
         data['messages'] = []
         if tools:
             data['tools'] = tools
+            data['tool_choice'] = "auto"
 
         if system_prompt:
             data['messages'].append(system_prompt)
 
         data['messages'].extend(messages)
-        data['tool_choice'] = "auto"
         data['stream'] = True
 
         finished_tool_calls = None
