@@ -272,7 +272,7 @@ def _execute_tool(call_name, arguments):
     return trim_tool_result(result)
 
 
-def handle_tool_calls(tool_calls, messages, call_content):
+def handle_tool_calls(tool_calls, messages, call_content, tool_callback=None):
     log.info("handle_tool_calls: dispatching %d tool call(s)", len(tool_calls))
     for call in tool_calls:
         if call.get('type') != 'function':
@@ -283,6 +283,8 @@ def handle_tool_calls(tool_calls, messages, call_content):
         call_name = call_function.get('name')
         arguments = call_function.get('arguments') or ''
         result = _execute_tool(call_name, arguments)
+        if tool_callback:
+            tool_callback(f"  <- {call_name}: {len(result)} chars\n")
         messages.append({
             'role': 'assistant',
             'content': call_content or '',
@@ -421,7 +423,7 @@ def _emit_status(text, status_callback, stream_callback):
         print(text, end="\r", file=sys.stderr, flush=True)
 
 
-def call_llm(messages, args, stream_callback=None, status_callback=None):
+def call_llm(messages, args, stream_callback=None, status_callback=None, tool_callback=None):
     global external_mcps
 
     # handling available tools for LLM.
@@ -483,15 +485,23 @@ def call_llm(messages, args, stream_callback=None, status_callback=None):
                 raw_args = c.get('function', {}).get('arguments', '')
                 try:
                     parsed = json.loads(raw_args) if raw_args else {}
-                    args_str = ", ".join(f"{k}={json.dumps(v)}" for k, v in parsed.items())
+                    args_str = ", ".join(
+                        f"{k}={json.dumps(v)[:80]}{'...' if len(json.dumps(v)) > 80 else ''}"
+                        for k, v in parsed.items()
+                    )
                 except Exception:
-                    args_str = raw_args
+                    args_str = raw_args[:160] + ("..." if len(raw_args) > 160 else "")
                 return f"{name}({args_str})"
             tool_calls_fmt = [_fmt_call(c) for c in tool_calls]
             status = f"[turn {turn}/{max_turns}] {ctx_str} | {', '.join(tool_calls_fmt)}"
             _emit_status(status, status_callback, stream_callback)
+            if tool_callback:
+                for fmt in tool_calls_fmt:
+                    tool_callback(f"-> {fmt}\n")
 
-        handle_tool_calls(tool_calls, messages, content)
+        handle_tool_calls(tool_calls, messages, content, tool_callback=tool_callback)
+        if tool_callback:
+            tool_callback("\n")
         _warn_if_stuck(tool_calls, call_history, messages)
 
         if agentic:
@@ -738,11 +748,15 @@ def action_interactive(args):
     def status_callback(text):
         screen.set_status(f"{args.model} | {text}")
 
-    _LLM_STYLE = Screen._LLM_STYLE
-    _RESET     = Screen._RESET
+    _LLM_STYLE  = Screen._LLM_STYLE
+    _META_STYLE = Screen._META_STYLE
+    _RESET      = Screen._RESET
 
     def stream_cb(chunk):
         screen.write(chunk)
+
+    def tool_cb(line):
+        screen.write(f"{_META_STYLE}{line}{_RESET}")
 
     try:
         # If an initial prompt was given (-p or trailing words), run it first
@@ -755,7 +769,8 @@ def action_interactive(args):
             screen.write(_LLM_STYLE)
             response = call_llm(messages, args,
                                 stream_callback=stream_cb,
-                                status_callback=status_callback)
+                                status_callback=status_callback,
+                                tool_callback=tool_cb)
             screen.write(f"\n{_RESET}\n")
             if response:
                 messages.append({"role": "assistant", "content": response})
@@ -772,7 +787,8 @@ def action_interactive(args):
             screen.write(_LLM_STYLE)
             response = call_llm(messages, args,
                                 stream_callback=stream_cb,
-                                status_callback=status_callback)
+                                status_callback=status_callback,
+                                tool_callback=tool_cb)
             screen.write(f"\n{_RESET}\n")
             if response:
                 messages.append({"role": "assistant", "content": response})
@@ -783,13 +799,6 @@ def action_interactive(args):
         screen.close()
 
 
-ACTION_INDEX = "index"
-def action_index(args):
-    if not args.index:
-        print("this action require --index to be provided.")
-        return
-    pass
-
 def main():
     global external_mcps
     global config
@@ -799,7 +808,6 @@ def main():
     parser.add_argument("-a", "--action",
                         choices=[
                             ACTION_PROMPT,
-                            ACTION_INDEX,
                             ],
                         default=ACTION_PROMPT,
                         help="the actiont to be performed.")
@@ -894,8 +902,6 @@ def main():
 
     if args.action == ACTION_PROMPT:
         action_prompt(args)
-    if args.action == ACTION_INDEX:
-        action_index(args)
 
 
 if __name__ == "__main__":
