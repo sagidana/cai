@@ -144,60 +144,77 @@ def read_stdin_if_available():
 def handle_tool_calls(tool_calls, messages, call_content):
     global external_mcps
     log.info("handle_tool_calls: dispatching %d tool call(s)", len(tool_calls))
+
+    # Build set of all known tool names for validation
+    known_tool_names = {t.get('function', {}).get('name') for t in tools}
+    for mcp_tools in external_mcps.values():
+        known_tool_names.update(t.get('function', {}).get('name') for t in mcp_tools)
+
     for call in tool_calls:
         if call.get('type') != 'function':
-            print(f"[!] got tool call with invalid type: {call.get('type')}")
+            log.warning("tool call with invalid type: %s", call.get('type'))
             continue
-        try:
-            call_id = call.get('id')
-            call_function = call.get('function')
-            call_name = call_function.get('name')
-            arguments = call_function.get('arguments')
-            if len(arguments) > 0:
-                call_args = json.loads(call_function.get('arguments'))
-            else:
+
+        call_id = call.get('id')
+        call_function = call.get('function', {})
+        call_name = call_function.get('name')
+        arguments = call_function.get('arguments') or ''
+
+        # Validate tool name
+        if call_name not in known_tool_names:
+            result = f"Error: unknown tool '{call_name}'. Available tools: {sorted(known_tool_names)}"
+            log.warning("tool call: unknown tool '%s'", call_name)
+        else:
+            # Validate and parse arguments JSON
+            try:
+                call_args = json.loads(arguments) if arguments else {}
+            except json.JSONDecodeError as e:
+                result = f"Error: tool '{call_name}' received invalid JSON arguments: {e}. Raw arguments: {arguments!r}"
+                log.warning("tool call: bad JSON args for '%s': %s", call_name, e)
                 call_args = {}
+            else:
+                # Dispatch to external or internal tool
+                called_external = False
+                result = None
+                try:
+                    for mcp_path in external_mcps:
+                        for tool in external_mcps[mcp_path]:
+                            if tool.get('function', {}).get('name') == call_name:
+                                log.info("tool call: %s (external, mcp=%s) args=%s", call_name, mcp_path, call_args)
+                                result = call_external_tool(mcp_path, call_name, call_args)
+                                called_external = True
+                    if not called_external:
+                        log.info("tool call: %s (internal) args=%s", call_name, call_args)
+                        result = call_tool(call_name, call_args)
+                except Exception as e:
+                    result = f"Error: tool '{call_name}' raised an exception: {e}"
+                    log.error("tool call: %s raised: %s", call_name, e)
 
-            called_external = False
-            result = None
+                if result is None:
+                    result = f"Error: tool '{call_name}' returned no result"
+                    log.warning("tool call: %s returned None", call_name)
+                else:
+                    log.info("tool call: %s -> result length=%d", call_name, len(result))
 
-            # external tools takes precedent.
-            for mcp_path in external_mcps:
-                tools = external_mcps[mcp_path]
-                for tool in tools:
-                    tool_name = tool.get('function',{}).get('name')
-                    if tool_name == call_name:
-                        log.info("tool call: %s (external, mcp=%s) args=%s", call_name, mcp_path, call_args)
-                        result = call_external_tool(mcp_path, call_name, call_args)
-                        called_external = True
-
-            if not called_external:
-                log.info("tool call: %s (internal) args=%s", call_name, call_args)
-                result = call_tool(call_name, call_args)
-
-            log.info("tool call: %s -> result length=%d", call_name, len(result) if result else 0)
-            assert result is not None, "[!] failed to call tool: {call=}"
-
-            request_message = {}
-            request_message['role'] = 'assistant'
-            request_message['content'] = call_content
-            request_message['tool_calls'] = [{}]
-            request_message['tool_calls'][0]['id'] = call_id
-            request_message['tool_calls'][0]['type'] = "function"
-            request_message['tool_calls'][0]['function'] = {}
-            request_message['tool_calls'][0]['function']['arguments'] = json.dumps(call_args)
-            request_message['tool_calls'][0]['function']['name'] = call_name
-
-            response_message = {}
-            response_message['role'] = 'tool'
-            response_message['tool_call_id'] = call_id
-            response_message['content'] = result
-
-            messages.append(request_message)
-            messages.append(response_message)
-        except Exception as e:
-            log.error("tool_call exception: %s %s", e, json.dumps(call, indent=2))
-            continue
+        request_message = {
+            'role': 'assistant',
+            'content': call_content or '',
+            'tool_calls': [{
+                'id': call_id,
+                'type': 'function',
+                'function': {
+                    'name': call_name,
+                    'arguments': arguments,
+                }
+            }]
+        }
+        response_message = {
+            'role': 'tool',
+            'tool_call_id': call_id,
+            'content': result,
+        }
+        messages.append(request_message)
+        messages.append(response_message)
 
 def enforce_strict_format(call_fn, strict_format):
     """Retry call_fn() until its content matches strict_format.
@@ -207,13 +224,13 @@ def enforce_strict_format(call_fn, strict_format):
         while True:
             result = call_fn()
             if not result: return result
-            orig_content, reasoning, tool_calls = result
+            orig_content, reasoning, tool_calls, usage = result
             if tool_calls: # do not enforce format in case of tool calls
-                return orig_content, reasoning, tool_calls
+                return orig_content, reasoning, tool_calls, usage
 
             try:
                 content = json.dumps(json.loads(orig_content))
-                return content, reasoning, tool_calls
+                return content, reasoning, tool_calls, usage
             except Exception:
                 log.error(f"failed to get requested format from LLM: {strict_format=} -> {orig_content=}, {reasoning=}, {tool_calls=}")
                 continue
@@ -252,7 +269,9 @@ def call_llm(messages, args, stream_callback=None):
         if not result:
             return ""
 
-        content, reasoning, tool_calls = result
+        content, reasoning, tool_calls, usage = result
+        log.info("call_llm: tokens prompt=%s completion=%s total=%s",
+                 usage.get('prompt_tokens'), usage.get('completion_tokens'), usage.get('total_tokens'))
         if tool_calls:
             handle_tool_calls(tool_calls, messages, content) # updates messages.
             log.info("call_llm: tool calls handled, making follow-up LLM call")
@@ -262,16 +281,18 @@ def call_llm(messages, args, stream_callback=None):
             )
             if not result:
                 return content or ""
-            content, reasoning, tool_calls = result
+            content, reasoning, tool_calls, usage = result
+            log.info("call_llm: follow-up tokens prompt=%s completion=%s total=%s",
+                     usage.get('prompt_tokens'), usage.get('completion_tokens'), usage.get('total_tokens'))
         log.info("call_llm: done (non-streaming), response length=%d", len(content) if content else 0)
         return content or ""
     else:
         # Streaming path — no strict_format enforcement (see above).
         accumulated = []
         tool_calls_happened = False
-        for content, tool_calls in openai_api.chat_stream(messages,
-                                                          model=args.model,
-                                                          tools=included_tools):
+        for content, tool_calls, usage in openai_api.chat_stream(messages,
+                                                                  model=args.model,
+                                                                  tools=included_tools):
             if content:
                 accumulated.append(content)
                 if stream_callback: stream_callback(content)
@@ -280,13 +301,18 @@ def call_llm(messages, args, stream_callback=None):
                 handle_tool_calls(tool_calls, messages, "".join(accumulated))
                 tool_calls_happened = True
 
+        log.info("call_llm: tokens prompt=%s completion=%s total=%s",
+                 usage.get('prompt_tokens'), usage.get('completion_tokens'), usage.get('total_tokens'))
+
         if tool_calls_happened:
             log.info("call_llm: tool calls handled, making follow-up streaming call")
             accumulated = []
-            for content, _ in openai_api.chat_stream(messages, model=args.model): # no tools available this time.
+            for content, _, usage in openai_api.chat_stream(messages, model=args.model): # no tools available this time.
                 if content:
                     accumulated.append(content)
                     if stream_callback: stream_callback(content)
+            log.info("call_llm: follow-up tokens prompt=%s completion=%s total=%s",
+                     usage.get('prompt_tokens'), usage.get('completion_tokens'), usage.get('total_tokens'))
 
         log.info("call_llm: done (streaming), response length=%d", len("".join(accumulated)))
         return "".join(accumulated)

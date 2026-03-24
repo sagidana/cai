@@ -44,9 +44,109 @@ echo "sk-or-..." > ~/.config/cai/api_key
 
 ## Usage
 
-```
-cai -a <action> [options]
-```
+● Here are the most exciting and useful ways to run cai:
+
+  ---
+  Basic Prompt
+
+  cai -p "Explain what a closure is in Python"
+  # or using -- shorthand (no -p needed):
+  cai -- Explain what a closure is in Python
+
+  ---
+  Pipe stdin into context
+
+  cat error.log | cai -p "What is causing this error?"
+  git diff | cai -p "Write a commit message for this diff"
+
+  ---
+  Include a file in context
+
+  cai --file ./src/cai/cli.py -p "What does this file do?"
+
+  ---
+  Cursor-aware code generation (location)
+
+  cai --location "./mymodule.py:42:4" -p "Implement this method"
+  The file is included with the cursor position marked — great for Vim/editor integrations.
+
+  ---
+  Enable codebase introspection tool
+
+  cai --codebase --file ./src/cai/api.py -p "Add a POST method"
+  Unlocks the fetch_codebase_metadata tool (tree-sitter powered class/method map).
+
+  ---
+  Use a custom MCP tool server
+
+  cai -t /path/to/my_mcp_server.py -p "Use the custom tool to do X"
+
+  ---
+  Use an internal named tool
+
+  cai -t fetch_codebase_metadata -p "Map the entire codebase"
+
+  ---
+  Process multiple lines in parallel (batch mode)
+
+  cat list_of_questions.txt | cai --line-by-line --cores 8 -p "Answer briefly"
+  Each line is sent as a separate LLM call, parallelized with --cores.
+
+  ---
+  Vimgrep integration — analyze grep results with file context
+
+  grep -rn "TODO" ./src | cai --vimgrep -p "Categorize each TODO by urgency"
+  # or from Vim: :cai uses vimgrep format (file:line:col:text)
+  Auto-loads the matched file into context for each result.
+
+  ---
+  Force JSON output
+
+  cai --strict-format json -p "List 3 refactoring suggestions for this file" --file ./cli.py
+  Retries the LLM until it returns valid JSON.
+
+  ---
+  Custom model + system prompt
+
+  cai --model "openai/gpt-4o" --system-prompt "You are a senior Go engineer." -p "Review this code" --file ./main.go
+
+  ---
+  One-liner output (pipe-friendly)
+
+  cai --oneline -p "Summarize this function in one sentence" --file ./cli.py
+
+  ---
+  Key flags at a glance:
+
+  ┌──────────────────────────┬─────────────────────────────────────────────┐
+  │           Flag           │                   Purpose                   │
+  ├──────────────────────────┼─────────────────────────────────────────────┤
+  │ -p / --                  │ The prompt                                  │
+  ├──────────────────────────┼─────────────────────────────────────────────┤
+  │ --file                   │ Include a file in context                   │
+  ├──────────────────────────┼─────────────────────────────────────────────┤
+  │ --location file:line:col │ Cursor-aware generation                     │
+  ├──────────────────────────┼─────────────────────────────────────────────┤
+  │ --codebase               │ Enable tree-sitter codebase tool            │
+  ├──────────────────────────┼─────────────────────────────────────────────┤
+  │ -t                       │ MCP tool server path or internal tool name  │
+  ├──────────────────────────┼─────────────────────────────────────────────┤
+  │ --line-by-line           │ Process each line independently             │
+  ├──────────────────────────┼─────────────────────────────────────────────┤
+  │ --vimgrep                │ Parse grep -n style input with file context │
+  ├──────────────────────────┼─────────────────────────────────────────────┤
+  │ --cores N                │ Parallel threads for batch processing       │
+  ├──────────────────────────┼─────────────────────────────────────────────┤
+  │ --strict-format json     │ Force JSON output                           │
+  ├──────────────────────────┼─────────────────────────────────────────────┤
+  │ --oneline                │ Collapse response to single line            │
+  ├──────────────────────────┼─────────────────────────────────────────────┤
+  │ --model                  │ Override model                              │
+  ├──────────────────────────┼─────────────────────────────────────────────┤
+  │ --system-prompt          │ Set system prompt                           │
+  ├──────────────────────────┼─────────────────────────────────────────────┤
+  │ --non-streaming          │ Use blocking API instead of streaming       │
+  └──────────────────────────┴─────────────────────────────────────────────┘
 
 ### Global Options
 

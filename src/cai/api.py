@@ -73,8 +73,9 @@ class OpenAiApi:
         content = message.get('content', "")
         reasoning = message.get('reasoning', "")
         tool_calls = message.get('tool_calls', None)
+        usage = result.get('usage', {})
 
-        return content, reasoning, tool_calls
+        return content, reasoning, tool_calls, usage
 
     def chat_stream(self, messages, model, system_prompt=None, tools=None):
         url = f"{self.base_url}/chat/completions"
@@ -95,9 +96,11 @@ class OpenAiApi:
 
         data['messages'].extend(messages)
         data['stream'] = True
+        data['stream_options'] = {"include_usage": True}
 
         finished_tool_calls = None
         tool_calls = {}
+        usage = {}
 
         with requests.post(url, headers=headers, json=data, stream=True) as response:
             response.raise_for_status()
@@ -110,6 +113,11 @@ class OpenAiApi:
 
                 if response_data == b"[DONE]": break
                 chunk = json.loads(response_data)
+
+                # Final usage chunk has empty choices
+                if chunk.get('usage'):
+                    usage = chunk['usage']
+
                 if len(chunk["choices"]) != 1: continue
 
                 choice = chunk["choices"][0]
@@ -141,8 +149,8 @@ class OpenAiApi:
                 content = delta.get('content', None)
 
                 if content or tool_calls:
-                    yield content, finished_tool_calls
-            yield None, finished_tool_calls
+                    yield content, finished_tool_calls, {}
+            yield None, finished_tool_calls, usage
 
 class AnthropicApi:
     def __init__(self, api_key):
@@ -186,7 +194,7 @@ def main():
     model = "arcee-ai/trinity-mini:free"
     # model = "anthropic/claude-opus-4.6"
 
-    content, reasoning, tool_calls = api.chat([{ "role":"user", "content":"write python script the print the current weather at London" }], model=model, tools=tools)
+    content, reasoning, tool_calls, usage = api.chat([{ "role":"user", "content":"write python script the print the current weather at London" }], model=model, tools=tools)
     print(f"{content=}")
     print(f"{reasoning=}")
     print(f"{tool_calls=}")
