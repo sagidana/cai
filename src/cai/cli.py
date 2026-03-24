@@ -208,81 +208,63 @@ def read_stdin_if_available():
         return sys.stdin.read()
     return None
 
-def handle_tool_calls(tool_calls, messages, call_content):
-    global external_mcps
-    log.info("handle_tool_calls: dispatching %d tool call(s)", len(tool_calls))
-
-    # Build set of all known tool names for validation
+def _execute_tool(call_name, arguments):
+    """Validate and run a single tool call. Always returns a result string."""
     known_tool_names = {t.get('function', {}).get('name') for t in tools}
     for mcp_tools in external_mcps.values():
         known_tool_names.update(t.get('function', {}).get('name') for t in mcp_tools)
 
+    if call_name not in known_tool_names:
+        log.warning("tool call: unknown tool '%s'", call_name)
+        return f"Error: unknown tool '{call_name}'. Available tools: {sorted(known_tool_names)}"
+
+    try:
+        call_args = json.loads(arguments) if arguments else {}
+    except json.JSONDecodeError as e:
+        log.warning("tool call: bad JSON args for '%s': %s", call_name, e)
+        return f"Error: tool '{call_name}' received invalid JSON arguments: {e}. Raw arguments: {arguments!r}"
+
+    try:
+        for mcp_path in external_mcps:
+            for tool in external_mcps[mcp_path]:
+                if tool.get('function', {}).get('name') == call_name:
+                    log.info("tool call: %s (external, mcp=%s) args=%s", call_name, mcp_path, call_args)
+                    result = call_external_tool(mcp_path, call_name, call_args)
+                    if result is None:
+                        return f"Error: tool '{call_name}' returned no result"
+                    log.info("tool call: %s -> result length=%d", call_name, len(result))
+                    return trim_tool_result(result)
+        log.info("tool call: %s (internal) args=%s", call_name, call_args)
+        result = call_tool(call_name, call_args)
+    except Exception as e:
+        log.error("tool call: %s raised: %s", call_name, e)
+        return f"Error: tool '{call_name}' raised an exception: {e}"
+
+    if result is None:
+        log.warning("tool call: %s returned None", call_name)
+        return f"Error: tool '{call_name}' returned no result"
+    log.info("tool call: %s -> result length=%d", call_name, len(result))
+    return trim_tool_result(result)
+
+
+def handle_tool_calls(tool_calls, messages, call_content):
+    log.info("handle_tool_calls: dispatching %d tool call(s)", len(tool_calls))
     for call in tool_calls:
         if call.get('type') != 'function':
             log.warning("tool call with invalid type: %s", call.get('type'))
             continue
-
         call_id = call.get('id')
         call_function = call.get('function', {})
         call_name = call_function.get('name')
         arguments = call_function.get('arguments') or ''
-
-        # Validate tool name
-        if call_name not in known_tool_names:
-            result = f"Error: unknown tool '{call_name}'. Available tools: {sorted(known_tool_names)}"
-            log.warning("tool call: unknown tool '%s'", call_name)
-        else:
-            # Validate and parse arguments JSON
-            try:
-                call_args = json.loads(arguments) if arguments else {}
-            except json.JSONDecodeError as e:
-                result = f"Error: tool '{call_name}' received invalid JSON arguments: {e}. Raw arguments: {arguments!r}"
-                log.warning("tool call: bad JSON args for '%s': %s", call_name, e)
-                call_args = {}
-            else:
-                # Dispatch to external or internal tool
-                called_external = False
-                result = None
-                try:
-                    for mcp_path in external_mcps:
-                        for tool in external_mcps[mcp_path]:
-                            if tool.get('function', {}).get('name') == call_name:
-                                log.info("tool call: %s (external, mcp=%s) args=%s", call_name, mcp_path, call_args)
-                                result = call_external_tool(mcp_path, call_name, call_args)
-                                called_external = True
-                    if not called_external:
-                        log.info("tool call: %s (internal) args=%s", call_name, call_args)
-                        result = call_tool(call_name, call_args)
-                except Exception as e:
-                    result = f"Error: tool '{call_name}' raised an exception: {e}"
-                    log.error("tool call: %s raised: %s", call_name, e)
-
-                if result is None:
-                    result = f"Error: tool '{call_name}' returned no result"
-                    log.warning("tool call: %s returned None", call_name)
-                else:
-                    log.info("tool call: %s -> result length=%d", call_name, len(result))
-                    result = trim_tool_result(result)
-
-        request_message = {
+        result = _execute_tool(call_name, arguments)
+        messages.append({
             'role': 'assistant',
             'content': call_content or '',
-            'tool_calls': [{
-                'id': call_id,
-                'type': 'function',
-                'function': {
-                    'name': call_name,
-                    'arguments': arguments,
-                }
-            }]
-        }
-        response_message = {
-            'role': 'tool',
-            'tool_call_id': call_id,
-            'content': result,
-        }
-        messages.append(request_message)
-        messages.append(response_message)
+            'tool_calls': [{'id': call_id, 'type': 'function',
+                            'function': {'name': call_name, 'arguments': arguments}}],
+        })
+        messages.append({'role': 'tool', 'tool_call_id': call_id, 'content': result})
 
 def enforce_strict_format(call_fn, strict_format):
     """Retry call_fn() until its content matches strict_format.
@@ -304,6 +286,47 @@ def enforce_strict_format(call_fn, strict_format):
                 continue
     return call_fn()
 
+def _run_nonstreaming_turn(messages, args, included_tools, stream_callback=None):
+    """Single non-streaming LLM call. Returns (content, tool_calls, usage)."""
+    result = enforce_strict_format(
+        lambda: openai_api.chat(messages, model=args.model, tools=included_tools),
+        args.strict_format,
+    )
+    if not result:
+        return "", None, {}
+    content, _reasoning, tool_calls, usage = result
+    return content or "", tool_calls, usage
+
+def _run_streaming_turn(messages, args, included_tools, stream_callback):
+    """Single streaming LLM call. Returns (accumulated_text, tool_calls, usage)."""
+    accumulated = []
+    last_tool_calls = None
+    usage = {}
+    for chunk, tool_calls, usage in openai_api.chat_stream(
+            messages, model=args.model, tools=included_tools):
+        if chunk:
+            accumulated.append(chunk)
+            if stream_callback:
+                stream_callback(chunk)
+        if tool_calls:
+            last_tool_calls = tool_calls
+    return "".join(accumulated), last_tool_calls, usage
+
+def _warn_if_stuck(tool_calls, call_history, messages):
+    """Track repeated identical tool calls and inject a warning into messages when stuck."""
+    for call in tool_calls:
+        name = call.get('function', {}).get('name', '')
+        args_str = call.get('function', {}).get('arguments', '')
+        key = (name, args_str)
+        call_history[key] = call_history.get(key, 0) + 1
+        if call_history[key] >= 3:
+            warning = (f"Warning: you have already called tool '{name}' with these exact arguments "
+                       f"{call_history[key]} times and received the same result. "
+                       f"Try a different approach or tool to make progress.")
+            log.warning("stuck detection: '%s' called %d times with same args", name, call_history[key])
+            messages.append({"role": "user", "content": warning})
+
+
 def call_llm(messages, args, stream_callback=None):
     global external_mcps
 
@@ -324,67 +347,50 @@ def call_llm(messages, args, stream_callback=None):
     use_non_streaming = args.non_streaming or bool(args.strict_format)
 
     profile = get_model_profile(args.model)
-    log.info("call_llm: model=%s tier=%s context=%d messages=%d tools=%d streaming=%s strict_format=%s",
-             args.model, profile['tier'], profile['context'], len(messages), len(included_tools),
-             not use_non_streaming, args.strict_format or "none")
+    agentic = getattr(args, 'agentic', False)
 
-    if use_non_streaming:
-        result = enforce_strict_format(
-            lambda: openai_api.chat(messages,
-                                    model=args.model,
-                                    tools=included_tools),
-            args.strict_format,
-        )
-        if not result:
-            return ""
-
-        content, reasoning, tool_calls, usage = result
-        log.info("call_llm: tokens prompt=%s completion=%s total=%s",
-                 usage.get('prompt_tokens'), usage.get('completion_tokens'), usage.get('total_tokens'))
-        if tool_calls:
-            handle_tool_calls(tool_calls, messages, content) # updates messages.
-            log.info("call_llm: tool calls handled, making follow-up LLM call")
-            result = enforce_strict_format(
-                lambda: openai_api.chat(messages, model=args.model), # no tools available this time.
-                args.strict_format,
-            )
-            if not result:
-                return content or ""
-            content, reasoning, tool_calls, usage = result
-            log.info("call_llm: follow-up tokens prompt=%s completion=%s total=%s",
-                     usage.get('prompt_tokens'), usage.get('completion_tokens'), usage.get('total_tokens'))
-        log.info("call_llm: done (non-streaming), response length=%d", len(content) if content else 0)
-        return content or ""
+    if agentic:
+        tier_defaults = {'small': 5, 'mid': 10, 'large': 20}
+        default_max_turns = tier_defaults.get(profile['tier'], 10)
+        max_turns = getattr(args, 'max_turns', None) or default_max_turns
     else:
-        # Streaming path — no strict_format enforcement (see above).
-        accumulated = []
-        tool_calls_happened = False
-        for content, tool_calls, usage in openai_api.chat_stream(messages,
-                                                                  model=args.model,
-                                                                  tools=included_tools):
-            if content:
-                accumulated.append(content)
-                if stream_callback: stream_callback(content)
+        max_turns = 1
 
-            if tool_calls:
-                handle_tool_calls(tool_calls, messages, "".join(accumulated))
-                tool_calls_happened = True
+    log.info("call_llm: model=%s tier=%s context=%d messages=%d tools=%d streaming=%s "
+             "strict_format=%s agentic=%s max_turns=%d",
+             args.model, profile['tier'], profile['context'], len(messages), len(included_tools),
+             not use_non_streaming, args.strict_format or "none", agentic, max_turns)
 
-        log.info("call_llm: tokens prompt=%s completion=%s total=%s",
-                 usage.get('prompt_tokens'), usage.get('completion_tokens'), usage.get('total_tokens'))
+    call_history = {}  # (tool_name, args_str) -> call count, for stuck detection
+    run_turn = _run_nonstreaming_turn if use_non_streaming else _run_streaming_turn
 
-        if tool_calls_happened:
-            log.info("call_llm: tool calls handled, making follow-up streaming call")
-            accumulated = []
-            for content, _, usage in openai_api.chat_stream(messages, model=args.model): # no tools available this time.
-                if content:
-                    accumulated.append(content)
-                    if stream_callback: stream_callback(content)
+    for turn in range(1, max_turns + 1):
+        if agentic and not getattr(args, 'oneline', False):
+            print(f"[turn {turn}/{max_turns}]", end="\r", file=sys.stderr, flush=True)
+
+        content, tool_calls, usage = run_turn(messages, args, included_tools, stream_callback)
+        log.info("call_llm: turn=%d tokens prompt=%s completion=%s total=%s",
+                 turn, usage.get('prompt_tokens'), usage.get('completion_tokens'), usage.get('total_tokens'))
+
+        if not tool_calls:
+            log.info("call_llm: done turn=%d length=%d", turn, len(content))
+            return content
+
+        handle_tool_calls(tool_calls, messages, content)
+        _warn_if_stuck(tool_calls, call_history, messages)
+
+        if not agentic:
+            # Non-agentic: one follow-up call without tools, then done
+            content, _, usage = run_turn(messages, args, [], stream_callback)
             log.info("call_llm: follow-up tokens prompt=%s completion=%s total=%s",
                      usage.get('prompt_tokens'), usage.get('completion_tokens'), usage.get('total_tokens'))
+            return content
+        # agentic: loop to next turn
 
-        log.info("call_llm: done (streaming), response length=%d", len("".join(accumulated)))
-        return "".join(accumulated)
+    log.warning("call_llm: reached max_turns=%d", max_turns)
+    if agentic and not getattr(args, 'oneline', False):
+        print(f"\n[!] reached max turns ({max_turns})", file=sys.stderr)
+    return ""
 
 def prompt_line_by_line(args, messages):
     if not sys.stdin.isatty():
@@ -508,6 +514,12 @@ def trim_tool_result(result, max_chars=None):
     return result
 
 
+def _read_file_numbered(path):
+    """Return file contents as a numbered-line string."""
+    with open(path) as f:
+        return "".join(f"{i + 1}: {line}" for i, line in enumerate(f))
+
+
 ACTION_PROMPT = "prompt"
 def action_prompt(args):
     if not args.prompt:
@@ -529,26 +541,14 @@ def action_prompt(args):
 
     if args.file and ((not args.line_by_line) or not sys.stdin.isatty()):
         log.info("action_prompt: including file %s", args.file)
-        file_content = []
-        i = 1
-        for fl in open(args.file).readlines():
-            file_content.append(f"{i}: {fl}")
-            i += 1
-        messages.append({"role": "user", "content": f"<file_content> {''.join(file_content)} </file_content>"})
+        messages.append({"role": "user", "content": f"<file_content> {_read_file_numbered(args.file)} </file_content>"})
 
     if args.location:
         m = re.match(r"^(?P<file_path>.*):(?P<line_num>\d+):(?P<col_num>\d+)$", args.location)
         if m:
-            fp = m.group('file_path')
-            ln = m.group('line_num')
-            cn = m.group('col_num')
+            fp, ln, cn = m.group('file_path'), m.group('line_num'), m.group('col_num')
             log.info("action_prompt: including location %s:%s:%s", fp, ln, cn)
-            fc = []
-            i = 1
-            for fl in open(fp).readlines():
-                fc.append(f"{i}: {fl}")
-                i += 1
-            messages.append({"role": "user", "content": f"<file_content> {''.join(fc)} </file_content>"})
+            messages.append({"role": "user", "content": f"<file_content> {_read_file_numbered(fp)} </file_content>"})
             messages.append({"role": "user", "content": f"<cursor_location> line number: {ln}, column number: {cn} </cursor_location>"})
 
     if args.line_by_line:
@@ -556,14 +556,11 @@ def action_prompt(args):
 
     messages.append({"role": "user", "content": args.prompt})
 
-    if not args.non_streaming and not args.oneline and not args.strict_format: # streaming flow
+    if not args.non_streaming and not args.oneline and not args.strict_format:
         log.info("action_prompt: calling LLM (streaming)")
-        def _write(chunk):
-            sys.stdout.write(chunk)
-            sys.stdout.flush()
-        call_llm(messages, args, stream_callback=_write)
+        call_llm(messages, args, stream_callback=lambda chunk: (sys.stdout.write(chunk), sys.stdout.flush()))
         print()
-    else:                                                                      # non-streaming flow
+    else:
         log.info("action_prompt: calling LLM (non-streaming)")
         content = call_llm(messages, args)
         if args.oneline:
@@ -614,6 +611,10 @@ def main():
                         help="let the action know whether or not to include reasoning in the output.")
     parser.add_argument("--non-streaming", action="store_true",
                         help="let the action know whether or not to use the non-streaming api.")
+    parser.add_argument("--agentic", action="store_true",
+                        help="enable multi-turn agentic loop: LLM keeps calling tools until done.")
+    parser.add_argument("--max-turns", type=int, default=None,
+                        help="max tool-call turns in agentic mode (default: 5/10/20 by model tier).")
     tools_arg = parser.add_argument('-t',
                         '--tools',
                         nargs='+',
