@@ -168,6 +168,7 @@ class Screen:
         caught_exc = None
         try:
             tty.setraw(self._tty_fd)
+            termios.tcflush(self._tty_fd, termios.TCIFLUSH)  # discard keys typed during LLM response
             self._redraw_input_lines(msg)
             sys.stdout.flush()
 
