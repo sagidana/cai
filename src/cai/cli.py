@@ -713,6 +713,13 @@ def _handle_interactive_cmd(cmd, screen, messages, args, status_callback):
         status_callback("compacting...")
         _compact_messages(messages, args.model)
         status_callback("ready")
+    elif cmd == "clear":
+        # Keep only the system prompt (first message if role==system)
+        if messages and messages[0].get('role') == 'system':
+            messages[1:] = []
+        else:
+            messages.clear()
+        status_callback("ready")
     elif cmd == "tools":
         tool_names = [t.get('function', {}).get('name') for t in tools
                       if t.get('function', {}).get('name')]
@@ -766,7 +773,7 @@ def action_interactive(args):
                              "content": f"<cursor_location> line number: {ln}, column number: {cn} </cursor_location>"})
 
     screen = Screen()
-    screen.set_cmd_completions(["compact", "tools"])
+    screen.set_cmd_completions(["compact", "tools", "clear"])
 
     last_ctx = [""]
 
@@ -790,7 +797,7 @@ def action_interactive(args):
         screen.write(chunk)
 
     def tool_cb(line):
-        screen.write(f"{_META_STYLE}{line}{_RESET}")
+        screen.write(f"{_META_STYLE}{line}{_RESET}{_LLM_STYLE}")
 
     try:
         # If an initial prompt was given (-p or trailing words), run it first
