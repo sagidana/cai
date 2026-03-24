@@ -32,7 +32,8 @@ class Screen:
     _CONT_PREFIX   = "  "   # continuation-line prefix (same width as prompt)
 
     def __init__(self):
-        self._rows, self._cols = shutil.get_terminal_size()
+        ts = shutil.get_terminal_size()
+        self._rows, self._cols = ts.lines, ts.columns
         self._input_buf: list[str] = []
         self._cursor_pos: int = 0
         self._history: list[str] = []
@@ -56,10 +57,12 @@ class Screen:
         return max(1, self._rows - self._input_rows - 1)
 
     def _status_row(self) -> int:
-        return self._rows - self._input_rows
+        """Status bar is always pinned to the very last row."""
+        return self._rows
 
     def _input_start_row(self) -> int:
-        return self._rows - self._input_rows + 1
+        """Input area sits immediately above the status bar."""
+        return self._rows - self._input_rows
 
     def _apply_layout(self):
         """Set scrolling region, redraw status bar, park cursor at scroll bottom."""
@@ -74,16 +77,19 @@ class Screen:
     def _redraw_status_raw(self):
         """Redraw the status bar without flushing (caller must flush)."""
         sr = self._status_row()
-        text = self._status_text[: self._cols]
+        text = self._status_text[: self._cols].ljust(self._cols)
         sys.stdout.write(
             f"\033[s"                     # save cursor
             f"\033[{sr};1H\033[K"         # move + clear line
-            f"\033[7m{text}\033[m"        # reverse-video text
+            f"\033[7m{text}\033[m"        # reverse-video text (full-width)
             f"\033[u"                     # restore cursor
         )
 
     def _on_resize(self, signum, frame):
-        self._rows, self._cols = shutil.get_terminal_size()
+        ts = shutil.get_terminal_size()
+        self._rows, self._cols = ts.lines, ts.columns
+        if self._in_prompt:
+            self._input_rows = self._calc_input_rows()
         self._apply_layout()
         if self._in_prompt:
             self._redraw_input_lines()
@@ -112,6 +118,16 @@ class Screen:
         """Update the status bar in place."""
         self._status_text = text
         self._redraw_status_raw()
+        sys.stdout.flush()
+
+    def show_prompt_placeholder(self, msg: str = "> "):
+        """Draw the prompt prefix in the input row without entering input mode."""
+        row = self._input_start_row()
+        sys.stdout.write(
+            f"\033[s"
+            f"\033[{row};1H\033[K{msg}"
+            f"\033[u"
+        )
         sys.stdout.flush()
 
     def prompt(self, msg: str = "> ") -> str:
@@ -158,8 +174,10 @@ class Screen:
         return result  # type: ignore[return-value]
 
     def close(self):
-        """Restore terminal to its normal state."""
+        """Restore terminal to its normal state and clear the screen."""
         sys.stdout.write("\033[r")     # reset scrolling region
+        sys.stdout.write("\033[2J")    # clear entire screen
+        sys.stdout.write("\033[H")     # move cursor to top-left
         sys.stdout.write("\033[?25h")  # show cursor
         sys.stdout.flush()
         signal.signal(signal.SIGWINCH, signal.SIG_DFL)
@@ -173,8 +191,14 @@ class Screen:
     def _handle_key(self, key: str, msg: str):
         """Dispatch one keypress. Raises _SubmitException on Enter."""
 
-        # ---- Submit ----
+        # ---- Submit (or newline if line ends with \) ----
         if key in ("\r", "\n"):
+            # If the character immediately before the cursor is \, replace it
+            # with a newline instead of submitting (shell-style line continuation).
+            if self._cursor_pos > 0 and self._input_buf[self._cursor_pos - 1] == "\\":
+                self._input_buf[self._cursor_pos - 1] = "\n"
+                self._update_input_rows(msg)
+                return
             result = "".join(self._input_buf)
             if result.strip():
                 self._history.insert(0, result)
@@ -182,14 +206,19 @@ class Screen:
             self._input_rows = 1
             self._in_prompt = False
             self._apply_layout()
-            # Echo submitted text into the output area
+            # Echo submitted text into the output area.
+            # Write each logical line separately so every \n causes a proper
+            # scroll within the output region instead of spilling into the
+            # input/status rows.
             sb = self._scroll_bottom()
-            sys.stdout.write(f"\033[{sb};1H{msg}{result}\n")
+            for i, line in enumerate(result.split("\n")):
+                prefix = msg if i == 0 else self._CONT_PREFIX
+                sys.stdout.write(f"\033[{sb};1H{prefix}{line}\n")
             sys.stdout.flush()
             raise _SubmitException(result)
 
-        # ---- Newline in buffer (Ctrl-Enter / Alt-Enter) ----
-        if key in ("\033[13;5u", "\033\r", "\033\n"):
+        # ---- Newline in buffer (Alt-Enter) ----
+        if key in ("\033\r", "\033\n"):
             self._input_buf.insert(self._cursor_pos, "\n")
             self._cursor_pos += 1
             self._update_input_rows(msg)
@@ -290,32 +319,65 @@ class Screen:
             self._cursor_pos = 0
             self._update_input_rows(msg)
 
-    def _update_input_rows(self, msg: str):
-        """Recalculate input_rows, reapply layout if changed, then redraw."""
+    def _calc_input_rows(self) -> int:
+        """Count the visual terminal rows needed for the current input buffer."""
         buf_str = "".join(self._input_buf)
-        new_rows = max(1, buf_str.count("\n") + 1)
+        logical_lines = buf_str.split("\n")
+        total = 0
+        for i, line in enumerate(logical_lines):
+            prefix = self._PROMPT_PREFIX if i == 0 else self._CONT_PREFIX
+            combined = len(prefix) + len(line)
+            total += max(1, (combined + self._cols - 1) // self._cols) if combined else 1
+        return max(1, total)
+
+    def _update_input_rows(self, msg: str):
+        """Recalculate input_rows (accounting for visual wrapping), reapply layout if changed."""
+        new_rows = self._calc_input_rows()
         if new_rows != self._input_rows:
+            delta = new_rows - self._input_rows
+            if delta > 0:
+                # Scroll the output region up by delta lines so the content above
+                # the input area is preserved rather than overwritten.
+                sb = self._scroll_bottom()   # bottom of current (old) scroll region
+                sys.stdout.write(f"\033[{sb};1H")
+                sys.stdout.write("\n" * delta)
             self._input_rows = new_rows
             self._apply_layout()
         self._redraw_input_lines(msg)
 
     def _redraw_input_lines(self, msg: str = "> "):
         """Redraw all input lines and reposition the cursor."""
+        # Clear all rows in the input area before redrawing to avoid stale content
+        # from previous larger inputs or visual-wrap overflow.
+        for i in range(self._input_rows):
+            sys.stdout.write(f"\033[{self._input_start_row() + i};1H\033[K")
+
         buf_str = "".join(self._input_buf)
         lines = buf_str.split("\n")
-        prefix_len = len(self._PROMPT_PREFIX)  # both prefixes are same length
 
+        # Draw each logical line; the terminal handles visual wrapping automatically.
+        draw_row = self._input_start_row()
         for i, line in enumerate(lines):
-            row = self._input_start_row() + i
             prefix = self._PROMPT_PREFIX if i == 0 else self._CONT_PREFIX
-            sys.stdout.write(f"\033[{row};1H\033[K{prefix}{line}")
+            combined = len(prefix) + len(line)
+            sys.stdout.write(f"\033[{draw_row};1H{prefix}{line}")
+            draw_row += max(1, (combined + self._cols - 1) // self._cols) if combined else 1
 
-        # Reposition cursor within the input area
+        # Reposition cursor accounting for visual wrapping.
         buf_before = "".join(self._input_buf[: self._cursor_pos])
         cur_lines = buf_before.split("\n")
-        cur_row_offset = len(cur_lines) - 1
-        cur_col = len(cur_lines[-1]) + prefix_len + 1   # 1-indexed
-        cur_row = self._input_start_row() + cur_row_offset
+        cur_row = self._input_start_row()
+        for i, line in enumerate(cur_lines[:-1]):
+            prefix = self._PROMPT_PREFIX if i == 0 else self._CONT_PREFIX
+            combined = len(prefix) + len(line)
+            cur_row += max(1, (combined + self._cols - 1) // self._cols) if combined else 1
+        # Cursor position within the last logical line
+        last_idx = len(cur_lines) - 1
+        last_line = cur_lines[-1]
+        prefix = self._PROMPT_PREFIX if last_idx == 0 else self._CONT_PREFIX
+        n = len(prefix) + len(last_line)   # chars written on this visual segment
+        cur_row += n // self._cols
+        cur_col = n % self._cols + 1       # 1-indexed
         sys.stdout.write(f"\033[{cur_row};{cur_col}H")
 
     def _clear_input_area(self):

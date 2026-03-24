@@ -374,7 +374,7 @@ def _compact_messages(messages, model):
     messages[start_idx:end_idx] = [memory]
 
 
-def _check_context_budget(messages, usage, profile, args):
+def _check_context_budget(messages, usage, profile, args, status_callback=None):
     """Compact messages if prompt token usage exceeds the tier threshold."""
     prompt_tokens = usage.get('prompt_tokens', 0)
     context_limit = profile.get('context', 16000)
@@ -389,8 +389,11 @@ def _check_context_budget(messages, usage, profile, args):
     if budget_pct >= threshold:
         log.warning("context budget: %.0f%% used (%d/%d tokens), compacting",
                     budget_pct * 100, prompt_tokens, context_limit)
-        print(f"\n[context {budget_pct:.0%} >= {threshold:.0%}] compacting...",
-              file=sys.stderr, flush=True)
+        msg = f"[context {budget_pct:.0%} >= {threshold:.0%}] compacting..."
+        if status_callback:
+            status_callback(msg)
+        else:
+            print(f"\n{msg}", file=sys.stderr, flush=True)
         _compact_messages(messages, args.model)
 
 
@@ -407,6 +410,15 @@ def _warn_if_stuck(tool_calls, call_history, messages):
                        f"Try a different approach or tool to make progress.")
             log.warning("stuck detection: '%s' called %d times with same args", name, call_history[key])
             messages.append({"role": "user", "content": warning})
+
+
+def _emit_status(text, status_callback, stream_callback):
+    if status_callback:
+        status_callback(text)
+    elif stream_callback:
+        print(f"\n{text}", file=sys.stderr, flush=True)
+    else:
+        print(text, end="\r", file=sys.stderr, flush=True)
 
 
 def call_llm(messages, args, stream_callback=None, status_callback=None):
@@ -455,8 +467,17 @@ def call_llm(messages, args, stream_callback=None, status_callback=None):
         log.info("call_llm: turn=%d tokens prompt=%s completion=%s total=%s",
                  turn, usage.get('prompt_tokens'), usage.get('completion_tokens'), usage.get('total_tokens'))
 
+        prompt_tokens = usage.get('prompt_tokens', 0)
+        pct = f"{prompt_tokens / profile['context']:.0%}" if profile['context'] else "?"
+        ctx_str = f"ctx {pct} ({prompt_tokens}/{profile['context']})"
+
+        if not tool_calls:
+            log.info("call_llm: done turn=%d length=%d", turn, len(content))
+            if agentic and not getattr(args, 'oneline', False):
+                _emit_status(f"{ctx_str} | ready", status_callback, stream_callback)
+            return content
+
         if agentic and not getattr(args, 'oneline', False):
-            prompt_tokens = usage.get('prompt_tokens', 0)
             def _fmt_call(c):
                 name = c.get('function', {}).get('name', '?')
                 raw_args = c.get('function', {}).get('arguments', '')
@@ -466,44 +487,30 @@ def call_llm(messages, args, stream_callback=None, status_callback=None):
                 except Exception:
                     args_str = raw_args
                 return f"{name}({args_str})"
-            tool_calls_fmt = [_fmt_call(c) for c in (tool_calls or [])]
-            pct = f"{prompt_tokens / profile['context']:.0%}" if profile['context'] else "?"
-            status = (f"[turn {turn}/{max_turns}] tokens={prompt_tokens}/{profile['context']} ({pct})"
-                      f" tools={tool_calls_fmt}")
-            if status_callback:
-                status_callback(status)
-            elif stream_callback:
-                # Streaming writes to stdout between turns; start a fresh line so the
-                # status doesn't overwrite streamed content via \r.
-                print(f"\n{status}", file=sys.stderr, flush=True)
-            else:
-                print(status, end="\r", file=sys.stderr, flush=True)
-
-        if not tool_calls:
-            log.info("call_llm: done turn=%d length=%d", turn, len(content))
-            return content
+            tool_calls_fmt = [_fmt_call(c) for c in tool_calls]
+            status = f"[turn {turn}/{max_turns}] {ctx_str} | {', '.join(tool_calls_fmt)}"
+            _emit_status(status, status_callback, stream_callback)
 
         handle_tool_calls(tool_calls, messages, content)
         _warn_if_stuck(tool_calls, call_history, messages)
 
         if agentic:
-            _check_context_budget(messages, usage, profile, args)
+            _check_context_budget(messages, usage, profile, args, status_callback)
 
         if not agentic:
             # Non-agentic: one follow-up call without tools, then done
             content, _, usage = run_turn(messages, args, [], stream_callback)
             log.info("call_llm: follow-up tokens prompt=%s completion=%s total=%s",
                      usage.get('prompt_tokens'), usage.get('completion_tokens'), usage.get('total_tokens'))
+            pt = usage.get('prompt_tokens', 0)
+            pct2 = f"{pt / profile['context']:.0%}" if profile['context'] else "?"
+            _emit_status(f"ctx {pct2} ({pt}/{profile['context']}) | ready", status_callback, stream_callback)
             return content
         # agentic: loop to next turn
 
     log.warning("call_llm: reached max_turns=%d", max_turns)
     if agentic and not getattr(args, 'oneline', False):
-        msg = f"[!] reached max turns ({max_turns})"
-        if status_callback:
-            status_callback(msg)
-        else:
-            print(f"\n{msg}", file=sys.stderr)
+        _emit_status(f"[!] reached max turns ({max_turns})", status_callback, stream_callback)
     return ""
 
 def prompt_line_by_line(args, messages):
@@ -727,11 +734,9 @@ def action_interactive(args):
                              "content": f"<cursor_location> line number: {ln}, column number: {cn} </cursor_location>"})
 
     screen = Screen()
-    status_state = {"text": f"model: {args.model} | ready"}
 
     def status_callback(text):
-        status_state["text"] = text
-        screen.set_status(text)
+        screen.set_status(f"{args.model} | {text}")
 
     def stream_cb(chunk):
         screen.write(chunk)
@@ -741,7 +746,8 @@ def action_interactive(args):
         if args.prompt:
             messages.append({"role": "user", "content": args.prompt})
             screen.write(f"> {args.prompt}\n")
-            status_callback(f"model: {args.model} | thinking...")
+            status_callback("thinking...")
+            screen.show_prompt_placeholder("> ")
             response = call_llm(messages, args,
                                 stream_callback=stream_cb,
                                 status_callback=status_callback)
@@ -750,20 +756,20 @@ def action_interactive(args):
                 messages.append({"role": "assistant", "content": response})
 
         # Main interactive loop
-        screen.set_status(f"model: {args.model} | ready  (Ctrl-C / Ctrl-D to exit)")
+        screen.set_status(f"{args.model} | ready  (Ctrl-C/D to exit · \\+Enter or Alt-Enter for newline)")
         while True:
             user_input = screen.prompt("> ")
             if not user_input.strip():
                 continue
             messages.append({"role": "user", "content": user_input})
-            status_callback(f"model: {args.model} | thinking...")
+            status_callback("thinking...")
+            screen.show_prompt_placeholder("> ")
             response = call_llm(messages, args,
                                 stream_callback=stream_cb,
                                 status_callback=status_callback)
             screen.write("\n")
             if response:
                 messages.append({"role": "assistant", "content": response})
-            screen.set_status(f"model: {args.model} | ready")
 
     except (KeyboardInterrupt, EOFError):
         screen.write("\n[exiting]\n")
