@@ -409,7 +409,7 @@ def _warn_if_stuck(tool_calls, call_history, messages):
             messages.append({"role": "user", "content": warning})
 
 
-def call_llm(messages, args, stream_callback=None):
+def call_llm(messages, args, stream_callback=None, status_callback=None):
     global external_mcps
 
     # handling available tools for LLM.
@@ -470,7 +470,9 @@ def call_llm(messages, args, stream_callback=None):
             pct = f"{prompt_tokens / profile['context']:.0%}" if profile['context'] else "?"
             status = (f"[turn {turn}/{max_turns}] tokens={prompt_tokens}/{profile['context']} ({pct})"
                       f" tools={tool_calls_fmt}")
-            if stream_callback:
+            if status_callback:
+                status_callback(status)
+            elif stream_callback:
                 # Streaming writes to stdout between turns; start a fresh line so the
                 # status doesn't overwrite streamed content via \r.
                 print(f"\n{status}", file=sys.stderr, flush=True)
@@ -497,7 +499,11 @@ def call_llm(messages, args, stream_callback=None):
 
     log.warning("call_llm: reached max_turns=%d", max_turns)
     if agentic and not getattr(args, 'oneline', False):
-        print(f"\n[!] reached max turns ({max_turns})", file=sys.stderr)
+        msg = f"[!] reached max turns ({max_turns})"
+        if status_callback:
+            status_callback(msg)
+        else:
+            print(f"\n{msg}", file=sys.stderr)
     return ""
 
 def prompt_line_by_line(args, messages):
@@ -680,6 +686,91 @@ def action_prompt(args):
             content = content.replace('\n', ' ')
         print(content)
 
+ACTION_INTERACTIVE = "interactive"
+def action_interactive(args):
+    """Multi-turn TUI conversation loop using Screen for display."""
+    from cai.screen import Screen
+
+    if not sys.stdout.isatty():
+        print("[!] --interactive requires a TTY stdout.", file=sys.stderr)
+        return
+
+    # Pre-capture piped stdin BEFORE Screen (tty.setraw) takes over keyboard input
+    stdin_content = read_stdin_if_available()
+
+    # Build base messages — mirrors action_prompt's setup
+    messages = []
+    if args.system_prompt:
+        messages.append({"role": "system", "content": args.system_prompt})
+    else:
+        profile = get_model_profile(args.model)
+        prompt_text = AGENTIC_SYSTEM_PROMPTS.get(profile['tier'], AGENTIC_SYSTEM_PROMPTS['mid'])
+        messages.append({"role": "system", "content": prompt_text})
+
+    if stdin_content:
+        log.info("action_interactive: including stdin (%d bytes)", len(stdin_content))
+        messages.append({"role": "user", "content": stdin_content})
+
+    if args.file:
+        log.info("action_interactive: including file %s", args.file)
+        messages.append({"role": "user",
+                         "content": f"<file_content>{_read_file_numbered(args.file)}</file_content>"})
+
+    if args.location:
+        m = re.match(r"^(?P<file_path>.*):(?P<line_num>\d+):(?P<col_num>\d+)$", args.location)
+        if m:
+            fp, ln, cn = m.group('file_path'), m.group('line_num'), m.group('col_num')
+            log.info("action_interactive: including location %s:%s:%s", fp, ln, cn)
+            messages.append({"role": "user",
+                             "content": f"<file_content>{_read_file_numbered(fp)}</file_content>"})
+            messages.append({"role": "user",
+                             "content": f"<cursor_location> line number: {ln}, column number: {cn} </cursor_location>"})
+
+    screen = Screen()
+    status_state = {"text": f"model: {args.model} | ready"}
+
+    def status_callback(text):
+        status_state["text"] = text
+        screen.set_status(text)
+
+    def stream_cb(chunk):
+        screen.write(chunk)
+
+    try:
+        # If an initial prompt was given (-p or trailing words), run it first
+        if args.prompt:
+            messages.append({"role": "user", "content": args.prompt})
+            screen.write(f"> {args.prompt}\n")
+            status_callback(f"model: {args.model} | thinking...")
+            response = call_llm(messages, args,
+                                stream_callback=stream_cb,
+                                status_callback=status_callback)
+            screen.write("\n")
+            if response:
+                messages.append({"role": "assistant", "content": response})
+
+        # Main interactive loop
+        screen.set_status(f"model: {args.model} | ready  (Ctrl-C / Ctrl-D to exit)")
+        while True:
+            user_input = screen.prompt("> ")
+            if not user_input.strip():
+                continue
+            messages.append({"role": "user", "content": user_input})
+            status_callback(f"model: {args.model} | thinking...")
+            response = call_llm(messages, args,
+                                stream_callback=stream_cb,
+                                status_callback=status_callback)
+            screen.write("\n")
+            if response:
+                messages.append({"role": "assistant", "content": response})
+            screen.set_status(f"model: {args.model} | ready")
+
+    except (KeyboardInterrupt, EOFError):
+        screen.write("\n[exiting]\n")
+    finally:
+        screen.close()
+
+
 ACTION_INDEX = "index"
 def action_index(args):
     if not args.index:
@@ -726,6 +817,8 @@ def main():
                         help="let the action know whether or not to use the non-streaming api.")
     parser.add_argument("--agentic", action="store_true",
                         help="enable multi-turn agentic loop: LLM keeps calling tools until done.")
+    parser.add_argument("--interactive", action="store_true",
+                        help="open a persistent TUI session; implies --agentic. Ctrl-C or Ctrl-D to exit.")
     parser.add_argument("--max-turns", type=int, default=None,
                         help="max tool-call turns in agentic mode (default: 5/10/20 by model tier).")
     tools_arg = parser.add_argument('-t',
@@ -774,8 +867,18 @@ def main():
     if args.vimgrep:
         args.line_by_line = True
 
-    log.info("main: action=%s model=%s internal_tools=%s external_mcps=%s",
-             args.action, args.model, sorted(args.internal_tools), list(external_mcps.keys()))
+    if args.interactive:
+        args.agentic = True
+        if args.line_by_line or args.vimgrep or args.oneline:
+            parser.error("--interactive is incompatible with --line-by-line / --vimgrep / --oneline")
+
+    log.info("main: action=%s model=%s internal_tools=%s external_mcps=%s interactive=%s",
+             args.action, args.model, sorted(args.internal_tools), list(external_mcps.keys()),
+             args.interactive)
+
+    if args.interactive:
+        action_interactive(args)
+        return
 
     if args.action == ACTION_PROMPT:
         action_prompt(args)
