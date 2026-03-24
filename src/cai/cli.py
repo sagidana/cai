@@ -195,6 +195,7 @@ def handle_tool_calls(tool_calls, messages, call_content):
                     log.warning("tool call: %s returned None", call_name)
                 else:
                     log.info("tool call: %s -> result length=%d", call_name, len(result))
+                    result = trim_tool_result(result)
 
         request_message = {
             'role': 'assistant',
@@ -426,6 +427,18 @@ def prompt_line_by_line(args, messages):
                 log.error("thread error in prompt_line_by_line: %s", e)
                 with lock:
                     print(f"[!] thread error: {e}")
+
+TOOL_RESULT_MAX_CHARS = 8000
+
+def trim_tool_result(result, max_chars=None):
+    if max_chars is None:
+        max_chars = config.get('tool_result_max_chars', TOOL_RESULT_MAX_CHARS)
+    if max_chars and len(result) > max_chars:
+        omitted = len(result) - max_chars
+        log.info("trim_tool_result: trimmed %d chars (limit=%d)", omitted, max_chars)
+        return result[:max_chars] + f"\n[truncated: {omitted} chars omitted]"
+    return result
+
 
 ACTION_PROMPT = "prompt"
 def action_prompt(args):
