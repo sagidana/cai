@@ -389,9 +389,8 @@ def _check_context_budget(messages, usage, profile, args):
     if budget_pct >= threshold:
         log.warning("context budget: %.0f%% used (%d/%d tokens), compacting",
                     budget_pct * 100, prompt_tokens, context_limit)
-        if getattr(args, 'debug', False):
-            print(f"\n[debug] context {budget_pct:.0%} >= threshold {threshold:.0%}, compacting...",
-                  file=sys.stderr, flush=True)
+        print(f"\n[context {budget_pct:.0%} >= {threshold:.0%}] compacting...",
+              file=sys.stderr, flush=True)
         _compact_messages(messages, args.model)
 
 
@@ -448,9 +447,6 @@ def call_llm(messages, args, stream_callback=None):
     run_turn = _run_nonstreaming_turn if use_non_streaming else _run_streaming_turn
 
     for turn in range(1, max_turns + 1):
-        if agentic and not getattr(args, 'oneline', False):
-            print(f"[turn {turn}/{max_turns}]", end="\r", file=sys.stderr, flush=True)
-
         # Force at least one tool call on turn 1 in agentic mode so the model
         # doesn't skip tools and answer directly from training data.
         tool_choice = "required" if (agentic and turn == 1 and included_tools) else "auto"
@@ -459,12 +455,18 @@ def call_llm(messages, args, stream_callback=None):
         log.info("call_llm: turn=%d tokens prompt=%s completion=%s total=%s",
                  turn, usage.get('prompt_tokens'), usage.get('completion_tokens'), usage.get('total_tokens'))
 
-        if getattr(args, 'debug', False):
+        if agentic and not getattr(args, 'oneline', False):
             prompt_tokens = usage.get('prompt_tokens', 0)
             tool_names = [c.get('function', {}).get('name', '?') for c in (tool_calls or [])]
             pct = f"{prompt_tokens / profile['context']:.0%}" if profile['context'] else "?"
-            print(f"[debug] turn={turn}/{max_turns} tokens={prompt_tokens}/{profile['context']} ({pct})"
-                  f" tools={tool_names}", file=sys.stderr, flush=True)
+            status = (f"[turn {turn}/{max_turns}] tokens={prompt_tokens}/{profile['context']} ({pct})"
+                      f" tools={tool_names}")
+            if stream_callback:
+                # Streaming writes to stdout between turns; start a fresh line so the
+                # status doesn't overwrite streamed content via \r.
+                print(f"\n{status}", file=sys.stderr, flush=True)
+            else:
+                print(status, end="\r", file=sys.stderr, flush=True)
 
         if not tool_calls:
             log.info("call_llm: done turn=%d length=%d", turn, len(content))
@@ -717,8 +719,6 @@ def main():
                         help="enable multi-turn agentic loop: LLM keeps calling tools until done.")
     parser.add_argument("--max-turns", type=int, default=None,
                         help="max tool-call turns in agentic mode (default: 5/10/20 by model tier).")
-    parser.add_argument("--debug", action="store_true",
-                        help="print per-turn token counts and tool calls to stderr.")
     tools_arg = parser.add_argument('-t',
                         '--tools',
                         nargs='+',
