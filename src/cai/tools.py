@@ -369,14 +369,204 @@ def get_external_tools(server_path):
     finally:
         process.terminate()
 
+TOOL_PROFILES = {
+    "low": [
+        "cat",
+        "list_directory",
+        "file_info",
+        "search_files",
+        "get_file_tree",
+    ],
+    "medium": [
+        "cat",
+        "list_directory",
+        "file_info",
+        "search_files",
+        "get_file_tree",
+        "git_log",
+        "git_diff",
+        "git_blame",
+        "symbol_search",
+        "fetch_url",
+        "code_outline",
+    ],
+    "high": [
+        "cat",
+        "list_directory",
+        "file_info",
+        "search_files",
+        "get_file_tree",
+        "git_log",
+        "git_diff",
+        "git_blame",
+        "symbol_search",
+        "fetch_url",
+        "code_outline",
+        "fetch_codebase_metadata",
+        "run_command",
+        "create_file",
+        "edit_file",
+    ],
+}
+
+
 if __name__ == '__main__':
+    import re
+    import stat
+    import urllib.request
+    from datetime import datetime
+
     mcp = FastMCP(name="Tools Server")
+
+    # ── Low tier ───────────────────────────────────────────────────────────────
 
     @mcp.tool()
     def cat(file_path: str) -> str:
-        """Read and return the contents of a file."""
+        """Read and return the full contents of a file."""
         with open(file_path, 'r') as f:
             return f.read()
+
+    @mcp.tool()
+    def list_directory(path: str = ".") -> str:
+        """List files and subdirectories at the given path."""
+        entries = []
+        for name in sorted(os.listdir(path)):
+            full = os.path.join(path, name)
+            kind = "dir" if os.path.isdir(full) else "file"
+            entries.append(f"{kind}  {name}")
+        return "\n".join(entries) if entries else "(empty)"
+
+    @mcp.tool()
+    def file_info(file_path: str) -> str:
+        """Return metadata for a file: size, line count, and last-modified time."""
+        s = os.stat(file_path)
+        size = s.st_size
+        modified = datetime.fromtimestamp(s.st_mtime).isoformat()
+        try:
+            with open(file_path, 'r') as f:
+                lines = sum(1 for _ in f)
+        except Exception:
+            lines = "n/a (binary?)"
+        return json.dumps({"path": file_path, "size_bytes": size, "lines": lines, "modified": modified})
+
+    @mcp.tool()
+    def search_files(pattern: str, path: str = ".", file_glob: str = "*") -> str:
+        """Search files matching file_glob under path for lines matching a regex pattern.
+        Returns at most 200 matches as 'filepath:lineno: line'."""
+        import fnmatch
+        results = []
+        rx = re.compile(pattern)
+        for root, dirs, files in os.walk(path):
+            dirs[:] = [d for d in dirs if not d.startswith('.')]
+            for filename in files:
+                if not fnmatch.fnmatch(filename, file_glob):
+                    continue
+                filepath = os.path.join(root, filename)
+                try:
+                    with open(filepath, 'r', errors='replace') as f:
+                        for lineno, line in enumerate(f, 1):
+                            if rx.search(line):
+                                results.append(f"{filepath}:{lineno}: {line.rstrip()}")
+                                if len(results) >= 200:
+                                    results.append("... (truncated at 200 matches)")
+                                    return "\n".join(results)
+                except (IOError, OSError):
+                    continue
+        return "\n".join(results) if results else "No matches found."
+
+    @mcp.tool()
+    def get_file_tree(path: str = ".", max_depth: int = 3) -> str:
+        """Return the directory tree rooted at path up to max_depth levels deep."""
+        lines = []
+        def _walk(current, prefix, depth):
+            if depth > max_depth:
+                return
+            try:
+                entries = sorted(os.listdir(current))
+            except PermissionError:
+                return
+            entries = [e for e in entries if not e.startswith('.')]
+            for i, name in enumerate(entries):
+                connector = "└── " if i == len(entries) - 1 else "├── "
+                full = os.path.join(current, name)
+                lines.append(prefix + connector + name)
+                if os.path.isdir(full):
+                    extension = "    " if i == len(entries) - 1 else "│   "
+                    _walk(full, prefix + extension, depth + 1)
+        lines.append(path)
+        _walk(path, "", 1)
+        return "\n".join(lines)
+
+    # ── Medium tier ────────────────────────────────────────────────────────────
+
+    @mcp.tool()
+    def git_log(file_path: str = "", n: int = 10) -> str:
+        """Show the last n git commits. Pass file_path to scope to a specific file."""
+        cmd = ["git", "log", f"-{n}", "--oneline", "--no-decorate"]
+        if file_path:
+            cmd += ["--", file_path]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        return result.stdout or result.stderr
+
+    @mcp.tool()
+    def git_diff(target: str = "HEAD") -> str:
+        """Show a git diff. target can be a commit, branch, or 'HEAD' (default)."""
+        result = subprocess.run(["git", "diff", target], capture_output=True, text=True)
+        return result.stdout or result.stderr
+
+    @mcp.tool()
+    def git_blame(file_path: str) -> str:
+        """Show git blame for a file — who last changed each line and when."""
+        result = subprocess.run(
+            ["git", "blame", "--date=short", file_path],
+            capture_output=True, text=True
+        )
+        return result.stdout or result.stderr
+
+    @mcp.tool()
+    def symbol_search(symbol: str, path: str = ".") -> str:
+        """Find definitions of a function or class named symbol across source files."""
+        patterns = [
+            rf"^\s*(def|class|function|func|fn)\s+{re.escape(symbol)}\b",
+            rf"^\s*(public|private|protected|static).*\s+{re.escape(symbol)}\s*\(",
+        ]
+        rx = re.compile("|".join(patterns))
+        results = []
+        for root, dirs, files in os.walk(path):
+            dirs[:] = [d for d in dirs if not d.startswith('.')]
+            for filename in files:
+                filepath = os.path.join(root, filename)
+                try:
+                    with open(filepath, 'r', errors='replace') as f:
+                        for lineno, line in enumerate(f, 1):
+                            if rx.search(line):
+                                results.append(f"{filepath}:{lineno}: {line.rstrip()}")
+                except (IOError, OSError):
+                    continue
+        return "\n".join(results) if results else f"No definition found for '{symbol}'."
+
+    @mcp.tool()
+    def fetch_url(url: str) -> str:
+        """Fetch the content of a URL and return it as text (e.g. docs, READMEs)."""
+        req = urllib.request.Request(url, headers={"User-Agent": "cai/1.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.read().decode("utf-8", errors="replace")
+
+    @mcp.tool()
+    def code_outline(file_path: str) -> str:
+        """Return the class/method/function structure of a single source file as JSON."""
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext not in EXT_TO_LANG:
+            return json.dumps({"error": f"Unsupported file type: {ext}"})
+        try:
+            with open(file_path, 'rb') as f:
+                source = f.read()
+        except (IOError, OSError) as e:
+            return json.dumps({"error": str(e)})
+        result = _parse_file(source, LANGUAGE_CONFIGS[EXT_TO_LANG[ext]])
+        return json.dumps(result, indent=2)
+
+    # ── High tier ──────────────────────────────────────────────────────────────
 
     @mcp.tool()
     def fetch_codebase_metadata() -> str:
@@ -384,27 +574,57 @@ if __name__ == '__main__':
         from Python, Java, C, C++, and Smali source files.  Language is
         auto-detected from file extension; mixed-language projects are handled
         transparently.  Returns JSON: {file: {class: {method: prototype}}}."""
-
         cwd = "."
         infra = {}
-
         for root, dirs, files in os.walk(cwd):
             for filename in files:
                 ext = os.path.splitext(filename)[1].lower()
                 if ext not in EXT_TO_LANG:
                     continue
-
                 filepath = os.path.join(root, filename)
                 try:
                     with open(filepath, 'rb') as f:
                         source = f.read()
                 except (IOError, OSError):
                     continue
-
-                file_info = _parse_file(source, LANGUAGE_CONFIGS[EXT_TO_LANG[ext]])
-                if file_info:
-                    infra[os.path.relpath(filepath, cwd)] = file_info
-
+                info = _parse_file(source, LANGUAGE_CONFIGS[EXT_TO_LANG[ext]])
+                if info:
+                    infra[os.path.relpath(filepath, cwd)] = info
         return json.dumps(infra, indent=2)
+
+    @mcp.tool()
+    def run_command(command: str, timeout: int = 30) -> str:
+        """Execute a shell command and return its stdout and stderr."""
+        result = subprocess.run(
+            command, shell=True, capture_output=True, text=True, timeout=timeout
+        )
+        out = result.stdout
+        err = result.stderr
+        parts = []
+        if out:
+            parts.append(out)
+        if err:
+            parts.append(f"[stderr]\n{err}")
+        return "\n".join(parts) if parts else "(no output)"
+
+    @mcp.tool()
+    def create_file(file_path: str, content: str) -> str:
+        """Create a new file at file_path with the given content."""
+        os.makedirs(os.path.dirname(os.path.abspath(file_path)), exist_ok=True)
+        with open(file_path, 'w') as f:
+            f.write(content)
+        return f"Created {file_path} ({len(content)} bytes)"
+
+    @mcp.tool()
+    def edit_file(file_path: str, old_text: str, new_text: str) -> str:
+        """Replace the first occurrence of old_text with new_text in a file."""
+        with open(file_path, 'r') as f:
+            original = f.read()
+        if old_text not in original:
+            return f"Error: old_text not found in {file_path}"
+        updated = original.replace(old_text, new_text, 1)
+        with open(file_path, 'w') as f:
+            f.write(updated)
+        return f"Replaced 1 occurrence in {file_path}"
 
     mcp.run(transport="stdio")
