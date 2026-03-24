@@ -369,47 +369,6 @@ def get_external_tools(server_path):
     finally:
         process.terminate()
 
-TOOL_PROFILES = {
-    "low": [
-        "cat",
-        "list_directory",
-        "file_info",
-        "search_files",
-        "get_file_tree",
-    ],
-    "medium": [
-        "cat",
-        "list_directory",
-        "file_info",
-        "search_files",
-        "get_file_tree",
-        "git_log",
-        "git_diff",
-        "git_blame",
-        "symbol_search",
-        "fetch_url",
-        "code_outline",
-    ],
-    "high": [
-        "cat",
-        "list_directory",
-        "file_info",
-        "search_files",
-        "get_file_tree",
-        "git_log",
-        "git_diff",
-        "git_blame",
-        "symbol_search",
-        "fetch_url",
-        "code_outline",
-        "fetch_codebase_metadata",
-        "run_command",
-        "create_file",
-        "edit_file",
-    ],
-}
-
-
 if __name__ == '__main__':
     import re
     import stat
@@ -427,75 +386,105 @@ if __name__ == '__main__':
             return f.read()
 
     @mcp.tool()
-    def list_directory(path: str = ".") -> str:
-        """List files and subdirectories at the given path."""
+    def list_files(path: str = ".", pattern: str = "") -> str:
+        """Recursively list all files and directories under the given path, ordered by depth
+        (breadth-first: root-level entries first, then their children, then grandchildren, etc.).
+
+        Each line is one entry in the format:
+            [file|dir]  <relative-path>
+
+        This is the right tool when you need a complete picture of a directory tree — for example,
+        to understand a project's structure, find where certain file types live, audit what exists
+        before making changes, or pass a full file listing to another tool or prompt.
+
+        Unlike a simple ls, this tool descends into every subdirectory so nothing is hidden from
+        view. Unlike find/walk output, entries are sorted by depth first so the top-level layout is
+        immediately visible at the top of the output without scrolling past deeply-nested paths.
+
+        When a pattern is supplied, only entries whose relative path matches the regex are included
+        in the output — useful for narrowing results to specific extensions, naming conventions, or
+        path segments (e.g. r"\\.py$" for Python files, "test" for anything test-related,
+        "src/.*\\.ts$" for TypeScript files under src/).  Directory traversal always goes full-depth
+        regardless of the filter so nested matches are never missed.
+
+        Args:
+            path:    Root directory to list. Defaults to "." (current working directory).
+                     Accepts absolute or relative paths.
+            pattern: Optional regex pattern (Python re syntax) to filter results. Matched against
+                     the relative path of each entry. Leave empty to return all entries.
+
+        Returns:
+            One entry per line: "file  <rel-path>" or "dir  <rel-path>".
+            Returns "(empty)" if the directory contains no entries (or none match the pattern).
+            Returns "Error: invalid pattern: ..." if the regex cannot be compiled.
+        """
+        from collections import deque
+
+        root = os.path.abspath(path)
+
+        rx = None
+        if pattern:
+            try:
+                rx = re.compile(pattern)
+            except re.error as e:
+                return f"Error: invalid pattern: {e}"
+
         entries = []
-        for name in sorted(os.listdir(path)):
-            full = os.path.join(path, name)
-            kind = "dir" if os.path.isdir(full) else "file"
-            entries.append(f"{kind}  {name}")
+        queue = deque([root])
+
+        while queue:
+            current = queue.popleft()
+            try:
+                children = sorted(os.listdir(current))
+            except PermissionError:
+                continue
+            for name in children:
+                full = os.path.join(current, name)
+                rel = os.path.relpath(full, root)
+                kind = "dir" if os.path.isdir(full) else "file"
+                if rx is None or rx.search(rel):
+                    entries.append(f"{kind}  {rel}")
+                if os.path.isdir(full):
+                    queue.append(full)
+
         return "\n".join(entries) if entries else "(empty)"
 
     @mcp.tool()
-    def file_info(file_path: str) -> str:
-        """Return metadata for a file: size, line count, and last-modified time."""
-        s = os.stat(file_path)
-        size = s.st_size
-        modified = datetime.fromtimestamp(s.st_mtime).isoformat()
+    def grep_files_content(pattern: str, path: str = ".", file_glob: str = "") -> str:
+        """Search for a regex pattern across files using ripgrep (rg), returning results in
+        vimgrep format: one match per line as  <file>:<line>:<col>:<matched line text>.
+
+        This is the right tool when you need to locate where something is defined or used —
+        for example, finding a function definition, tracing where a variable is referenced,
+        auditing log messages, or searching for a string across a large codebase. It is fast
+        (ripgrep-backed), unicode-aware, and automatically skips binary files, hidden files,
+        and paths listed in .gitignore.
+
+        Args:
+            pattern:   Regular expression to search for (ripgrep / Rust regex syntax).
+                       Examples: "def train", "TODO|FIXME", r"class\\w+Model".
+            path:      Directory or file to search in. Defaults to "." (current working dir).
+            file_glob: Optional glob to restrict which files are searched, e.g. "*.py",
+                       "**/*.{ts,tsx}", "src/**/*.rs". Leave empty to search all files.
+
+        Returns:
+            One match per line in vimgrep format: filepath:line:col:text
+            Returns "No matches found." when the pattern does not match anything.
+            Returns an error message prefixed with "Error:" if rg is unavailable or fails.
+        """
+        import subprocess
+        cmd = ["rg", "--vimgrep", pattern]
+        if file_glob:
+            cmd += ["--glob", file_glob]
+        cmd.append(path)
         try:
-            with open(file_path, 'r') as f:
-                lines = sum(1 for _ in f)
-        except Exception:
-            lines = "n/a (binary?)"
-        return json.dumps({"path": file_path, "size_bytes": size, "lines": lines, "modified": modified})
-
-    @mcp.tool()
-    def search_files(pattern: str, path: str = ".", file_glob: str = "*") -> str:
-        """Search files matching file_glob under path for lines matching a regex pattern.
-        Returns at most 200 matches as 'filepath:lineno: line'."""
-        import fnmatch
-        results = []
-        rx = re.compile(pattern)
-        for root, dirs, files in os.walk(path):
-            dirs[:] = [d for d in dirs if not d.startswith('.')]
-            for filename in files:
-                if not fnmatch.fnmatch(filename, file_glob):
-                    continue
-                filepath = os.path.join(root, filename)
-                try:
-                    with open(filepath, 'r', errors='replace') as f:
-                        for lineno, line in enumerate(f, 1):
-                            if rx.search(line):
-                                results.append(f"{filepath}:{lineno}: {line.rstrip()}")
-                                if len(results) >= 200:
-                                    results.append("... (truncated at 200 matches)")
-                                    return "\n".join(results)
-                except (IOError, OSError):
-                    continue
-        return "\n".join(results) if results else "No matches found."
-
-    @mcp.tool()
-    def get_file_tree(path: str = ".", max_depth: int = 3) -> str:
-        """Return the directory tree rooted at path up to max_depth levels deep."""
-        lines = []
-        def _walk(current, prefix, depth):
-            if depth > max_depth:
-                return
-            try:
-                entries = sorted(os.listdir(current))
-            except PermissionError:
-                return
-            entries = [e for e in entries if not e.startswith('.')]
-            for i, name in enumerate(entries):
-                connector = "└── " if i == len(entries) - 1 else "├── "
-                full = os.path.join(current, name)
-                lines.append(prefix + connector + name)
-                if os.path.isdir(full):
-                    extension = "    " if i == len(entries) - 1 else "│   "
-                    _walk(full, prefix + extension, depth + 1)
-        lines.append(path)
-        _walk(path, "", 1)
-        return "\n".join(lines)
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            output = result.stdout.strip()
+            if result.returncode not in (0, 1):
+                return f"Error: {result.stderr.strip() or 'rg exited with code ' + str(result.returncode)}"
+            return output if output else "No matches found."
+        except FileNotFoundError:
+            return "Error: ripgrep (rg) is not installed or not on PATH."
 
     # ── Medium tier ────────────────────────────────────────────────────────────
 
@@ -553,7 +542,7 @@ if __name__ == '__main__':
             return resp.read().decode("utf-8", errors="replace")
 
     @mcp.tool()
-    def code_outline(file_path: str) -> str:
+    def file_code_outline(file_path: str) -> str:
         """Return the class/method/function structure of a single source file as JSON."""
         ext = os.path.splitext(file_path)[1].lower()
         if ext not in EXT_TO_LANG:
@@ -569,7 +558,7 @@ if __name__ == '__main__':
     # ── High tier ──────────────────────────────────────────────────────────────
 
     @mcp.tool()
-    def fetch_codebase_metadata() -> str:
+    def project_code_outline() -> str:
         """Walk the working directory and extract class/method/function structure
         from Python, Java, C, C++, and Smali source files.  Language is
         auto-detected from file extension; mixed-language projects are handled
@@ -592,39 +581,39 @@ if __name__ == '__main__':
                     infra[os.path.relpath(filepath, cwd)] = info
         return json.dumps(infra, indent=2)
 
-    @mcp.tool()
-    def run_command(command: str, timeout: int = 30) -> str:
-        """Execute a shell command and return its stdout and stderr."""
-        result = subprocess.run(
-            command, shell=True, capture_output=True, text=True, timeout=timeout
-        )
-        out = result.stdout
-        err = result.stderr
-        parts = []
-        if out:
-            parts.append(out)
-        if err:
-            parts.append(f"[stderr]\n{err}")
-        return "\n".join(parts) if parts else "(no output)"
+    # @mcp.tool()
+    # def run_command(command: str, timeout: int = 30) -> str:
+        # """Execute a shell command and return its stdout and stderr."""
+        # result = subprocess.run(
+            # command, shell=True, capture_output=True, text=True, timeout=timeout
+        # )
+        # out = result.stdout
+        # err = result.stderr
+        # parts = []
+        # if out:
+            # parts.append(out)
+        # if err:
+            # parts.append(f"[stderr]\n{err}")
+        # return "\n".join(parts) if parts else "(no output)"
 
-    @mcp.tool()
-    def create_file(file_path: str, content: str) -> str:
-        """Create a new file at file_path with the given content."""
-        os.makedirs(os.path.dirname(os.path.abspath(file_path)), exist_ok=True)
-        with open(file_path, 'w') as f:
-            f.write(content)
-        return f"Created {file_path} ({len(content)} bytes)"
+    # @mcp.tool()
+    # def create_file(file_path: str, content: str) -> str:
+        # """Create a new file at file_path with the given content."""
+        # os.makedirs(os.path.dirname(os.path.abspath(file_path)), exist_ok=True)
+        # with open(file_path, 'w') as f:
+            # f.write(content)
+        # return f"Created {file_path} ({len(content)} bytes)"
 
-    @mcp.tool()
-    def edit_file(file_path: str, old_text: str, new_text: str) -> str:
-        """Replace the first occurrence of old_text with new_text in a file."""
-        with open(file_path, 'r') as f:
-            original = f.read()
-        if old_text not in original:
-            return f"Error: old_text not found in {file_path}"
-        updated = original.replace(old_text, new_text, 1)
-        with open(file_path, 'w') as f:
-            f.write(updated)
-        return f"Replaced 1 occurrence in {file_path}"
+    # @mcp.tool()
+    # def edit_file(file_path: str, old_text: str, new_text: str) -> str:
+        # """Replace the first occurrence of old_text with new_text in a file."""
+        # with open(file_path, 'r') as f:
+            # original = f.read()
+        # if old_text not in original:
+            # return f"Error: old_text not found in {file_path}"
+        # updated = original.replace(old_text, new_text, 1)
+        # with open(file_path, 'w') as f:
+            # f.write(updated)
+        # return f"Replaced 1 occurrence in {file_path}"
 
     mcp.run(transport="stdio")
