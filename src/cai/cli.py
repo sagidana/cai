@@ -457,10 +457,19 @@ def call_llm(messages, args, stream_callback=None):
 
         if agentic and not getattr(args, 'oneline', False):
             prompt_tokens = usage.get('prompt_tokens', 0)
-            tool_names = [c.get('function', {}).get('name', '?') for c in (tool_calls or [])]
+            def _fmt_call(c):
+                name = c.get('function', {}).get('name', '?')
+                raw_args = c.get('function', {}).get('arguments', '')
+                try:
+                    parsed = json.loads(raw_args) if raw_args else {}
+                    args_str = ", ".join(f"{k}={json.dumps(v)}" for k, v in parsed.items())
+                except Exception:
+                    args_str = raw_args
+                return f"{name}({args_str})"
+            tool_calls_fmt = [_fmt_call(c) for c in (tool_calls or [])]
             pct = f"{prompt_tokens / profile['context']:.0%}" if profile['context'] else "?"
             status = (f"[turn {turn}/{max_turns}] tokens={prompt_tokens}/{profile['context']} ({pct})"
-                      f" tools={tool_names}")
+                      f" tools={tool_calls_fmt}")
             if stream_callback:
                 # Streaming writes to stdout between turns; start a fresh line so the
                 # status doesn't overwrite streamed content via \r.
@@ -752,6 +761,9 @@ def main():
     external_mcps = {}
     args.internal_tools = set()
     for entry in args.tools:
+        entry = entry.strip().rstrip(',')
+        if not entry:
+            continue
         if os.path.isfile(entry) or entry.endswith('.py'):
             log.info("main: loading external MCP %s", entry)
             external_mcps[entry] = get_external_tools(entry)
