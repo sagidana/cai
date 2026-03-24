@@ -1,13 +1,18 @@
 # cai — Command-line AI
 
-`cai` is a lightweight CLI tool that brings LLM intelligence into your terminal and editor workflow. It supports plain prompts, cursor-aware code generation, line-by-line batch processing, and MCP tool integration — all powered by any OpenAI-compatible API (defaults to [OpenRouter](https://openrouter.ai)).
+`cai` is a lightweight CLI tool that brings LLM intelligence into your terminal and editor workflow. It supports plain prompts, cursor-aware code generation, line-by-line batch processing, MCP tool integration, multi-turn agentic loops, and a full interactive TUI — all powered by any OpenAI-compatible API (defaults to [OpenRouter](https://openrouter.ai)).
 
 ---
 
 ## Features
 
 - **`prompt`** — Send a prompt with optional file, stdin, cursor location, and tool context.
+- **`--interactive`** — Full-screen TUI chat session with persistent history, status bar, and streaming output.
+- **`--agentic`** — Multi-turn tool-calling loop: the LLM keeps calling tools until it reaches a final answer.
 - **MCP tool support** — Pass external MCP server scripts via `-t`; the LLM can call their tools automatically.
+- **Model profiles** — Built-in capability map (context window, tier, tool-calling) for 20+ models; user-overridable.
+- **Context budget management** — Automatically compacts conversation history when the context window fills up.
+- **Stuck detection** — Injects a warning if the LLM keeps calling the same tool with the same arguments.
 - **Line-by-line batch mode** — Process stdin or a file one line at a time, calling the LLM per line (with optional parallelism via `--cores`).
 - **vimgrep integration** — Feed `vimgrep`-format output directly; `cai` loads each matched file's context automatically.
 - **Tab completion** — Auto-installs shell completion for bash, zsh, and fish on first run.
@@ -31,12 +36,17 @@ Config files are auto-created on first run under `~/.config/cai/`. You only need
 echo "sk-or-..." > ~/.config/cai/api_key
 ```
 
-`~/.config/cai/config.json` is created automatically with defaults. You can edit it to set a permanent base URL or default model:
+`~/.config/cai/config.json` is created automatically with defaults. You can edit it to set a permanent base URL, default model, or tune agentic behavior:
 
 ```json
 {
   "base_url": "https://openrouter.ai/api/v1",
-  "model": "arcee-ai/trinity-mini:free"
+  "model": "arcee-ai/trinity-mini:free",
+  "context_budget_pct": 0.75,
+  "tool_result_max_chars": 8000,
+  "model_profiles": {
+    "my-custom/model": {"tier": "large", "context": 128000, "tool_calling": true}
+  }
 }
 ```
 
@@ -69,6 +79,23 @@ echo "sk-or-..." > ~/.config/cai/api_key
 
   cai --location "./mymodule.py:42:4" -p "Implement this method"
   The file is included with the cursor position marked — great for Vim/editor integrations.
+
+  ---
+  Interactive TUI session
+
+  cai --interactive
+  # with an initial prompt and a file pre-loaded:
+  cai --interactive --file ./src/cai/cli.py -p "Walk me through this file"
+
+  Opens a full-screen chat interface. The status bar shows the model name, context usage,
+  and current status. Supports multi-line input (\+Enter or Alt-Enter), history (arrow keys),
+  and standard readline-style editing (Ctrl-A/E/U/K). Ctrl-C or Ctrl-D to exit.
+
+  ---
+  Agentic mode (multi-turn tool loop)
+
+  cai --agentic -t fetch_codebase_metadata -p "What are all the public methods in api.py?"
+  The LLM calls tools repeatedly until it has enough information to answer.
 
   ---
   Enable codebase introspection tool
@@ -123,6 +150,12 @@ echo "sk-or-..." > ~/.config/cai/api_key
   ├──────────────────────────┼─────────────────────────────────────────────┤
   │ -p / --                  │ The prompt                                  │
   ├──────────────────────────┼─────────────────────────────────────────────┤
+  │ --interactive            │ Full-screen TUI chat session                │
+  ├──────────────────────────┼─────────────────────────────────────────────┤
+  │ --agentic                │ Multi-turn tool-calling loop                │
+  ├──────────────────────────┼─────────────────────────────────────────────┤
+  │ --max-turns N            │ Max tool-call turns in agentic mode         │
+  ├──────────────────────────┼─────────────────────────────────────────────┤
   │ --file                   │ Include a file in context                   │
   ├──────────────────────────┼─────────────────────────────────────────────┤
   │ --location file:line:col │ Cursor-aware generation                     │
@@ -152,7 +185,7 @@ echo "sk-or-..." > ~/.config/cai/api_key
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-a`, `--action` | `prompt` | Action to perform (currently only `prompt`) |
+| `-a`, `--action` | `prompt` | Action to perform (`prompt`) |
 | `-p`, `--prompt` | — | The prompt text to send to the LLM |
 | `--system-prompt` | — | Optional system prompt |
 | `--file` | — | Path to a file to include in the LLM context (with line numbers) |
@@ -168,6 +201,9 @@ echo "sk-or-..." > ~/.config/cai/api_key
 | `--line-by-line` | off | Process stdin or `--file` one line at a time, calling LLM per line |
 | `--vimgrep` | off | Treat each input line as `file:line:col:text`; loads file context automatically (implies `--line-by-line`) |
 | `--cores` | `1` | Number of parallel threads for `--line-by-line` processing |
+| `--agentic` | off | Enable multi-turn agentic loop: LLM keeps calling tools until done |
+| `--interactive` | off | Open a full-screen TUI session; implies `--agentic`. Ctrl-C or Ctrl-D to exit |
+| `--max-turns` | tier-based (5/10/20) | Max tool-call turns in agentic mode |
 
 ---
 
@@ -198,6 +234,78 @@ cai -a prompt -p "Use this tool" -t /path/to/mcp_server.py
 # Use a specific model
 cai -a prompt -p "Explain recursion." --model "anthropic/claude-sonnet-4-6"
 ```
+
+---
+
+## Interactive Mode
+
+`--interactive` opens a persistent full-screen TUI powered by raw ANSI escape codes. No external dependencies required.
+
+```bash
+cai --interactive
+cai --interactive --model "openai/gpt-4o" -p "Let's review this PR" --file ./diff.patch
+```
+
+**Layout:**
+- Scrollable output region at the top (LLM responses stream in here in cyan)
+- Persistent status bar (reverse video) at the bottom showing: `model | ctx XX% (used/total) | status`
+- Input line at the very bottom
+
+**Input editing:**
+| Key | Action |
+|-----|--------|
+| Arrow up/down | History navigation |
+| Arrow left/right | Move cursor |
+| Home / Ctrl-A | Beginning of line |
+| End / Ctrl-E | End of line |
+| Ctrl-U | Kill to beginning |
+| Ctrl-K | Kill to end |
+| Backspace / Ctrl-D | Delete character |
+| `\` + Enter | Insert newline (multi-line input) |
+| Alt-Enter | Insert newline |
+| Enter | Submit |
+| Ctrl-C / Ctrl-D | Exit |
+
+**Interactive mode always uses agentic tool-calling.** Tool calls and results are shown inline in dim gray.
+
+---
+
+## Agentic Mode
+
+`--agentic` enables a multi-turn loop where the LLM calls tools, reads results, and continues until it can answer without further tool calls.
+
+```bash
+cai --agentic -t fetch_codebase_metadata -p "Find all TODO comments in the codebase"
+cai --agentic --max-turns 5 -t /path/to/server.py -p "Run the test suite and report failures"
+```
+
+**How it works:**
+1. Turn 1 forces at least one tool call (`tool_choice=required`) so the model can't skip tools.
+2. Each subsequent turn: tool results are appended to messages and the LLM continues.
+3. Agentic mode applies a tier-appropriate system prompt (small/mid/large) unless `--system-prompt` is set.
+4. Default max turns: 5 (small models), 10 (mid), 20 (large). Override with `--max-turns`.
+5. **Stuck detection:** if the LLM calls the same tool with identical arguments 3+ times, a warning is injected into the conversation.
+6. **Context compaction:** when prompt token usage exceeds the configured threshold (default 75%), older conversation turns are summarized into a compact memory message to free up context space.
+
+---
+
+## Model Profiles
+
+`cai` ships with a built-in capability map for 20+ models:
+
+| Model prefix | Tier | Context | Tool calling |
+|---|---|---|---|
+| `arcee-ai/trinity-mini` | small | 8k | yes |
+| `openai/gpt-4o-mini` | mid | 128k | yes |
+| `openai/gpt-4o` | large | 128k | yes |
+| `anthropic/claude-3-5-sonnet` | large | 200k | yes |
+| `anthropic/claude-3-7-sonnet` | large | 200k | yes |
+| `google/gemini-2.5-pro` | large | 1M | yes |
+| `meta-llama/llama-3.3-70b` | mid | 128k | yes |
+| `deepseek/deepseek-r1` | large | 64k | no |
+| _(unknown)_ | mid | 16k | yes |
+
+Profiles drive agentic system prompt verbosity, default max turns, and context compaction thresholds. You can override any profile in `config.json` under `"model_profiles"`.
 
 ---
 
@@ -262,8 +370,9 @@ register-python-argcomplete --shell fish cai | source
 ```
 cai/
 ├── src/cai/
-│   ├── cli.py      # CLI entry point and action handlers
+│   ├── cli.py      # CLI entry point, action handlers, agentic loop, model profiles
 │   ├── api.py      # OpenAI-compatible API clients (OpenAiApi, OpenRouterApi, AnthropicApi)
+│   ├── screen.py   # Terminal TUI for --interactive (raw ANSI, no dependencies)
 │   └── tools.py    # MCP tool server + tool dispatch logic (tree-sitter codebase parsing)
 └── pyproject.toml  # Build config; entry point: cai = "cai.cli:main"
 ```
