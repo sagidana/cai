@@ -24,6 +24,73 @@ logging.basicConfig(
 )
 log = logging.getLogger("cai")
 
+# Known model capability profiles. Matched by prefix against the model ID.
+# tier:    "small" | "mid" | "large" — drives prompt verbosity, max_turns defaults
+# context: context window in tokens
+# tool_calling: whether the model reliably supports tool/function calling
+MODEL_PROFILES = {
+    "arcee-ai/trinity-mini":          {"tier": "small", "context": 8192,   "tool_calling": True},
+    "openai/gpt-4o-mini":             {"tier": "mid",   "context": 128000, "tool_calling": True},
+    "openai/gpt-4o":                  {"tier": "large", "context": 128000, "tool_calling": True},
+    "openai/o1":                      {"tier": "large", "context": 128000, "tool_calling": True},
+    "openai/o3":                      {"tier": "large", "context": 200000, "tool_calling": True},
+    "anthropic/claude-3-haiku":       {"tier": "small", "context": 200000, "tool_calling": True},
+    "anthropic/claude-3-5-haiku":     {"tier": "mid",   "context": 200000, "tool_calling": True},
+    "anthropic/claude-3-5-sonnet":    {"tier": "large", "context": 200000, "tool_calling": True},
+    "anthropic/claude-3-7-sonnet":    {"tier": "large", "context": 200000, "tool_calling": True},
+    "anthropic/claude-opus-4":        {"tier": "large", "context": 200000, "tool_calling": True},
+    "anthropic/claude-sonnet-4":      {"tier": "large", "context": 200000, "tool_calling": True},
+    "google/gemini-2.0-flash":        {"tier": "mid",   "context": 1000000, "tool_calling": True},
+    "google/gemini-2.5-pro":          {"tier": "large", "context": 1000000, "tool_calling": True},
+    "meta-llama/llama-3.3-70b":       {"tier": "mid",   "context": 128000, "tool_calling": True},
+    "meta-llama/llama-3.1-8b":        {"tier": "small", "context": 128000, "tool_calling": True},
+    "mistralai/mistral-small":        {"tier": "small", "context": 32000,  "tool_calling": True},
+    "mistralai/mistral-large":        {"tier": "large", "context": 128000, "tool_calling": True},
+    "deepseek/deepseek-r1":           {"tier": "large", "context": 64000,  "tool_calling": False},
+    "deepseek/deepseek-chat":         {"tier": "mid",   "context": 64000,  "tool_calling": True},
+    # Conservative fallback for any unrecognised model
+    "_default":                       {"tier": "mid",   "context": 16000,  "tool_calling": True},
+}
+
+def get_model_profile(model_id):
+    """Return capability profile for model_id.
+
+    Tries exact match first, then prefix match (longest prefix wins),
+    then applies any per-model overrides from config.json under 'model_profiles'.
+    Falls back to '_default' if nothing matches.
+    """
+    # Exact match
+    profile = MODEL_PROFILES.get(model_id)
+
+    # Prefix match — pick the longest matching prefix
+    if profile is None:
+        best_prefix = ""
+        for prefix, p in MODEL_PROFILES.items():
+            if prefix == "_default":
+                continue
+            if model_id.startswith(prefix) and len(prefix) > len(best_prefix):
+                best_prefix = prefix
+                profile = p
+
+    if profile is None:
+        profile = MODEL_PROFILES["_default"]
+
+    profile = dict(profile)  # shallow copy so overrides don't mutate the source
+
+    # Apply user overrides from config.json: {"model_profiles": {"anthropic/claude-opus-4.6": {"context": 32000}}}
+    user_overrides = config.get("model_profiles", {}) if 'config' in globals() and config else {}
+    # Exact override
+    if model_id in user_overrides:
+        profile.update(user_overrides[model_id])
+    else:
+        # Prefix override
+        for prefix, overrides in user_overrides.items():
+            if model_id.startswith(prefix):
+                profile.update(overrides)
+                break
+
+    return profile
+
 
 def _tools_completer(prefix, **kwargs):
     """Completer for --tools: file paths for external MCPs, tool names for internal."""
@@ -256,9 +323,10 @@ def call_llm(messages, args, stream_callback=None):
     # when strict_format is requested so enforcement actually works.
     use_non_streaming = args.non_streaming or bool(args.strict_format)
 
-    log.info("call_llm: model=%s messages=%d tools=%d streaming=%s strict_format=%s",
-             args.model, len(messages), len(included_tools), not use_non_streaming,
-             args.strict_format or "none")
+    profile = get_model_profile(args.model)
+    log.info("call_llm: model=%s tier=%s context=%d messages=%d tools=%d streaming=%s strict_format=%s",
+             args.model, profile['tier'], profile['context'], len(messages), len(included_tools),
+             not use_non_streaming, args.strict_format or "none")
 
     if use_non_streaming:
         result = enforce_strict_format(
