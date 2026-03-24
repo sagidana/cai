@@ -738,6 +738,9 @@ def action_interactive(args):
     def status_callback(text):
         screen.set_status(f"{args.model} | {text}")
 
+    _LLM_STYLE = Screen._LLM_STYLE
+    _RESET     = Screen._RESET
+
     def stream_cb(chunk):
         screen.write(chunk)
 
@@ -745,13 +748,15 @@ def action_interactive(args):
         # If an initial prompt was given (-p or trailing words), run it first
         if args.prompt:
             messages.append({"role": "user", "content": args.prompt})
-            screen.write(f"> {args.prompt}\n")
+            screen.write(f"{Screen._USER_STYLE}> {args.prompt}{Screen._RESET}\n")
+            screen.write("\n")
             status_callback("thinking...")
             screen.show_prompt_placeholder("> ")
+            screen.write(_LLM_STYLE)
             response = call_llm(messages, args,
                                 stream_callback=stream_cb,
                                 status_callback=status_callback)
-            screen.write("\n")
+            screen.write(f"\n{_RESET}\n")
             if response:
                 messages.append({"role": "assistant", "content": response})
 
@@ -764,10 +769,11 @@ def action_interactive(args):
             messages.append({"role": "user", "content": user_input})
             status_callback("thinking...")
             screen.show_prompt_placeholder("> ")
+            screen.write(_LLM_STYLE)
             response = call_llm(messages, args,
                                 stream_callback=stream_cb,
                                 status_callback=status_callback)
-            screen.write("\n")
+            screen.write(f"\n{_RESET}\n")
             if response:
                 messages.append({"role": "assistant", "content": response})
 

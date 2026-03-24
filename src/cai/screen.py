@@ -31,6 +31,11 @@ class Screen:
     _PROMPT_PREFIX = "> "
     _CONT_PREFIX   = "  "   # continuation-line prefix (same width as prompt)
 
+    # ANSI styles
+    _USER_STYLE = "\033[1m"    # bold  — user messages
+    _LLM_STYLE  = "\033[36m"   # cyan  — LLM responses
+    _RESET      = "\033[m"
+
     def __init__(self):
         ts = shutil.get_terminal_size()
         self._rows, self._cols = ts.lines, ts.columns
@@ -80,7 +85,7 @@ class Screen:
         text = self._status_text[: self._cols].ljust(self._cols)
         sys.stdout.write(
             f"\033[s"                     # save cursor
-            f"\033[{sr};1H\033[K"         # move + clear line
+            f"\033[{sr};1H\033[m\033[K"  # move, reset attrs, clear line
             f"\033[7m{text}\033[m"        # reverse-video text (full-width)
             f"\033[u"                     # restore cursor
         )
@@ -125,7 +130,7 @@ class Screen:
         row = self._input_start_row()
         sys.stdout.write(
             f"\033[s"
-            f"\033[{row};1H\033[K{msg}"
+            f"\033[{row};1H\033[m\033[K{msg}"
             f"\033[u"
         )
         sys.stdout.flush()
@@ -213,7 +218,11 @@ class Screen:
             sb = self._scroll_bottom()
             for i, line in enumerate(result.split("\n")):
                 prefix = msg if i == 0 else self._CONT_PREFIX
-                sys.stdout.write(f"\033[{sb};1H{prefix}{line}\n")
+                sys.stdout.write(
+                    f"\033[{sb};1H{self._USER_STYLE}{prefix}{line}{self._RESET}\n"
+                )
+            # blank line between user message and LLM response
+            sys.stdout.write(f"\033[{sb};1H\n")
             sys.stdout.flush()
             raise _SubmitException(result)
 
@@ -349,8 +358,9 @@ class Screen:
         """Redraw all input lines and reposition the cursor."""
         # Clear all rows in the input area before redrawing to avoid stale content
         # from previous larger inputs or visual-wrap overflow.
+        # Reset attributes first so no inherited color bleeds into the prompt.
         for i in range(self._input_rows):
-            sys.stdout.write(f"\033[{self._input_start_row() + i};1H\033[K")
+            sys.stdout.write(f"\033[{self._input_start_row() + i};1H\033[m\033[K")
 
         buf_str = "".join(self._input_buf)
         lines = buf_str.split("\n")
