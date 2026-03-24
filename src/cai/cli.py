@@ -792,7 +792,7 @@ def action_interactive(args):
                 messages.append({"role": "assistant", "content": response})
 
         # Main interactive loop
-        _status("ready  (Ctrl-C/D to exit · \\+Enter or Alt-Enter for newline)")
+        _status("ready")
         while True:
             user_input = screen.prompt("> ")
             if not user_input.strip():
