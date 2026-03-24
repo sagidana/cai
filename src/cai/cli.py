@@ -196,6 +196,10 @@ def init():
     if not os.path.exists(config_path):
         default_config = {
             "base_url": "https://openrouter.ai/api/v1",
+            "model": "arcee-ai/trinity-mini:free",
+            "context_budget_pct": 0.75,
+            "tool_result_max_chars": 8000,
+            "model_profiles": {k: dict(v) for k, v in MODEL_PROFILES.items()}
         }
         with open(config_path, "w") as f:
             json.dump(default_config, f, indent=2)
