@@ -423,7 +423,7 @@ def _emit_status(text, status_callback, stream_callback):
         print(text, end="\r", file=sys.stderr, flush=True)
 
 
-def call_llm(messages, args, stream_callback=None, status_callback=None, tool_callback=None):
+def call_llm(messages, args, stream_callback=None, status_callback=None, tool_callback=None, ctx_callback=None):
     global external_mcps
 
     # handling available tools for LLM.
@@ -472,11 +472,13 @@ def call_llm(messages, args, stream_callback=None, status_callback=None, tool_ca
         prompt_tokens = usage.get('prompt_tokens', 0)
         pct = f"{prompt_tokens / profile['context']:.0%}" if profile['context'] else "?"
         ctx_str = f"ctx {pct} ({prompt_tokens}/{profile['context']})"
+        if ctx_callback:
+            ctx_callback(ctx_str)
 
         if not tool_calls:
             log.info("call_llm: done turn=%d length=%d", turn, len(content))
             if agentic and not getattr(args, 'oneline', False):
-                _emit_status(f"{ctx_str} | ready", status_callback, stream_callback)
+                _emit_status("ready", status_callback, stream_callback)
             return content
 
         if agentic and not getattr(args, 'oneline', False):
@@ -493,7 +495,7 @@ def call_llm(messages, args, stream_callback=None, status_callback=None, tool_ca
                     args_str = raw_args[:160] + ("..." if len(raw_args) > 160 else "")
                 return f"{name}({args_str})"
             tool_calls_fmt = [_fmt_call(c) for c in tool_calls]
-            status = f"[turn {turn}/{max_turns}] {ctx_str} | {', '.join(tool_calls_fmt)}"
+            status = f"[turn {turn}/{max_turns}] {', '.join(tool_calls_fmt)}"
             _emit_status(status, status_callback, stream_callback)
             if tool_callback:
                 for fmt in tool_calls_fmt:
@@ -514,7 +516,9 @@ def call_llm(messages, args, stream_callback=None, status_callback=None, tool_ca
                      usage.get('prompt_tokens'), usage.get('completion_tokens'), usage.get('total_tokens'))
             pt = usage.get('prompt_tokens', 0)
             pct2 = f"{pt / profile['context']:.0%}" if profile['context'] else "?"
-            _emit_status(f"ctx {pct2} ({pt}/{profile['context']}) | ready", status_callback, stream_callback)
+            if ctx_callback:
+                ctx_callback(f"ctx {pct2} ({pt}/{profile['context']})")
+            _emit_status("ready", status_callback, stream_callback)
             return content
         # agentic: loop to next turn
 
@@ -745,8 +749,19 @@ def action_interactive(args):
 
     screen = Screen()
 
+    last_ctx = [""]
+
+    def _status(text):
+        ctx_part = f"{last_ctx[0]} | " if last_ctx[0] else ""
+        screen.set_status(f"{args.model} | {ctx_part}{text}")
+
     def status_callback(text):
-        screen.set_status(f"{args.model} | {text}")
+        _status(text)
+
+    def ctx_cb(ctx_str):
+        last_ctx[0] = ctx_str
+        screen._redraw_status_raw()
+        sys.stdout.flush()
 
     _LLM_STYLE  = Screen._LLM_STYLE
     _META_STYLE = Screen._META_STYLE
@@ -770,13 +785,14 @@ def action_interactive(args):
             response = call_llm(messages, args,
                                 stream_callback=stream_cb,
                                 status_callback=status_callback,
-                                tool_callback=tool_cb)
+                                tool_callback=tool_cb,
+                                ctx_callback=ctx_cb)
             screen.write(f"\n{_RESET}\n")
             if response:
                 messages.append({"role": "assistant", "content": response})
 
         # Main interactive loop
-        screen.set_status(f"{args.model} | ready  (Ctrl-C/D to exit · \\+Enter or Alt-Enter for newline)")
+        _status("ready  (Ctrl-C/D to exit · \\+Enter or Alt-Enter for newline)")
         while True:
             user_input = screen.prompt("> ")
             if not user_input.strip():
@@ -788,7 +804,8 @@ def action_interactive(args):
             response = call_llm(messages, args,
                                 stream_callback=stream_cb,
                                 status_callback=status_callback,
-                                tool_callback=tool_cb)
+                                tool_callback=tool_cb,
+                                ctx_callback=ctx_cb)
             screen.write(f"\n{_RESET}\n")
             if response:
                 messages.append({"role": "assistant", "content": response})
