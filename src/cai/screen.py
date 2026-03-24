@@ -448,11 +448,12 @@ class Screen:
     def _update_cmd_status(self):
         """Render current command buffer into the status bar."""
         cmd_text = "".join(self._cmd_buf)
+        text = f":{cmd_text}"[: self._cols].ljust(self._cols)
         sr = self._status_row()
         sys.stdout.write(
             f"\033[s"
             f"\033[{sr};1H\033[m\033[K"
-            f"\033[7m:{cmd_text}\033[m"
+            f"\033[7m{text}\033[m"
             f"\033[u"
         )
         sys.stdout.flush()

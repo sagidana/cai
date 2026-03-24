@@ -707,11 +707,12 @@ def action_prompt(args):
             content = content.replace('\n', ' ')
         print(content)
 
-def _handle_interactive_cmd(cmd, screen, messages, args, status_callback):
+def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_ctx):
     """Execute a vim-style colon command from interactive mode."""
     if cmd == "compact":
         status_callback("compacting...")
         _compact_messages(messages, args.model)
+        last_ctx[0] = ""
         status_callback("ready")
     elif cmd == "clear":
         # Keep only the system prompt (first message if role==system)
@@ -719,6 +720,8 @@ def _handle_interactive_cmd(cmd, screen, messages, args, status_callback):
             messages[1:] = []
         else:
             messages.clear()
+        profile = get_model_profile(args.model)
+        last_ctx[0] = f"ctx 0% (0/{profile['context']})"
         status_callback("ready")
     elif cmd == "tools":
         tool_names = [t.get('function', {}).get('name') for t in tools
@@ -824,7 +827,7 @@ def action_interactive(args):
             if not user_input.strip():
                 continue
             if user_input.startswith(":"):
-                _handle_interactive_cmd(user_input[1:].strip(), screen, messages, args, status_callback)
+                _handle_interactive_cmd(user_input[1:].strip(), screen, messages, args, status_callback, last_ctx)
                 continue
             messages.append({"role": "user", "content": user_input})
             status_callback("thinking...")
