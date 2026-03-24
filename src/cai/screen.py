@@ -25,6 +25,12 @@ class _SubmitException(Exception):
         self.value = value
 
 
+class _CommandException(Exception):
+    """Raised internally by _handle_cmd_key() when a vim-style command is submitted."""
+    def __init__(self, value: str):
+        self.value = value
+
+
 class Screen:
     """Sole owner of terminal drawing for --interactive mode."""
 
@@ -47,6 +53,14 @@ class Screen:
         self._input_rows: int = 1
         self._in_prompt: bool = False
         self._status_text: str = ""
+
+        # Vim-style command mode state
+        self._cmd_mode: bool = False
+        self._cmd_buf: list[str] = []
+        self._cmd_history: list[str] = []
+        self._cmd_history_idx: int = -1
+        self._saved_status: str = ""
+        self._cmd_completions: list[str] = []
 
         # Open /dev/tty so keyboard input works even when stdin is piped
         self._tty_file = open("/dev/tty", "rb+", buffering=0)
@@ -164,6 +178,9 @@ class Screen:
                 except _SubmitException as e:
                     result = e.value
                     break
+                except _CommandException as e:
+                    result = f":{e.value}"
+                    break
                 sys.stdout.flush()
 
         except (KeyboardInterrupt, EOFError) as exc:
@@ -196,6 +213,11 @@ class Screen:
 
     def _handle_key(self, key: str, msg: str):
         """Dispatch one keypress. Raises _SubmitException on Enter."""
+
+        # ---- Delegate to command mode handler ----
+        if self._cmd_mode:
+            self._handle_cmd_key(key)
+            return
 
         # ---- Submit (or newline if line ends with \) ----
         if key in ("\r", "\n"):
@@ -304,6 +326,15 @@ class Screen:
             self._update_input_rows(msg)
             return
 
+        # ---- Enter command mode on ':' when buffer is empty ----
+        if key == ":" and not self._input_buf:
+            self._cmd_mode = True
+            self._cmd_buf = []
+            self._cmd_history_idx = -1
+            self._saved_status = self._status_text
+            self._update_cmd_status()
+            return
+
         # ---- Printable character ----
         if len(key) == 1 and ord(key) >= 32:
             self._input_buf.insert(self._cursor_pos, key)
@@ -407,3 +438,194 @@ class Screen:
                 rest = os.read(self._tty_fd, 16).decode("utf-8", errors="replace")
                 return ch + rest
         return ch
+
+    # ------------------------------------------------------------------ command mode
+
+    def set_cmd_completions(self, cmds: list[str]):
+        """Set the list of available command names for tab completion."""
+        self._cmd_completions = list(cmds)
+
+    def _update_cmd_status(self):
+        """Render current command buffer into the status bar."""
+        cmd_text = "".join(self._cmd_buf)
+        sr = self._status_row()
+        sys.stdout.write(
+            f"\033[s"
+            f"\033[{sr};1H\033[m\033[K"
+            f"\033[7m:{cmd_text}\033[m"
+            f"\033[u"
+        )
+        sys.stdout.flush()
+
+    def _handle_cmd_key(self, key: str):
+        """Handle keypress while in vim-style command mode."""
+        if key in ("\r", "\n"):
+            cmd = "".join(self._cmd_buf).strip()
+            if cmd:
+                self._cmd_history.insert(0, cmd)
+            self._cmd_mode = False
+            self._status_text = self._saved_status
+            self._redraw_status_raw()
+            sys.stdout.flush()
+            raise _CommandException(cmd)
+
+        if key == "\x7f":  # backspace
+            if self._cmd_buf:
+                self._cmd_buf.pop()
+                self._update_cmd_status()
+            else:
+                # empty buffer — exit command mode
+                self._cmd_mode = False
+                self._status_text = self._saved_status
+                self._redraw_status_raw()
+                sys.stdout.flush()
+            return
+
+        if key == "\033":  # plain ESC — cancel command mode
+            self._cmd_mode = False
+            self._status_text = self._saved_status
+            self._redraw_status_raw()
+            sys.stdout.flush()
+            return
+
+        if key == "\x03":  # Ctrl-C — cancel and propagate
+            self._cmd_mode = False
+            self._status_text = self._saved_status
+            self._redraw_status_raw()
+            sys.stdout.flush()
+            raise KeyboardInterrupt
+
+        if key == "\033[A":  # up — older command history
+            self._cmd_history_navigate(1)
+            return
+        if key == "\033[B":  # down — newer command history
+            self._cmd_history_navigate(-1)
+            return
+
+        if key == "\t":  # tab completion
+            self._cmd_tab_complete()
+            return
+
+        if len(key) == 1 and ord(key) >= 32:
+            self._cmd_buf.append(key)
+            self._update_cmd_status()
+
+    def _cmd_history_navigate(self, direction: int):
+        """direction: +1 = older, -1 = newer."""
+        new_idx = self._cmd_history_idx + direction
+        if direction > 0 and new_idx < len(self._cmd_history):
+            self._cmd_history_idx = new_idx
+            self._cmd_buf = list(self._cmd_history[self._cmd_history_idx])
+        elif direction < 0 and self._cmd_history_idx > 0:
+            self._cmd_history_idx -= 1
+            self._cmd_buf = list(self._cmd_history[self._cmd_history_idx])
+        elif direction < 0 and self._cmd_history_idx == 0:
+            self._cmd_history_idx = -1
+            self._cmd_buf = []
+        self._update_cmd_status()
+
+    def _cmd_tab_complete(self):
+        """Complete the current command buffer to the longest unambiguous prefix."""
+        current = "".join(self._cmd_buf)
+        matches = [c for c in self._cmd_completions if c.startswith(current)]
+        if len(matches) == 1:
+            self._cmd_buf = list(matches[0])
+        elif len(matches) > 1:
+            # longest common prefix among matches
+            common = matches[0]
+            for m in matches[1:]:
+                i = 0
+                while i < len(common) and i < len(m) and common[i] == m[i]:
+                    i += 1
+                common = common[:i]
+            if len(common) > len(current):
+                self._cmd_buf = list(common)
+        self._update_cmd_status()
+
+    # ------------------------------------------------------------------ tools overlay
+
+    def prompt_tools_overlay(self, tool_names: list[str], enabled: set) -> set:
+        """Show an interactive toggle list of tools. Returns updated enabled set.
+
+        Uses the alternate screen buffer so the conversation is preserved.
+        Navigate with up/down, toggle with Space or Enter, close with ESC.
+        """
+        if not tool_names:
+            return set(enabled)
+
+        enabled = set(enabled)
+        selected_idx = 0
+
+        # Switch to alternate screen buffer — preserves the main screen content.
+        sys.stdout.write("\033[?1049h")
+        sys.stdout.flush()
+
+        old = termios.tcgetattr(self._tty_fd)
+        try:
+            tty.setraw(self._tty_fd)
+            self._draw_tools_overlay(tool_names, enabled, selected_idx)
+
+            while True:
+                key = self._read_key()
+                if key == "\033":  # ESC — close
+                    break
+                elif key == "\x03":  # Ctrl-C — close
+                    break
+                elif key in ("\033[A", "k"):  # up
+                    selected_idx = max(0, selected_idx - 1)
+                    self._draw_tools_overlay(tool_names, enabled, selected_idx)
+                elif key in ("\033[B", "j"):  # down
+                    selected_idx = min(len(tool_names) - 1, selected_idx + 1)
+                    self._draw_tools_overlay(tool_names, enabled, selected_idx)
+                elif key in (" ", "\r", "\n"):  # toggle
+                    name = tool_names[selected_idx]
+                    if name in enabled:
+                        enabled.discard(name)
+                    else:
+                        enabled.add(name)
+                    self._draw_tools_overlay(tool_names, enabled, selected_idx)
+        finally:
+            termios.tcsetattr(self._tty_fd, termios.TCSADRAIN, old)
+            # Return to the main screen buffer, restoring the conversation.
+            sys.stdout.write("\033[?1049l")
+            sys.stdout.flush()
+
+        return enabled
+
+    def _draw_tools_overlay(self, tool_names: list[str], enabled: set, selected_idx: int):
+        """Render the full-screen tools toggle overlay."""
+        rows, cols = self._rows, self._cols
+
+        sys.stdout.write("\033[2J")  # clear screen
+
+        # Title bar
+        title = " Tools  (j/k navigate   Space/Enter toggle   ESC close) "
+        sys.stdout.write(f"\033[1;1H\033[7m{title[:cols].ljust(cols)}\033[m")
+
+        list_start_row = 3
+        max_visible = max(1, rows - list_start_row - 1)
+
+        # Scroll offset to keep selected item visible
+        scroll_offset = 0
+        if selected_idx >= max_visible:
+            scroll_offset = selected_idx - max_visible + 1
+
+        visible = tool_names[scroll_offset: scroll_offset + max_visible]
+
+        for i, name in enumerate(visible):
+            actual_idx = i + scroll_offset
+            row = list_start_row + i
+            check = "[x]" if name in enabled else "[ ]"
+            line = f"  {check} {name}"
+            sys.stdout.write(f"\033[{row};1H")
+            if actual_idx == selected_idx:
+                sys.stdout.write(f"\033[7m{line[:cols]}\033[m")
+            else:
+                sys.stdout.write(line[:cols])
+
+        # Footer: enabled count
+        enabled_count = sum(1 for n in tool_names if n in enabled)
+        footer = f" {enabled_count}/{len(tool_names)} tools enabled "
+        sys.stdout.write(f"\033[{rows};1H\033[7m{footer[:cols].ljust(cols)}\033[m")
+
+        sys.stdout.flush()

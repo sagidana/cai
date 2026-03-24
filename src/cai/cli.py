@@ -707,6 +707,24 @@ def action_prompt(args):
             content = content.replace('\n', ' ')
         print(content)
 
+def _handle_interactive_cmd(cmd, screen, messages, args, status_callback):
+    """Execute a vim-style colon command from interactive mode."""
+    if cmd == "compact":
+        status_callback("compacting...")
+        _compact_messages(messages, args.model)
+        status_callback("ready")
+    elif cmd == "tools":
+        tool_names = [t.get('function', {}).get('name') for t in tools
+                      if t.get('function', {}).get('name')]
+        new_enabled = screen.prompt_tools_overlay(tool_names, args.internal_tools)
+        args.internal_tools = new_enabled
+        status_callback("ready")
+    elif cmd == "":
+        pass  # empty command, do nothing
+    else:
+        screen.write(f"\033[2;37m[unknown command: {cmd}]\033[m\n")
+
+
 ACTION_INTERACTIVE = "interactive"
 def action_interactive(args):
     """Multi-turn TUI conversation loop using Screen for display."""
@@ -748,6 +766,7 @@ def action_interactive(args):
                              "content": f"<cursor_location> line number: {ln}, column number: {cn} </cursor_location>"})
 
     screen = Screen()
+    screen.set_cmd_completions(["compact", "tools"])
 
     last_ctx = [""]
 
@@ -796,6 +815,9 @@ def action_interactive(args):
         while True:
             user_input = screen.prompt("> ")
             if not user_input.strip():
+                continue
+            if user_input.startswith(":"):
+                _handle_interactive_cmd(user_input[1:].strip(), screen, messages, args, status_callback)
                 continue
             messages.append({"role": "user", "content": user_input})
             status_callback("thinking...")
