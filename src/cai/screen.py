@@ -112,14 +112,25 @@ class Screen:
         )
 
     def _on_resize(self, signum, frame):
+        old_sb = self._scroll_bottom()
+
         ts = shutil.get_terminal_size()
         self._rows, self._cols = ts.lines, ts.columns
         if self._in_prompt:
             self._input_rows = self._calc_input_rows()
+
+        # Move to the first row below the old scroll area (where old input/
+        # status rows lived) and erase everything from there to the screen
+        # bottom.  This removes stale input/status content without touching
+        # the scrollable conversation above.  We do NOT reset the scroll
+        # region first (\033[r) because that clears the screen on some
+        # terminals (Windows Terminal / ConPTY).
+        sys.stdout.write(f"\033[{old_sb + 1};1H\033[J")
+
         self._apply_layout()
         if self._in_prompt:
             self._redraw_input_lines()
-            sys.stdout.flush()
+        sys.stdout.flush()
 
     # ------------------------------------------------------------------ public API
 
