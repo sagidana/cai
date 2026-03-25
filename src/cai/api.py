@@ -123,7 +123,7 @@ class OpenAiApi:
                 if chunk.get('usage'):
                     usage = chunk['usage']
 
-                if len(chunk["choices"]) != 1: continue
+                if len(chunk.get("choices") or []) != 1: continue
 
                 choice = chunk["choices"][0]
                 finish_reason = choice.get('finish_reason', None)
