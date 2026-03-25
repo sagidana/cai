@@ -70,6 +70,8 @@ class Screen:
         signal.signal(signal.SIGWINCH, self._on_resize)
 
         self._apply_layout()
+        sys.stdout.write("\033[?25l")   # hide cursor by default
+        sys.stdout.flush()
 
     # ------------------------------------------------------------------ layout
 
@@ -95,15 +97,18 @@ class Screen:
             out.write(f"\033[{sb};1H")
         out.flush()
 
+    # Style for the status bar: bright azure on dark gray, no reverse-video
+    _STATUS_STYLE = "\033[38;5;45;48;5;238m"
+
     def _redraw_status_raw(self):
         """Redraw the status bar without flushing (caller must flush)."""
         sr = self._status_row()
         text = self._status_text[: self._cols].ljust(self._cols)
         sys.stdout.write(
-            f"\033[s"                     # save cursor
-            f"\033[{sr};1H\033[m\033[K"  # move, reset attrs, clear line
-            f"\033[7m{text}\033[m"        # reverse-video text (full-width)
-            f"\033[u"                     # restore cursor
+            f"\033[s"                                         # save cursor
+            f"\033[{sr};1H\033[m"                            # move, reset attrs
+            f"{self._STATUS_STYLE}{text}\033[m"              # styled text (full-width)
+            f"\033[u"                                         # restore cursor
         )
 
     def _on_resize(self, signum, frame):
@@ -170,6 +175,7 @@ class Screen:
         try:
             tty.setraw(self._tty_fd)
             termios.tcflush(self._tty_fd, termios.TCIFLUSH)  # discard keys typed during LLM response
+            sys.stdout.write("\033[?25h\033[5 q")  # show blinking bar cursor
             self._redraw_input_lines(msg)
             sys.stdout.flush()
 
@@ -190,6 +196,8 @@ class Screen:
         finally:
             termios.tcsetattr(self._tty_fd, termios.TCSADRAIN, old)
             self._in_prompt = False
+            sys.stdout.write("\033[?25l\033[0 q")  # hide cursor, reset shape
+            sys.stdout.flush()
             if caught_exc is not None:
                 self._clear_input_area()
                 self._input_rows = 1
@@ -201,6 +209,7 @@ class Screen:
     def close(self):
         """Restore terminal to its normal state and clear the screen."""
         sys.stdout.write("\033[m")     # reset all attributes (color, bold, etc.)
+        sys.stdout.write("\033[0 q")   # reset cursor shape to terminal default
         sys.stdout.write("\033[r")     # reset scrolling region
         sys.stdout.write("\033[2J")    # clear entire screen
         sys.stdout.write("\033[H")     # move cursor to top-left

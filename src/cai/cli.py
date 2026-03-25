@@ -813,17 +813,16 @@ def action_interactive(args):
 
     last_ctx = [""]
 
-    def _status(text):
-        ctx_part = f"{last_ctx[0]} | " if last_ctx[0] else ""
-        screen.set_status(f"{args.model} | {ctx_part}{text}")
+    def _status(text=None):
+        ctx_part = f" | {last_ctx[0]}" if last_ctx[0] else ""
+        screen.set_status(f"{args.model}{ctx_part}")
 
-    def status_callback(text):
-        _status(text)
+    def status_callback(text=None):
+        _status()
 
     def ctx_cb(ctx_str):
         last_ctx[0] = ctx_str
-        screen._redraw_status_raw()
-        sys.stdout.flush()
+        _status()
 
     _LLM_STYLE   = Screen._LLM_STYLE
     _META_STYLE  = Screen._META_STYLE
