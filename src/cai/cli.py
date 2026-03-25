@@ -199,6 +199,7 @@ def init():
             "model": "arcee-ai/trinity-mini:free",
             "context_budget_pct": 0.75,
             "tool_result_max_chars": 8000,
+            "ssl_verify": True,
             "model_profiles": {k: dict(v) for k, v in MODEL_PROFILES.items()}
         }
         with open(config_path, "w") as f:
@@ -212,9 +213,19 @@ def init():
         print(f"[*] Created empty api_key file at {api_key_path}")
 
     config = json.loads(open(config_path).read())
+
+    # Backfill keys added in newer versions so existing configs stay up-to-date.
+    updated = False
+    if 'ssl_verify' not in config:
+        config['ssl_verify'] = True
+        updated = True
+    if updated:
+        with open(config_path, "w") as f:
+            json.dump(config, f, indent=2)
+
     tools = get_tools()
     api_key = open(api_key_path).read().strip()
-    openai_api = OpenAiApi(config.get('base_url'), api_key)
+    openai_api = OpenAiApi(config.get('base_url'), api_key, ssl_verify=config.get('ssl_verify', True))
     openrouter_api = OpenRouterApi(api_key)
     log.info("init: done (base_url=%s, tools=%d)", config.get('base_url'), len(tools))
 

@@ -32,9 +32,10 @@ class OpenRouterApi:
         return r.json()
 
 class OpenAiApi:
-    def __init__(self, base_url, api_key):
+    def __init__(self, base_url, api_key, ssl_verify=True):
         self.base_url = base_url
         self.api_key = api_key
+        self.ssl_verify = ssl_verify
 
     def chat(self, messages, model, system_prompt=None, tools=None, tool_choice="auto"):
         url = f"{self.base_url}/chat/completions"
@@ -55,7 +56,7 @@ class OpenAiApi:
 
         data['messages'].extend(messages)
 
-        r = requests.post(url, headers=headers, json=data)
+        r = requests.post(url, headers=headers, json=data, verify=self.ssl_verify)
         if r.status_code != 200:
             print(f"[!] request {url} failed: {r.status_code}, {r.text}")
             return
@@ -107,7 +108,7 @@ class OpenAiApi:
         tool_calls = {}
         usage = {}
 
-        with requests.post(url, headers=headers, json=data, stream=True) as response:
+        with requests.post(url, headers=headers, json=data, stream=True, verify=self.ssl_verify) as response:
             response.raise_for_status()
             for line in response.iter_lines():
                 if not line: continue
