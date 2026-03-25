@@ -200,6 +200,7 @@ class Screen:
 
     def close(self):
         """Restore terminal to its normal state and clear the screen."""
+        sys.stdout.write("\033[m")     # reset all attributes (color, bold, etc.)
         sys.stdout.write("\033[r")     # reset scrolling region
         sys.stdout.write("\033[2J")    # clear entire screen
         sys.stdout.write("\033[H")     # move cursor to top-left

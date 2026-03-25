@@ -741,7 +741,10 @@ def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_c
     """Execute a vim-style colon command from interactive mode."""
     if cmd == "compact":
         status_callback("compacting...")
-        _compact_messages(messages, args.model)
+        try:
+            _compact_messages(messages, args.model)
+        except LLMError as e:
+            screen.write(f"\033[1;31m[compact error] {e}\033[m\n")
         last_ctx[0] = ""
         status_callback("ready")
     elif cmd == "clear":
@@ -853,6 +856,9 @@ def action_interactive(args):
             except LLMError as e:
                 screen.write(f"\n{_RESET}{_ERROR_STYLE}[error] {e}{_RESET}\n\n")
                 status_callback("error")
+            except BaseException:
+                screen.write(_RESET)
+                raise
 
         # Main interactive loop
         _status("ready")
@@ -878,9 +884,12 @@ def action_interactive(args):
             except LLMError as e:
                 screen.write(f"\n{_RESET}{_ERROR_STYLE}[error] {e}{_RESET}\n\n")
                 status_callback("error")
+            except BaseException:
+                screen.write(_RESET)
+                raise
 
     except (KeyboardInterrupt, EOFError):
-        screen.write("\n[exiting]\n")
+        screen.write(f"{_RESET}\n[exiting]\n")
     finally:
         screen.close()
 
