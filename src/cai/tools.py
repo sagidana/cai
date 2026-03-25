@@ -377,12 +377,29 @@ if __name__ == '__main__':
 
     mcp = FastMCP(name="Tools Server")
 
+    CWD = os.path.realpath(".")
+
+    def _safe_path(user_path: str) -> str:
+        """Resolve user_path relative to CWD and reject any traversal outside it.
+
+        Uses realpath so symlinks are resolved before the boundary check —
+        a symlink inside CWD that points outside is also rejected.
+        """
+        resolved = os.path.realpath(os.path.join(CWD, user_path))
+        if resolved != CWD and not resolved.startswith(CWD + os.sep):
+            raise ValueError(f"Error: path outside working directory: {user_path!r}")
+        return resolved
+
     # ── Low tier ───────────────────────────────────────────────────────────────
 
     @mcp.tool()
-    def cat(file_path: str) -> str:
+    def read(file_path: str) -> str:
         """Read and return the full contents of a file."""
-        with open(file_path, 'r') as f:
+        try:
+            safe = _safe_path(file_path)
+        except ValueError as e:
+            return str(e)
+        with open(safe, 'r') as f:
             return f.read()
 
     @mcp.tool()
@@ -420,7 +437,10 @@ if __name__ == '__main__':
         """
         from collections import deque
 
-        root = os.path.abspath(path)
+        try:
+            root = _safe_path(path)
+        except ValueError as e:
+            return str(e)
 
         rx = None
         if pattern:
@@ -450,7 +470,7 @@ if __name__ == '__main__':
         return "\n".join(entries) if entries else "(empty)"
 
     @mcp.tool()
-    def grep_files_content(pattern: str, path: str = ".", file_glob: str = "") -> str:
+    def pattern_search(pattern: str, path: str = ".", file_glob: str = "") -> str:
         """Search for a regex pattern across files using ripgrep (rg), returning results in
         vimgrep format: one match per line as  <file>:<line>:<col>:<matched line text>.
 
@@ -473,10 +493,14 @@ if __name__ == '__main__':
             Returns an error message prefixed with "Error:" if rg is unavailable or fails.
         """
         import subprocess
+        try:
+            safe_path = _safe_path(path)
+        except ValueError as e:
+            return str(e)
         cmd = ["rg", "--vimgrep", pattern]
         if file_glob:
             cmd += ["--glob", file_glob]
-        cmd.append(path)
+        cmd.append(safe_path)
         try:
             result = subprocess.run(cmd, capture_output=True, text=True)
             output = result.stdout.strip()
@@ -486,14 +510,16 @@ if __name__ == '__main__':
         except FileNotFoundError:
             return "Error: ripgrep (rg) is not installed or not on PATH."
 
-    # ── Medium tier ────────────────────────────────────────────────────────────
-
     @mcp.tool()
     def git_log(file_path: str = "", n: int = 10) -> str:
         """Show the last n git commits. Pass file_path to scope to a specific file."""
         cmd = ["git", "log", f"-{n}", "--oneline", "--no-decorate"]
         if file_path:
-            cmd += ["--", file_path]
+            try:
+                safe = _safe_path(file_path)
+            except ValueError as e:
+                return str(e)
+            cmd += ["--", safe]
         result = subprocess.run(cmd, capture_output=True, text=True)
         return result.stdout or result.stderr
 
@@ -506,8 +532,12 @@ if __name__ == '__main__':
     @mcp.tool()
     def git_blame(file_path: str) -> str:
         """Show git blame for a file — who last changed each line and when."""
+        try:
+            safe = _safe_path(file_path)
+        except ValueError as e:
+            return str(e)
         result = subprocess.run(
-            ["git", "blame", "--date=short", file_path],
+            ["git", "blame", "--date=short", safe],
             capture_output=True, text=True
         )
         return result.stdout or result.stderr
@@ -515,13 +545,17 @@ if __name__ == '__main__':
     @mcp.tool()
     def symbol_search(symbol: str, path: str = ".") -> str:
         """Find definitions of a function or class named symbol across source files."""
+        try:
+            safe_path = _safe_path(path)
+        except ValueError as e:
+            return str(e)
         patterns = [
             rf"^\s*(def|class|function|func|fn)\s+{re.escape(symbol)}\b",
             rf"^\s*(public|private|protected|static).*\s+{re.escape(symbol)}\s*\(",
         ]
         rx = re.compile("|".join(patterns))
         results = []
-        for root, dirs, files in os.walk(path):
+        for root, dirs, files in os.walk(safe_path):
             dirs[:] = [d for d in dirs if not d.startswith('.')]
             for filename in files:
                 filepath = os.path.join(root, filename)
@@ -544,18 +578,20 @@ if __name__ == '__main__':
     @mcp.tool()
     def file_code_outline(file_path: str) -> str:
         """Return the class/method/function structure of a single source file as JSON."""
-        ext = os.path.splitext(file_path)[1].lower()
+        try:
+            safe = _safe_path(file_path)
+        except ValueError as e:
+            return json.dumps({"error": str(e)})
+        ext = os.path.splitext(safe)[1].lower()
         if ext not in EXT_TO_LANG:
             return json.dumps({"error": f"Unsupported file type: {ext}"})
         try:
-            with open(file_path, 'rb') as f:
+            with open(safe, 'rb') as f:
                 source = f.read()
         except (IOError, OSError) as e:
             return json.dumps({"error": str(e)})
         result = _parse_file(source, LANGUAGE_CONFIGS[EXT_TO_LANG[ext]])
         return json.dumps(result, indent=2)
-
-    # ── High tier ──────────────────────────────────────────────────────────────
 
     @mcp.tool()
     def project_code_outline() -> str:
@@ -581,39 +617,109 @@ if __name__ == '__main__':
                     infra[os.path.relpath(filepath, cwd)] = info
         return json.dumps(infra, indent=2)
 
-    # @mcp.tool()
-    # def run_command(command: str, timeout: int = 30) -> str:
-        # """Execute a shell command and return its stdout and stderr."""
-        # result = subprocess.run(
-            # command, shell=True, capture_output=True, text=True, timeout=timeout
-        # )
-        # out = result.stdout
-        # err = result.stderr
-        # parts = []
-        # if out:
-            # parts.append(out)
-        # if err:
-            # parts.append(f"[stderr]\n{err}")
-        # return "\n".join(parts) if parts else "(no output)"
+    @mcp.tool()
+    def create_file(file_path: str, content: str) -> str:
+        """Create a new file at file_path with the given content.
 
-    # @mcp.tool()
-    # def create_file(file_path: str, content: str) -> str:
-        # """Create a new file at file_path with the given content."""
-        # os.makedirs(os.path.dirname(os.path.abspath(file_path)), exist_ok=True)
-        # with open(file_path, 'w') as f:
-            # f.write(content)
-        # return f"Created {file_path} ({len(content)} bytes)"
+        file_path must be relative to (or inside) the working directory;
+        paths that escape it (e.g. '../../etc/cron.d/evil') are rejected.
+        """
+        try:
+            safe = _safe_path(file_path)
+        except ValueError as e:
+            return str(e)
+        os.makedirs(os.path.dirname(safe), exist_ok=True)
+        with open(safe, 'w') as f:
+            f.write(content)
+        return f"Created {file_path} ({len(content)} bytes)"
 
-    # @mcp.tool()
-    # def edit_file(file_path: str, old_text: str, new_text: str) -> str:
-        # """Replace the first occurrence of old_text with new_text in a file."""
-        # with open(file_path, 'r') as f:
-            # original = f.read()
-        # if old_text not in original:
-            # return f"Error: old_text not found in {file_path}"
-        # updated = original.replace(old_text, new_text, 1)
-        # with open(file_path, 'w') as f:
-            # f.write(updated)
-        # return f"Replaced 1 occurrence in {file_path}"
+    @mcp.tool()
+    def read_lines(file_path: str, start: int, end: int) -> str:
+        """Read a specific range of lines from a file (1-based, inclusive).
+
+        Args:
+            file_path: Path relative to the working directory.
+            start:     First line to return (1-based).
+            end:       Last line to return (inclusive).
+
+        Returns the requested lines with their line numbers prefixed, or an error string.
+        """
+        try:
+            safe = _safe_path(file_path)
+        except ValueError as e:
+            return str(e)
+        if start < 1:
+            return "Error: start must be >= 1"
+        if end < start:
+            return "Error: end must be >= start"
+        try:
+            with open(safe, 'r') as f:
+                lines = f.readlines()
+        except (IOError, OSError) as e:
+            return f"Error: {e}"
+        slice_ = lines[start - 1:end]
+        if not slice_:
+            return f"Error: file has only {len(lines)} lines"
+        return "".join(f"{start + i}\t{line}" for i, line in enumerate(slice_))
+
+    @mcp.tool()
+    def rename_file(src_path: str, dst_path: str) -> str:
+        """Move or rename a file within the working directory.
+
+        Both src_path and dst_path must be relative to (or inside) the working
+        directory; paths that escape it are rejected.
+        Parent directories of dst_path are created automatically.
+        """
+        try:
+            safe_src = _safe_path(src_path)
+            safe_dst = _safe_path(dst_path)
+        except ValueError as e:
+            return str(e)
+        if not os.path.exists(safe_src):
+            return f"Error: source not found: {src_path}"
+        if os.path.isdir(safe_src):
+            return f"Error: {src_path!r} is a directory, not a file"
+        os.makedirs(os.path.dirname(safe_dst), exist_ok=True)
+        os.rename(safe_src, safe_dst)
+        return f"Renamed {src_path} -> {dst_path}"
+
+    @mcp.tool()
+    def remove_file(file_path: str) -> str:
+        """Remove a file at file_path.
+
+        file_path must be relative to (or inside) the working directory;
+        paths that escape it (e.g. '../../etc/passwd') are rejected.
+        Directories are not removed — only regular files.
+        """
+        try:
+            safe = _safe_path(file_path)
+        except ValueError as e:
+            return str(e)
+        if not os.path.exists(safe):
+            return f"Error: file not found: {file_path}"
+        if os.path.isdir(safe):
+            return f"Error: {file_path!r} is a directory, not a file"
+        os.remove(safe)
+        return f"Removed {file_path}"
+
+    @mcp.tool()
+    def edit_file(file_path: str, old_text: str, new_text: str) -> str:
+        """Replace the first occurrence of old_text with new_text in a file.
+
+        file_path must be relative to (or inside) the working directory;
+        paths that escape it are rejected.
+        """
+        try:
+            safe = _safe_path(file_path)
+        except ValueError as e:
+            return str(e)
+        with open(safe, 'r') as f:
+            original = f.read()
+        if old_text not in original:
+            return f"Error: old_text not found in {file_path}"
+        updated = original.replace(old_text, new_text, 1)
+        with open(safe, 'w') as f:
+            f.write(updated)
+        return f"Replaced 1 occurrence in {file_path}"
 
     mcp.run(transport="stdio")
