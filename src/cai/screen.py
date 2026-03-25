@@ -384,6 +384,19 @@ class Screen:
                 sb = self._scroll_bottom()   # bottom of current (old) scroll region
                 sys.stdout.write(f"\033[{sb};1H")
                 sys.stdout.write("\n" * delta)
+            elif delta < 0:
+                # Reverse-scroll the output region to recover lines that were
+                # pushed into the scrollback when the input area grew.
+                # \033M (Reverse Index) at the top margin scrolls the region
+                # down by one line, pulling scrollback content back in.
+                sys.stdout.write("\033[1;1H")        # move to top of current scroll region
+                sys.stdout.write("\033M" * (-delta)) # recover scrollback lines
+                # Clear the rows being released back to the output region so
+                # stale input content doesn't remain visible there.
+                old_input_start = self._input_start_row()
+                new_input_start = self._rows - new_rows
+                for row in range(old_input_start, new_input_start):
+                    sys.stdout.write(f"\033[{row};1H\033[m\033[K")
             self._input_rows = new_rows
             self._apply_layout()
         self._redraw_input_lines(msg)
