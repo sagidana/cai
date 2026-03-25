@@ -12,6 +12,7 @@ dependencies = [
     "tree-sitter>=0.25",
     "tree-sitter-language-pack>=0.13",
     "argcomplete>=3.0",
+    "prompt_toolkit>=3.0",
 ]
 
 [project.scripts]
