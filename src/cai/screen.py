@@ -38,10 +38,11 @@ class Screen:
     _CONT_PREFIX   = "  "   # continuation-line prefix (same width as prompt)
 
     # ANSI styles
-    _USER_STYLE = "\033[1m"      # bold  — user messages
-    _LLM_STYLE  = "\033[36m"     # cyan  — LLM responses
-    _META_STYLE = "\033[2;37m"   # dim gray — tool calls / metadata
-    _RESET      = "\033[m"
+    _USER_STYLE  = "\033[1m"      # bold  — user messages
+    _LLM_STYLE   = "\033[36m"     # cyan  — LLM responses
+    _META_STYLE  = "\033[2;37m"   # dim gray — tool calls / metadata
+    _ERROR_STYLE = "\033[1;31m"   # bold red — errors
+    _RESET       = "\033[m"
 
     def __init__(self):
         ts = shutil.get_terminal_size()

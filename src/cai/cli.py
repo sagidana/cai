@@ -24,6 +24,18 @@ logging.basicConfig(
 )
 log = logging.getLogger("cai")
 
+
+# ---------------------------------------------------------------------------
+# call_llm error hierarchy
+# ---------------------------------------------------------------------------
+class LLMError(Exception):
+    """Base class for errors raised by call_llm."""
+
+class MaxTurnsReached(LLMError):
+    def __init__(self, max_turns: int):
+        self.max_turns = max_turns
+        super().__init__(f"Reached maximum turns ({max_turns}) without a final response.")
+
 # Known model capability profiles. Matched by prefix against the model ID.
 # tier:    "small" | "mid" | "large" — drives prompt verbosity, max_turns defaults
 # context: context window in tokens
@@ -534,9 +546,9 @@ def call_llm(messages, args, stream_callback=None, status_callback=None, tool_ca
         # agentic: loop to next turn
 
     log.warning("call_llm: reached max_turns=%d", max_turns)
-    if agentic and not getattr(args, 'oneline', False):
+    if not getattr(args, 'oneline', False):
         _emit_status(f"[!] reached max turns ({max_turns})", status_callback, stream_callback)
-    return ""
+    raise MaxTurnsReached(max_turns)
 
 def prompt_line_by_line(args, messages):
     if not sys.stdin.isatty():
@@ -709,14 +721,21 @@ def action_prompt(args):
 
     if not args.non_streaming and not args.oneline and not args.strict_format:
         log.info("action_prompt: calling LLM (streaming)")
-        call_llm(messages, args, stream_callback=lambda chunk: (sys.stdout.write(chunk), sys.stdout.flush()))
-        print()
+        try:
+            call_llm(messages, args, stream_callback=lambda chunk: (sys.stdout.write(chunk), sys.stdout.flush()))
+            print()
+        except LLMError as e:
+            print()
+            print(f"[error] {e}", file=sys.stderr)
     else:
         log.info("action_prompt: calling LLM (non-streaming)")
-        content = call_llm(messages, args)
-        if args.oneline:
-            content = content.replace('\n', ' ')
-        print(content)
+        try:
+            content = call_llm(messages, args)
+            if args.oneline:
+                content = content.replace('\n', ' ')
+            print(content)
+        except LLMError as e:
+            print(f"[error] {e}", file=sys.stderr)
 
 def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_ctx):
     """Execute a vim-style colon command from interactive mode."""
@@ -803,9 +822,10 @@ def action_interactive(args):
         screen._redraw_status_raw()
         sys.stdout.flush()
 
-    _LLM_STYLE  = Screen._LLM_STYLE
-    _META_STYLE = Screen._META_STYLE
-    _RESET      = Screen._RESET
+    _LLM_STYLE   = Screen._LLM_STYLE
+    _META_STYLE  = Screen._META_STYLE
+    _ERROR_STYLE = Screen._ERROR_STYLE
+    _RESET       = Screen._RESET
 
     def stream_cb(chunk):
         screen.write(chunk)
@@ -822,14 +842,17 @@ def action_interactive(args):
             status_callback("thinking...")
             screen.show_prompt_placeholder("> ")
             screen.write(_LLM_STYLE)
-            response = call_llm(messages, args,
-                                stream_callback=stream_cb,
-                                status_callback=status_callback,
-                                tool_callback=tool_cb,
-                                ctx_callback=ctx_cb)
-            screen.write(f"\n{_RESET}\n")
-            if response:
+            try:
+                response = call_llm(messages, args,
+                                    stream_callback=stream_cb,
+                                    status_callback=status_callback,
+                                    tool_callback=tool_cb,
+                                    ctx_callback=ctx_cb)
+                screen.write(f"\n{_RESET}\n")
                 messages.append({"role": "assistant", "content": response})
+            except LLMError as e:
+                screen.write(f"\n{_RESET}{_ERROR_STYLE}[error] {e}{_RESET}\n\n")
+                status_callback("error")
 
         # Main interactive loop
         _status("ready")
@@ -844,14 +867,17 @@ def action_interactive(args):
             status_callback("thinking...")
             screen.show_prompt_placeholder("> ")
             screen.write(_LLM_STYLE)
-            response = call_llm(messages, args,
-                                stream_callback=stream_cb,
-                                status_callback=status_callback,
-                                tool_callback=tool_cb,
-                                ctx_callback=ctx_cb)
-            screen.write(f"\n{_RESET}\n")
-            if response:
+            try:
+                response = call_llm(messages, args,
+                                    stream_callback=stream_cb,
+                                    status_callback=status_callback,
+                                    tool_callback=tool_cb,
+                                    ctx_callback=ctx_cb)
+                screen.write(f"\n{_RESET}\n")
                 messages.append({"role": "assistant", "content": response})
+            except LLMError as e:
+                screen.write(f"\n{_RESET}{_ERROR_STYLE}[error] {e}{_RESET}\n\n")
+                status_callback("error")
 
     except (KeyboardInterrupt, EOFError):
         screen.write("\n[exiting]\n")
