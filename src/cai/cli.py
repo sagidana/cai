@@ -784,12 +784,36 @@ def action_prompt(args, available_tools, external_mcps):
     runner = TaskRunner.from_args(args)
     task = Task(messages=messages, goal=args.prompt or "")
 
+    # Diagnostic callbacks — mirror interactive mode's tool/task/ctx display,
+    # but written to stderr so stdout stays clean for piping.
+    _use_color = sys.stderr.isatty()
+    _META_SE  = '\033[2;37m' if _use_color else ''
+    _ERROR_SE = '\033[1;31m' if _use_color else ''
+    _RST_SE   = '\033[0m'    if _use_color else ''
+
+    def _diag_cb(line, error=False):
+        s = _ERROR_SE if error else _META_SE
+        sys.stderr.write(f"{s}{line}{_RST_SE}")
+        sys.stderr.flush()
+
+    def _diag_ctx_cb(ctx_str):
+        sys.stderr.write(f"{_META_SE}[{ctx_str}]{_RST_SE}\n")
+        sys.stderr.flush()
+
+    def _diag_status_cb(text=None):
+        if text:
+            sys.stderr.write(f"{_META_SE}[{text}]{_RST_SE}\n")
+            sys.stderr.flush()
+
     if not args.non_streaming and not args.oneline and not args.strict_format:
         log.info("action_prompt: calling LLM (streaming)")
         try:
             runner.run(task, args, available_tools, external_mcps,
                        stream_callback=lambda chunk: (sys.stdout.write(chunk), sys.stdout.flush()),
-                       tool_callback=lambda chunk: (sys.stderr.write(chunk), sys.stderr.flush()))
+                       tool_callback=_diag_cb,
+                       task_callback=_diag_cb,
+                       ctx_callback=_diag_ctx_cb,
+                       status_callback=_diag_status_cb)
             print()
         except LLMError as e:
             print()
@@ -797,7 +821,14 @@ def action_prompt(args, available_tools, external_mcps):
     else:
         log.info("action_prompt: calling LLM (non-streaming)")
         try:
-            content = runner.run(task, args, available_tools, external_mcps)
+            content = runner.run(task, args, available_tools, external_mcps,
+                                 tool_callback=_diag_cb,
+                                 task_callback=_diag_cb,
+                                 ctx_callback=_diag_ctx_cb,
+                                 status_callback=_diag_status_cb)
+            if not content:
+                print("[error] LLM returned empty response", file=sys.stderr)
+                sys.exit(1)
             if args.oneline:
                 content = content.replace('\n', ' ')
             print(content)
@@ -903,6 +934,12 @@ def action_interactive(args, available_tools, external_mcps):
         style = _ERROR_STYLE if error else _META_STYLE
         screen.write(f"{style}{line}{_RESET}{_LLM_STYLE}")
 
+    def task_cb(line, error=False):
+        """Like tool_cb but also refreshes the status bar so context labels update."""
+        style = _ERROR_STYLE if error else _META_STYLE
+        screen.write(f"{style}{line}{_RESET}{_LLM_STYLE}")
+        _status()
+
     try:
         # If an initial prompt was given (-p or trailing words), run it first
         if args.prompt:
@@ -918,7 +955,7 @@ def action_interactive(args, available_tools, external_mcps):
                 _runner = TaskRunner.from_args(args)
                 _task = CaiTask(messages=messages, goal=args.prompt or "")
                 response = _runner.run(_task, args, available_tools, external_mcps,
-                                       task_callback=tool_cb,
+                                       task_callback=task_cb,
                                        stream_callback=stream_cb,
                                        status_callback=status_callback,
                                        tool_callback=tool_cb,
@@ -958,7 +995,7 @@ def action_interactive(args, available_tools, external_mcps):
                 _runner = TaskRunner.from_args(args)
                 _task = CaiTask(messages=messages, goal=user_input)
                 response = _runner.run(_task, args, available_tools, external_mcps,
-                                       task_callback=tool_cb,
+                                       task_callback=task_cb,
                                        stream_callback=stream_cb,
                                        status_callback=status_callback,
                                        tool_callback=tool_cb,

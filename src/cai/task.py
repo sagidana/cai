@@ -207,15 +207,13 @@ class TaskDecomposer(ReasoningStrategy):
 class AnswerVerifier(ReasoningStrategy):
     """After getting a result, asks the LLM to verify it and optionally retries once.
 
-    Sets replaces_output=True so TaskRunner silences the main call_llm stream;
-    this hook is then responsible for displaying whichever answer ends up final.
+    The original answer always streams normally.  If revision is needed a
+    separator is shown and the revised answer streams via the same callbacks.
     """
-    replaces_output = True
 
     def post(self, task: Task, runner: 'TaskRunner'):
         from cai.cli import call_llm  # deferred to avoid circular import at module level
-        stream_cb = runner._callbacks.get('stream_callback')
-        tool_cb   = runner._callbacks.get('tool_callback')
+        tool_cb = runner._callbacks.get('tool_callback')
 
         # Verdict check is a silent internal call — no streaming needed.
         verdict = call_llm(
@@ -231,20 +229,14 @@ class AnswerVerifier(ReasoningStrategy):
 
         if runner._interrupt_event and runner._interrupt_event.is_set():
             log.info("AnswerVerifier: interrupted, skipping revision")
-            if stream_cb and task.result:
-                stream_cb(task.result)
             return None
 
         if not verdict:
             log.warning("AnswerVerifier: verdict call returned empty/None, skipping revision")
-            if stream_cb and task.result:
-                stream_cb(task.result)
             return None
 
         if "SATISFACTORY" in verdict:
             log.info("AnswerVerifier: verdict=SATISFACTORY, no revision needed")
-            if stream_cb and task.result:
-                stream_cb(task.result)
             return None
 
         log.info("AnswerVerifier: revision needed, retrying")
@@ -261,6 +253,9 @@ class AnswerVerifier(ReasoningStrategy):
             runner._external_mcps,
             **runner._callbacks,
         )
+        if not revised:
+            log.warning("AnswerVerifier: revised call_llm returned empty, keeping original")
+            return None
         return revised
 
 
@@ -325,6 +320,12 @@ class TaskRunner:
                         _cb(line, error=error) if line == "\n"
                         else _cb(f"{_ind}{line}", error=error)
                 )
+            if 'ctx_callback' in callbacks:
+                _orig_ctx_cb = callbacks['ctx_callback']
+                callbacks['ctx_callback'] = (
+                    lambda ctx_str, _cb=_orig_ctx_cb, _d=task.depth:
+                        _cb(f"[subtask depth:{_d}] {ctx_str}")
+                )
 
         # Store the (depth-adjusted) callbacks so hook strategies can use them.
         self._callbacks = callbacks
@@ -380,6 +381,11 @@ class TaskRunner:
         task.state = "running"
         log.info("task[depth=%d]: state=running", _depth)
         task.result = call_llm(task.messages, args, available_tools, external_mcps, **main_callbacks)
+        if not task.result:
+            log.warning("task[depth=%d]: call_llm returned empty result", _depth)
+            _tcb = callbacks.get('tool_callback')
+            if _tcb:
+                _tcb("[warning: LLM returned empty response]\n", error=True)
 
         # --- post_hook: run all strategies in reverse ---
         task.state = "post_hook"

@@ -297,8 +297,17 @@ class Screen:
         if not text:
             return
         with self._render_lock:
+            old_line_count = len(self._display_lines)
             self._segments.append(text)
             self._rebuild_display_lines()
+            # When the user has scrolled up, compensate the offset so the
+            # viewport stays pinned at the same absolute position instead of
+            # drifting as new lines are appended at the bottom.
+            if not self._follow_tail:
+                added = len(self._display_lines) - old_line_count
+                if added > 0:
+                    max_off = max(0, len(self._display_lines) - self._main_rows())
+                    self._scroll_offset = min(self._scroll_offset + added, max_off)
             self._redraw_main_view()
             if self._in_prompt:
                 self._redraw_prompt_line(self._current_prompt_msg)
