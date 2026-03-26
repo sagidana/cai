@@ -316,12 +316,19 @@ def handle_tool_calls(tool_calls, messages, call_content, allowed_tool_names, to
         })
         messages.append({'role': 'tool', 'tool_call_id': call_id, 'content': result})
 
-def enforce_strict_format(call_fn, strict_format):
+def enforce_strict_format(call_fn, strict_format, messages=None, max_attempts=4):
     """Retry call_fn() until its content matches strict_format.
-    call_fn must return (content, reasoning, tool_calls) or None/falsy."""
+    call_fn must return (content, reasoning, tool_calls) or None/falsy.
+    messages, if provided, is mutated between retries to inject feedback."""
 
     if strict_format == 'json':
-        while True:
+        if messages is not None:
+            messages.insert(0, {
+                'role': 'system',
+                'content': 'Respond only with a valid JSON object. Do not include markdown fences, explanations, or any text outside the JSON.',
+            })
+
+        for attempt in range(1, max_attempts + 1):
             result = call_fn()
             if not result: return result
             orig_content, reasoning, tool_calls, usage = result
@@ -333,7 +340,20 @@ def enforce_strict_format(call_fn, strict_format):
                 return content, reasoning, tool_calls, usage
             except Exception:
                 log.error(f"failed to get requested format from LLM: {strict_format=} -> {orig_content=}, {reasoning=}, {tool_calls=}")
-                continue
+                print(f"[enforce_strict_format] attempt {attempt}/{max_attempts}: response is not valid JSON: {orig_content!r}", file=sys.stderr)
+                if attempt == max_attempts:
+                    print(f"[enforce_strict_format] giving up after {max_attempts} attempts", file=sys.stderr)
+                    return None
+                if messages is not None:
+                    messages.append({
+                        'role': 'user',
+                        'content': (
+                            f"Your previous response was not valid JSON (attempt {attempt}/{max_attempts}). "
+                            "Please respond with only a valid JSON object. "
+                            "Do not include markdown fences, explanations, or any text outside the JSON."
+                        ),
+                    })
+
     return call_fn()
 
 def _run_nonstreaming_turn(messages, args, included_tools, stream_callback=None, tool_choice="auto", interrupt_event=None):
@@ -342,7 +362,8 @@ def _run_nonstreaming_turn(messages, args, included_tools, stream_callback=None,
                                                             model=args.model,
                                                             tools=included_tools,
                                                             tool_choice=tool_choice),
-                                    args.strict_format)
+                                    args.strict_format,
+                                    messages=messages)
 
     if not result: return "", None, {}
 
