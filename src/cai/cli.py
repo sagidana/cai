@@ -338,13 +338,14 @@ def enforce_strict_format(call_fn, strict_format):
 
 def _run_nonstreaming_turn(messages, args, included_tools, stream_callback=None, tool_choice="auto"):
     """Single non-streaming LLM call. Returns (content, tool_calls, usage)."""
-    result = enforce_strict_format(
-        lambda: openai_api.chat(messages, model=args.model, tools=included_tools,
-                                tool_choice=tool_choice),
-        args.strict_format,
-    )
-    if not result:
-        return "", None, {}
+    result = enforce_strict_format(lambda: openai_api.chat( messages,
+                                                            model=args.model,
+                                                            tools=included_tools,
+                                                            tool_choice=tool_choice),
+                                    args.strict_format)
+
+    if not result: return "", None, {}
+
     content, _reasoning, tool_calls, usage = result
     return content or "", tool_calls, usage
 
@@ -353,8 +354,10 @@ def _run_streaming_turn(messages, args, included_tools, stream_callback, tool_ch
     accumulated = []
     last_tool_calls = None
     usage = {}
-    for chunk, tool_calls, usage in openai_api.chat_stream(
-            messages, model=args.model, tools=included_tools, tool_choice=tool_choice):
+    for chunk, tool_calls, usage in openai_api.chat_stream(messages,
+                                                           model=args.model,
+                                                           tools=included_tools,
+                                                           tool_choice=tool_choice):
         if chunk:
             accumulated.append(chunk)
             if stream_callback:
@@ -437,16 +440,17 @@ def _warn_if_stuck(tool_calls, call_history, messages):
             messages.append({"role": "user", "content": warning})
 
 
-def _emit_status(text, status_callback, stream_callback):
+def _emit_status(text, status_callback):
     if status_callback:
         status_callback(text)
-    elif stream_callback:
-        print(f"\n{text}", file=sys.stderr, flush=True)
-    else:
-        print(text, end="\r", file=sys.stderr, flush=True)
 
 
-def call_llm(messages, args, stream_callback=None, status_callback=None, tool_callback=None, ctx_callback=None):
+def call_llm(messages,
+             args,
+             stream_callback=None,
+             status_callback=None,
+             tool_callback=None,
+             ctx_callback=None):
     global external_mcps
 
     # handling available tools for LLM.
@@ -460,37 +464,44 @@ def call_llm(messages, args, stream_callback=None, status_callback=None, tool_ca
     for mcp_path in external_mcps:
         included_tools.extend(external_mcps[mcp_path])
 
-    # Streaming cannot enforce output format because the response is assembled
-    # incrementally and validated only after completion. Fallback to non-streaming
-    # when strict_format is requested so enforcement actually works.
-    use_non_streaming = args.non_streaming or bool(args.strict_format)
-
     profile = get_model_profile(args.model)
-    agentic = getattr(args, 'agentic', False)
 
-    if agentic:
-        tier_defaults = {'small': 5, 'mid': 10, 'large': 20}
-        default_max_turns = tier_defaults.get(profile['tier'], 10)
-        max_turns = getattr(args, 'max_turns', None) or default_max_turns
-    else:
-        max_turns = 1
+    tier_defaults = {'small': 5, 'mid': 10, 'large': 20}
+    default_max_turns = tier_defaults.get(profile['tier'], 10)
+    max_turns = getattr(args, 'max_turns', None) or default_max_turns
 
-    log.info("call_llm: model=%s tier=%s context=%d messages=%d tools=%d streaming=%s "
-             "strict_format=%s agentic=%s max_turns=%d",
-             args.model, profile['tier'], profile['context'], len(messages), len(included_tools),
-             not use_non_streaming, args.strict_format or "none", agentic, max_turns)
+    log.info("call_llm: model=%s tier=%s context=%d messages=%d tools=%d streaming=%s strict_format=%s max_turns=%d",
+             args.model,
+             profile['tier'],
+             profile['context'],
+             len(messages),
+             len(included_tools),
+             stream_callback,
+             args.strict_format or "none",
+             max_turns)
 
     call_history = {}  # (tool_name, args_str) -> call count, for stuck detection
-    run_turn = _run_nonstreaming_turn if use_non_streaming else _run_streaming_turn
+
+    if stream_callback:
+        run_turn = _run_streaming_turn
+    else:
+        run_turn = _run_nonstreaming_turn
 
     for turn in range(1, max_turns + 1):
         # Force at least one tool call on turn 1 in agentic mode so the model
         # doesn't skip tools and answer directly from training data.
-        tool_choice = "required" if (agentic and turn == 1 and included_tools) else "auto"
-        content, tool_calls, usage = run_turn(messages, args, included_tools, stream_callback,
-                                              tool_choice=tool_choice)
+        # tool_choice = "required" if (agentic and turn == 1 and included_tools) else "auto"
+        if args.require_tools:
+            tool_choice = "required"
+        else:
+            tool_choice = "auto"
+
+        content, tool_calls, usage = run_turn(messages, args, included_tools, stream_callback, tool_choice=tool_choice)
         log.info("call_llm: turn=%d tokens prompt=%s completion=%s total=%s",
-                 turn, usage.get('prompt_tokens'), usage.get('completion_tokens'), usage.get('total_tokens'))
+                 turn,
+                 usage.get('prompt_tokens'),
+                 usage.get('completion_tokens'),
+                 usage.get('total_tokens'))
 
         prompt_tokens = usage.get('prompt_tokens', 0)
         pct = f"{prompt_tokens / profile['context']:.0%}" if profile['context'] else "?"
@@ -500,11 +511,11 @@ def call_llm(messages, args, stream_callback=None, status_callback=None, tool_ca
 
         if not tool_calls:
             log.info("call_llm: done turn=%d length=%d", turn, len(content))
-            if agentic and not getattr(args, 'oneline', False):
-                _emit_status("ready", status_callback, stream_callback)
+
+            _emit_status("ready", status_callback)
             return content
 
-        if agentic and not getattr(args, 'oneline', False):
+        if not getattr(args, 'oneline', False):
             def _fmt_call(c):
                 name = c.get('function', {}).get('name', '?')
                 raw_args = c.get('function', {}).get('arguments', '')
@@ -517,9 +528,10 @@ def call_llm(messages, args, stream_callback=None, status_callback=None, tool_ca
                 except Exception:
                     args_str = raw_args[:160] + ("..." if len(raw_args) > 160 else "")
                 return f"{name}({args_str})"
+
             tool_calls_fmt = [_fmt_call(c) for c in tool_calls]
             status = f"[turn {turn}/{max_turns}] {', '.join(tool_calls_fmt)}"
-            _emit_status(status, status_callback, stream_callback)
+            _emit_status(status, status_callback)
             if tool_callback:
                 for fmt in tool_calls_fmt:
                     tool_callback(f"-> {fmt}\n")
@@ -527,27 +539,13 @@ def call_llm(messages, args, stream_callback=None, status_callback=None, tool_ca
         handle_tool_calls(tool_calls, messages, content, tool_callback=tool_callback)
         if tool_callback:
             tool_callback("\n")
+
         _warn_if_stuck(tool_calls, call_history, messages)
 
-        if agentic:
-            _check_context_budget(messages, usage, profile, args, status_callback)
-
-        if not agentic:
-            # Non-agentic: one follow-up call without tools, then done
-            content, _, usage = run_turn(messages, args, [], stream_callback)
-            log.info("call_llm: follow-up tokens prompt=%s completion=%s total=%s",
-                     usage.get('prompt_tokens'), usage.get('completion_tokens'), usage.get('total_tokens'))
-            pt = usage.get('prompt_tokens', 0)
-            pct2 = f"{pt / profile['context']:.0%}" if profile['context'] else "?"
-            if ctx_callback:
-                ctx_callback(f"ctx {pct2} ({pt}/{profile['context']})")
-            _emit_status("ready", status_callback, stream_callback)
-            return content
-        # agentic: loop to next turn
+        _check_context_budget(messages, usage, profile, args, status_callback)
 
     log.warning("call_llm: reached max_turns=%d", max_turns)
-    if not getattr(args, 'oneline', False):
-        _emit_status(f"[!] reached max turns ({max_turns})", status_callback, stream_callback)
+    _emit_status(f"[!] reached max turns ({max_turns})", status_callback)
     raise MaxTurnsReached(max_turns)
 
 def prompt_line_by_line(args, messages):
@@ -911,14 +909,14 @@ def main():
                         help="the system prompt to send to the LLM.")
     parser.add_argument("--cwd", default=".",
                         help="the current working for the script to operate at.")
-    parser.add_argument("--index",
-                        help="the index name for the index action to index into.")
     parser.add_argument("--file",
                         help="file path to include in the LLM context.")
     parser.add_argument("--location",
                         help="the location in the codebase to be used by the action. in the format of => <file_path>:<line_num>:<col_num>")
     parser.add_argument("--model", default=None,
                         help="the model to be used by the LLM")
+    parser.add_argument("--require-tools", action="store_true",
+                        help="require from llm to make tool use")
     parser.add_argument("--progress", action="store_true",
                         help="show progess bar.")
     parser.add_argument("--oneline", action="store_true",
