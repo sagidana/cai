@@ -452,6 +452,8 @@ class Screen:
                     f'{self._USER_STYLE}{prefix}{line}{self._RESET}\n'
                 )
             self._segments.append('\n')
+            self._follow_tail = True
+            self._scroll_offset = 0
             self._rebuild_display_lines()
             self._in_prompt = False
             self._clear_prompt_row()
@@ -484,6 +486,11 @@ class Screen:
 
         # ---- Ctrl-C ----
         if key == '\x03':
+            if self._input_buf:
+                self._input_buf.clear()
+                self._cursor_pos = 0
+                self._redraw_prompt_line(msg)
+                return
             raise KeyboardInterrupt
 
         # ---- Arrow keys ----

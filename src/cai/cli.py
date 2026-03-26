@@ -303,7 +303,10 @@ def handle_tool_calls(tool_calls, messages, call_content, allowed_tool_names, to
         arguments = call_function.get('arguments') or ''
         result = _execute_tool(call_name, arguments, allowed_tool_names)
         if tool_callback:
-            tool_callback(f"  <- {call_name}: {len(result)} chars\n")
+            if result.startswith("Error:"):
+                tool_callback(f"  \u2717 {call_name}: {result}\n", error=True)
+            else:
+                tool_callback(f"  <- {call_name}: {len(result)} chars\n")
         messages.append({
             'role': 'assistant',
             'content': call_content or '',
@@ -788,8 +791,9 @@ def action_interactive(args, available_tools, external_mcps):
     def stream_cb(chunk):
         screen.write(chunk)
 
-    def tool_cb(line):
-        screen.write(f"{_META_STYLE}{line}{_RESET}{_LLM_STYLE}")
+    def tool_cb(line, error=False):
+        style = _ERROR_STYLE if error else _META_STYLE
+        screen.write(f"{style}{line}{_RESET}{_LLM_STYLE}")
 
     try:
         # If an initial prompt was given (-p or trailing words), run it first
