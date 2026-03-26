@@ -511,8 +511,7 @@ def call_llm(messages,
     for turn in range(1, max_turns + 1):
         # Force at least one tool call on turn 1 in agentic mode so the model
         # doesn't skip tools and answer directly from training data.
-        # tool_choice = "required" if (agentic and turn == 1 and included_tools) else "auto"
-        if args.force_tools:
+        if args.force_tools and turn == 1:
             tool_choice = "required"
         else:
             tool_choice = "auto"
