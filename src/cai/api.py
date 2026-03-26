@@ -1,6 +1,10 @@
 import json
 import logging
+import warnings
 import requests
+from urllib3.exceptions import InsecureRequestWarning
+
+warnings.filterwarnings("ignore", category=InsecureRequestWarning)
 
 log = logging.getLogger("cai")
 
