@@ -588,6 +588,18 @@ class Screen:
                 self._redraw_prompt_line(msg)
             return
 
+        # ---- Ctrl-W / Ctrl-Backspace — delete word before cursor ----
+        if key in ('\x17', '\x08', '\033\x7f'):
+            # skip trailing whitespace, then delete a word
+            while self._cursor_pos > 0 and self._input_buf[self._cursor_pos - 1] in ' \t':
+                del self._input_buf[self._cursor_pos - 1]
+                self._cursor_pos -= 1
+            while self._cursor_pos > 0 and self._input_buf[self._cursor_pos - 1] not in ' \t\n':
+                del self._input_buf[self._cursor_pos - 1]
+                self._cursor_pos -= 1
+            self._redraw_prompt_line(msg)
+            return
+
         # ---- Forward delete ----
         if key == '\033[3~':
             if self._cursor_pos < len(self._input_buf):
@@ -610,11 +622,33 @@ class Screen:
             return
 
         # ---- Arrow keys ----
-        if key == '\033[A':   # up — history
-            self._history_navigate(1, msg)
+        if key == '\033[A':   # up
+            all_lines = ''.join(self._input_buf).split('\n')
+            before = ''.join(self._input_buf[:self._cursor_pos])
+            lines_before = before.split('\n')
+            cur_line = len(lines_before) - 1
+            if cur_line == 0:
+                self._history_navigate(1, msg)
+            else:
+                cur_col = len(lines_before[-1])
+                target_col = min(cur_col, len(all_lines[cur_line - 1]))
+                new_pos = sum(len(all_lines[i]) + 1 for i in range(cur_line - 1)) + target_col
+                self._cursor_pos = new_pos
+                self._redraw_prompt_line(msg)
             return
-        if key == '\033[B':   # down — history
-            self._history_navigate(-1, msg)
+        if key == '\033[B':   # down
+            all_lines = ''.join(self._input_buf).split('\n')
+            before = ''.join(self._input_buf[:self._cursor_pos])
+            lines_before = before.split('\n')
+            cur_line = len(lines_before) - 1
+            if cur_line == len(all_lines) - 1:
+                self._history_navigate(-1, msg)
+            else:
+                cur_col = len(lines_before[-1])
+                target_col = min(cur_col, len(all_lines[cur_line + 1]))
+                new_pos = sum(len(all_lines[i]) + 1 for i in range(cur_line + 1)) + target_col
+                self._cursor_pos = new_pos
+                self._redraw_prompt_line(msg)
             return
         if key == '\033[C':   # right
             if self._cursor_pos < len(self._input_buf):
@@ -627,12 +661,29 @@ class Screen:
                 self._redraw_prompt_line(msg)
             return
 
-        # ---- Home / End (keyboard or Ctrl-A / Ctrl-E) ----
-        if key in ('\033[H', '\x01'):
+        # ---- Home / End ----
+        # Home: beginning of current line; Ctrl-A: absolute beginning
+        if key in ('\033[H', '\033[1~', '\033OH'):
+            before = ''.join(self._input_buf[:self._cursor_pos])
+            last_nl = before.rfind('\n')
+            self._cursor_pos = last_nl + 1
+            self._redraw_prompt_line(msg)
+            return
+        if key == '\x01':   # Ctrl-A — absolute beginning
             self._cursor_pos = 0
             self._redraw_prompt_line(msg)
             return
-        if key in ('\033[F', '\x05'):
+        # End: end of current line; Ctrl-E: absolute end
+        if key in ('\033[F', '\033[4~', '\033OF'):
+            rest = ''.join(self._input_buf[self._cursor_pos:])
+            next_nl = rest.find('\n')
+            if next_nl == -1:
+                self._cursor_pos = len(self._input_buf)
+            else:
+                self._cursor_pos += next_nl
+            self._redraw_prompt_line(msg)
+            return
+        if key == '\x05':   # Ctrl-E — absolute end
             self._cursor_pos = len(self._input_buf)
             self._redraw_prompt_line(msg)
             return
