@@ -584,39 +584,7 @@ def prompt_line_by_line(args, messages):
         local_messages = messages.copy()
         file_path = line_num = col_num = match_text = None
 
-        if args.vimgrep:
-            parts = line.split(':', 3)
-            if len(parts) < 4:
-                with lock:
-                    print(f"[!] skipping malformed vimgrep line: {line}")
-                return
-            file_path, line_num, col_num, match_text = parts[0], parts[1], parts[2], parts[3]
-            try:
-                with open(file_path) as f:
-                    numbered_lines = [f"{i + 1}: {l}" for i, l in enumerate(f.readlines())]
-                messages.append({
-                    "role": "user",
-                    "content": f"<file_content>\n{''.join(numbered_lines)}</file_content>"
-                })
-            except (IOError, OSError) as e:
-                log.error("could not read %s: %s", file_path, e)
-                with lock:
-                    print(f"[!] could not read {file_path}: {e}")
-                return
-            local_messages.append({
-                "role": "user",
-                "content": (
-                    f"<match_location>\n"
-                    f"  file: {file_path}\n"
-                    f"  line: {line_num}\n"
-                    f"  column: {col_num}\n"
-                    f"  matched text: {match_text.strip()}\n"
-                    f"</match_location>"
-                )
-            })
-        else:
-            local_messages.append({"role": "user", "content": line})
-
+        local_messages.append({"role": "user", "content": line})
         local_messages.append({"role": "user", "content": args.prompt})
 
         response = call_llm(local_messages, args)
@@ -626,17 +594,11 @@ def prompt_line_by_line(args, messages):
             update_progress(completed_count[0])
             if args.oneline:
                 oneline_response = response.replace('\n', ' ')
-                if args.vimgrep:
-                    print(f"{file_path}:{line_num}:{col_num}:{oneline_response}", flush=True)
-                else:
-                    print(f"{line}:{oneline_response}", flush=True)
+                print(f"{line}:{oneline_response}", flush=True)
             else:
                 count_str = f"{completed_count[0]}/{total}" if total is not None else str(completed_count[0])
                 print(f"\n{'─' * 80}")
-                if args.vimgrep:
-                    print(f"[{count_str}] {file_path}:{line_num}:{col_num}  match: '{match_text.strip()}'")
-                else:
-                    print(f"[{count_str}] {line}")
+                print(f"[{count_str}] {line}")
                 print('─' * 80)
                 if response:
                     print(response)
@@ -682,8 +644,8 @@ def action_prompt(args):
         print("this action require --prompt to be provided.")
         return
 
-    log.info("action_prompt: model=%s file=%s location=%s line_by_line=%s vimgrep=%s oneline=%s",
-             args.model, args.file, args.location, args.line_by_line, args.vimgrep, args.oneline)
+    log.info("action_prompt: model=%s file=%s location=%s line_by_line=%s oneline=%s",
+             args.model, args.file, args.location, args.line_by_line, args.oneline)
 
     messages = []
     if args.system_prompt:
@@ -720,7 +682,10 @@ def action_prompt(args):
     if not args.non_streaming and not args.oneline and not args.strict_format:
         log.info("action_prompt: calling LLM (streaming)")
         try:
-            call_llm(messages, args, stream_callback=lambda chunk: (sys.stdout.write(chunk), sys.stdout.flush()))
+            call_llm(messages,
+                     args,
+                     stream_callback=lambda chunk: (sys.stdout.write(chunk), sys.stdout.flush()),
+                     tool_callback=lambda chunk: (sys.stderr.write(chunk), sys.stderr.flush()))
             print()
         except LLMError as e:
             print()
@@ -920,15 +885,13 @@ def main():
     parser.add_argument("--progress", action="store_true",
                         help="show progess bar.")
     parser.add_argument("--oneline", action="store_true",
-                        help="print results in a vimgrep style format, oneline all data.")
+                        help="print results in a oneline all data.")
     parser.add_argument("--strict-format", default=None, choices=['json'],
                         help="the expected format provided from the LLM response.")
     parser.add_argument("--include-reasoning", action="store_true",
                         help="let the action know whether or not to include reasoning in the output.")
     parser.add_argument("--non-streaming", action="store_true",
                         help="let the action know whether or not to use the non-streaming api.")
-    parser.add_argument("--agentic", action="store_true",
-                        help="enable multi-turn agentic loop: LLM keeps calling tools until done.")
     parser.add_argument("--interactive", action="store_true",
                         help="open a persistent TUI session; implies --agentic. Ctrl-C or Ctrl-D to exit.")
     parser.add_argument("--max-turns", type=int, default=None,
@@ -943,8 +906,6 @@ def main():
                         help="number of parallel threads for the grep action (default: 4).")
     parser.add_argument('--line-by-line', action='store_true', default=False,
                         help="process stdin (or --file) one line at a time, calling LLM per line.")
-    parser.add_argument('--vimgrep', action='store_true', default=False,
-                        help="treat each input line as vimgrep format (file:line:col:text), load file context automatically. implies --line-by-line.")
     parser.add_argument('prompt_words', nargs='*',
                         help="prompt words after -- (alternative to -p)")
 
@@ -976,13 +937,10 @@ def main():
             log.info("main: enabling internal tool %s", entry)
             args.internal_tools.add(entry)
 
-    if args.vimgrep:
-        args.line_by_line = True
-
     if args.interactive:
         args.agentic = True
-        if args.line_by_line or args.vimgrep or args.oneline:
-            parser.error("--interactive is incompatible with --line-by-line / --vimgrep / --oneline")
+        if args.line_by_line or args.oneline:
+            parser.error("--interactive is incompatible with --line-by-line / --oneline")
 
     log.info("main: action=%s model=%s internal_tools=%s external_mcps=%s interactive=%s",
              args.action, args.model, sorted(args.internal_tools), list(external_mcps.keys()),
