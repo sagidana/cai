@@ -53,11 +53,11 @@ def _wrap_ansi(text: str, width: int) -> list[str]:
         return text.split('\n') if text else ['']
 
     lines: list[str] = []
+    active_style = ''
 
     for logical in text.split('\n'):
-        current: list[str] = []
+        current: list[str] = [active_style] if active_style else []
         col = 0
-        active_style = ''
         i = 0
         n = len(logical)
 
