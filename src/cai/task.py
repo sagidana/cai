@@ -39,6 +39,11 @@ class Task:
 # ---------------------------------------------------------------------------
 
 class ReasoningStrategy(ABC):
+    # Set to True in subclasses that take ownership of displaying the final
+    # answer (e.g. AnswerVerifier).  When any active hook sets this, the main
+    # call_llm stream is silenced so only the hook's output is shown.
+    replaces_output = False
+
     def pre(self, task: Task, runner: 'TaskRunner'):
         """
         Called before main execution.
@@ -200,10 +205,19 @@ class TaskDecomposer(ReasoningStrategy):
 
 
 class AnswerVerifier(ReasoningStrategy):
-    """After getting a result, asks the LLM to verify it and optionally retries once."""
+    """After getting a result, asks the LLM to verify it and optionally retries once.
+
+    Sets replaces_output=True so TaskRunner silences the main call_llm stream;
+    this hook is then responsible for displaying whichever answer ends up final.
+    """
+    replaces_output = True
 
     def post(self, task: Task, runner: 'TaskRunner'):
         from cai.cli import call_llm  # deferred to avoid circular import at module level
+        stream_cb = runner._callbacks.get('stream_callback')
+        tool_cb   = runner._callbacks.get('tool_callback')
+
+        # Verdict check is a silent internal call — no streaming needed.
         verdict = call_llm(
             task.messages
             + [{"role": "assistant", "content": task.result}]
@@ -215,19 +229,37 @@ class AnswerVerifier(ReasoningStrategy):
         )
         log.info("AnswerVerifier: verdict=%r", verdict[:80] if verdict else "")
 
-        if (not verdict
-                or "SATISFACTORY" in verdict
-                or (runner._interrupt_event and runner._interrupt_event.is_set())):
-            return None  # satisfied, interrupted, or unparseable verdict
+        if runner._interrupt_event and runner._interrupt_event.is_set():
+            log.info("AnswerVerifier: interrupted, skipping revision")
+            if stream_cb and task.result:
+                stream_cb(task.result)
+            return None
+
+        if not verdict:
+            log.warning("AnswerVerifier: verdict call returned empty/None, skipping revision")
+            if stream_cb and task.result:
+                stream_cb(task.result)
+            return None
+
+        if "SATISFACTORY" in verdict:
+            log.info("AnswerVerifier: verdict=SATISFACTORY, no revision needed")
+            if stream_cb and task.result:
+                stream_cb(task.result)
+            return None
 
         log.info("AnswerVerifier: revision needed, retrying")
+
+        # Notify the user we are revising, then stream the revised answer.
+        if tool_cb:
+            tool_cb("\n[revising answer...]\n")
+
         task.messages.append({"role": "user", "content": f"Revision needed: {verdict}"})
         revised = call_llm(
             task.messages,
             runner._args,
             runner._available_tools,
             runner._external_mcps,
-            interrupt_event=runner._interrupt_event,
+            **runner._callbacks,
         )
         return revised
 
@@ -256,6 +288,7 @@ class TaskRunner:
         self._available_tools = None
         self._external_mcps = None
         self._interrupt_event = None  # forwarded so strategies respect Ctrl-C
+        self._callbacks = {}         # stream/tool/status callbacks for the current task
 
     def run(self, task: Task, args, available_tools, external_mcps,
             task_callback=None, **callbacks) -> str:
@@ -292,6 +325,18 @@ class TaskRunner:
                         _cb(line, error=error) if line == "\n"
                         else _cb(f"{_ind}{line}", error=error)
                 )
+
+        # Store the (depth-adjusted) callbacks so hook strategies can use them.
+        self._callbacks = callbacks
+
+        # If any active hook owns displaying the output (replaces_output=True),
+        # silence the main call_llm stream so the hook controls what is shown.
+        # Use a separate dict for the main call so self._callbacks stays intact
+        # (hooks need the real stream_callback to display the final answer).
+        main_callbacks = callbacks
+        if any(getattr(h, 'replaces_output', False) for h in self.hooks):
+            main_callbacks = dict(callbacks)
+            main_callbacks['stream_callback'] = lambda chunk: None
 
         from cai.cli import call_llm  # deferred to avoid circular import
 
@@ -334,7 +379,7 @@ class TaskRunner:
         # --- running ---
         task.state = "running"
         log.info("task[depth=%d]: state=running", _depth)
-        task.result = call_llm(task.messages, args, available_tools, external_mcps, **callbacks)
+        task.result = call_llm(task.messages, args, available_tools, external_mcps, **main_callbacks)
 
         # --- post_hook: run all strategies in reverse ---
         task.state = "post_hook"
