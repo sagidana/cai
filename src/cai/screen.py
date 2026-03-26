@@ -702,11 +702,14 @@ class Screen:
         pre_search_idx   = 0          # cursor position before entering search
 
         _resize_pending = [False]
+        _prev_lines: dict[int, str] = {}   # diff cache for flicker-free redraw
+        _first_draw  = [True]              # True → full background redraw needed
 
         def _on_overlay_resize(signum, frame):
             ts = shutil.get_terminal_size()
             self._rows, self._cols = ts.lines, ts.columns
             _resize_pending[0] = True
+            _first_draw[0]     = True      # geometry changed → full redraw
 
         def _find_matches(pattern: str) -> list[int]:
             if not pattern:
@@ -746,7 +749,9 @@ class Screen:
                 tool_names, enabled, selected_idx,
                 search_pattern, search_matches, search_match_idx,
                 search_mode, search_buf, search_direction,
+                _prev_lines, _first_draw[0],
             )
+            _first_draw[0] = False
 
         old_attrs    = termios.tcgetattr(self._tty_fd)
         orig_handler = signal.getsignal(signal.SIGWINCH)
@@ -858,6 +863,8 @@ class Screen:
         search_mode: bool,
         search_buf: list[str],
         search_direction: int,
+        prev_lines: dict,
+        first_draw: bool,
     ) -> None:
         """Render the centered floating tools overlay on top of the conversation."""
         rows, cols = self._rows, self._cols
@@ -866,16 +873,16 @@ class Screen:
         # ── Box dimensions ────────────────────────────────────────────────
         max_name_len = max((len(nm) for nm in tool_names), default=10)
         # "  [x] <name>  " → prefix 6 chars + name + 2 padding
-        content_w  = max_name_len + 8
-        max_inner_w = max(20, int(cols * 0.40) - 2)
-        inner_w    = max(20, min(content_w, max_inner_w))
-        box_w      = inner_w + 2   # side borders
+        content_w   = max_name_len + 8
+        max_inner_w = max(20, int(cols * 0.85) - 2)
+        inner_w     = max(20, min(content_w, max_inner_w))
+        box_w       = inner_w + 2   # side borders
 
-        # Layout rows:  ┌─┐ title ├─┤ [tools…] ├─┤ search/status └─┘
-        overhead   = 7
-        max_box_h  = max(overhead + 1, int(rows * 0.50))
-        visible_n  = max(1, min(n, max_box_h - overhead))
-        box_h      = visible_n + overhead
+        # Layout rows: ┌─┐ [tools…] ├─┤ search/status └─┘  (no title row)
+        overhead  = 4
+        max_box_h = max(overhead + 1, int(rows * 0.85))
+        visible_n = max(1, min(n, max_box_h - overhead))
+        box_h     = visible_n + overhead
 
         # Center the box
         start_r = max(1, (rows - box_h) // 2 + 1)
@@ -892,34 +899,23 @@ class Screen:
         VL = '│'; ML, MR = '├', '┤'
         h_line = H * inner_w
 
-        # Title with hints if space allows
-        hints = '  j/k:nav  Spc:toggle  /:search  n/N:next  ESC/↵:close'
-        title_base = ' Tools'
-        title_text = (title_base + hints)[:inner_w] if len(title_base + hints) <= inner_w else title_base
-        title_content = title_text.ljust(inner_w)
-
         dir_char = '/' if search_direction == 1 else '?'
 
-        buf: list[str] = []
+        # ── Build new line content (row_offset → text) ────────────────────
+        new_lines: dict[int, tuple[int, str]] = {}   # row_off → (screen_row, text)
 
         def put(row_off: int, text: str) -> None:
             r = start_r + row_off
             if 1 <= r <= rows:
-                buf.append(f'\033[{r};{start_c}H{text}')
-
-        # Redraw the conversation as background, then draw the overlay on top
-        sys.stdout.write('\033[2J')
-        self._redraw_main_view()
+                new_lines[row_off] = (r, text)
 
         # ── Draw box ──────────────────────────────────────────────────────
         put(0, f'{TL}{h_line}{TR}')
-        put(1, f'{VL}\033[1m{title_content}\033[m{VL}')
-        put(2, f'{ML}{h_line}{MR}')
 
         for i in range(visible_n):
             ai = i + scroll
             if ai >= n:
-                put(3 + i, f'{VL}{" " * inner_w}{VL}')
+                put(1 + i, f'{VL}{" " * inner_w}{VL}')
                 continue
 
             nm    = tool_names[ai]
@@ -941,12 +937,13 @@ class Screen:
             else:
                 styled = cell
 
-            put(3 + i, f'{VL}{styled}{VL}')
+            put(1 + i, f'{VL}{styled}{VL}')
 
-        put(3 + visible_n, f'{ML}{h_line}{MR}')
+        put(1 + visible_n, f'{ML}{h_line}{MR}')
 
         # ── Search / status bar ───────────────────────────────────────────
         enabled_count = sum(1 for nm in tool_names if nm in enabled)
+        hints = '  j/k /:search ESC/↵:close'
         if search_mode:
             search_text = ''.join(search_buf)
             if search_matches:
@@ -955,28 +952,49 @@ class Screen:
                 m_info = ' [no match]'
             else:
                 m_info = ''
-            raw_status = f' {dir_char}{search_text}{m_info}'
+            raw_status  = f' {dir_char}{search_text}{m_info}'
             status_cell = raw_status[:inner_w].ljust(inner_w)
-            put(3 + visible_n + 1, f'{VL}\033[7m{status_cell}\033[m{VL}')
+            put(1 + visible_n + 1, f'{VL}\033[7m{status_cell}\033[m{VL}')
         else:
             count_str = f' {enabled_count}/{n} enabled'
             if search_pattern:
                 m_label = f' [{search_match_idx + 1}/{len(search_matches)}]' if search_matches else ''
                 count_str += f'   {dir_char}{search_pattern}{m_label}'
+            if len(count_str) + len(hints) <= inner_w:
+                count_str += hints
             status_cell = count_str[:inner_w].ljust(inner_w)
-            put(3 + visible_n + 1, f'{VL}{status_cell}{VL}')
+            put(1 + visible_n + 1, f'{VL}{status_cell}{VL}')
 
-        put(3 + visible_n + 2, f'{BL}{h_line}{BR}')
+        put(1 + visible_n + 2, f'{BL}{h_line}{BR}')
+
+        # ── Emit only changed rows (flicker-free diff redraw) ─────────────
+        out: list[str] = []
+
+        if first_draw:
+            # Full background paint on first open or after resize
+            sys.stdout.write('\033[2J')
+            self._redraw_main_view()
+            for row_off, (r, text) in new_lines.items():
+                out.append(f'\033[{r};{start_c}H{text}')
+        else:
+            for row_off, (r, text) in new_lines.items():
+                if prev_lines.get(row_off) != text:
+                    out.append(f'\033[{r};{start_c}H{text}')
 
         # ── Cursor visibility ─────────────────────────────────────────────
         if search_mode:
             search_text = ''.join(search_buf)
             # position: border(1) + space(1) + dir_char(1) + len(search_text)
             cursor_col = start_c + 1 + 1 + 1 + len(search_text)
-            cursor_row = start_r + 3 + visible_n + 1
-            buf.append(f'\033[?25h\033[{cursor_row};{cursor_col}H')
+            cursor_row = start_r + 1 + visible_n + 1
+            out.append(f'\033[?25h\033[{cursor_row};{cursor_col}H')
         else:
-            buf.append('\033[?25l')
+            out.append('\033[?25l')
 
-        sys.stdout.write(''.join(buf))
+        # ── Update diff cache ─────────────────────────────────────────────
+        prev_lines.clear()
+        for row_off, (r, text) in new_lines.items():
+            prev_lines[row_off] = text
+
+        sys.stdout.write(''.join(out))
         sys.stdout.flush()
