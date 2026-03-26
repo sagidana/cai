@@ -8,7 +8,7 @@
 
 - **`prompt`** — Send a prompt with optional file, stdin, cursor location, and tool context.
 - **`--interactive`** — Full-screen TUI chat session with persistent history, streaming output, and vim-style commands.
-- **`--force-tools`** — Require the LLM to use a tool every turn (sets `tool_choice=required`).
+- **`--force-tools`** — Require the LLM to use a tool at least once (sets `tool_choice=required`).
 - **MCP tool support** — Pass external MCP server scripts via `-t`; the LLM can call their tools automatically.
 - **Model profiles** — Built-in capability map (context window, tier, tool-calling) for 20+ models; user-overridable.
 - **Context budget management** — Automatically compacts conversation history when the context window fills up.
@@ -138,7 +138,7 @@ cai --oneline -p "Summarize this function in one sentence" --file ./cli.py
 |------|---------|
 | `-p` / `--` | The prompt |
 | `--interactive` / `-i` | Full-screen TUI chat session |
-| `--force-tools` | Require the LLM to call a tool every turn |
+| `--force-tools` | Require the LLM to call a tool at least once |
 | `--max-turns N` | Max tool-call turns (default: tier-based 5/10/20) |
 | `--file` | Include a file in context |
 | `--cursor file:line:col` | Cursor-aware generation |
@@ -219,7 +219,7 @@ In interactive mode (and when tools are enabled in prompt mode), `cai` runs a mu
 4. **Stuck detection:** if the LLM calls the same tool with identical arguments 2+ times, a warning is injected into the conversation.
 5. **Context compaction:** when prompt token usage exceeds the configured threshold (default 75%), older conversation turns are summarized into a compact memory message to free up context space.
 
-Use `--force-tools` to require a tool call on every turn (`tool_choice=required`).
+Use `--force-tools` to require a tool call at least once (`tool_choice=required`).
 
 ---
 
