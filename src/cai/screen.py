@@ -473,7 +473,7 @@ class Screen:
             termios.tcsetattr(self._tty_fd, termios.TCSADRAIN, self._cooked_attrs)
             sys.stdout.write('\033[?1049l')
             sys.stdout.flush()
-            subprocess.run(['vim', tmp])
+            subprocess.run(['nvim', tmp])
             # Re-enter alternate screen and restore raw mode for the prompt loop
             sys.stdout.write('\033[?1049h')
             sys.stdout.flush()
