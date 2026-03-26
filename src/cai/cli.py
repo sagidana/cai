@@ -84,7 +84,6 @@ AGENTIC_SYSTEM_PROMPTS = {
     ),
 }
 
-
 def get_model_profile(model_id):
     """Return capability profile for model_id.
 
@@ -124,7 +123,6 @@ def get_model_profile(model_id):
 
     return profile
 
-
 def _tools_completer(prefix, **kwargs):
     """Completer for --tools: file paths for external MCPs, tool names for internal."""
     import glob as _glob
@@ -144,7 +142,6 @@ def _tools_completer(prefix, **kwargs):
         return [n for n in names if n.startswith(prefix)]
     except Exception:
         return []
-
 
 def setup_shell_completion():
     config_dir = os.path.expanduser("~/.config/cai")
@@ -177,7 +174,6 @@ def setup_shell_completion():
             print(f"[*] Shell completion added to {rc_file}. Run: source {rc_file}")
         except OSError:
             pass
-
 
 def init():
     global config
@@ -294,7 +290,6 @@ def _execute_tool(call_name, arguments):
     log.info("tool call: %s -> result length=%d", call_name, len(result))
     return trim_tool_result(result)
 
-
 def handle_tool_calls(tool_calls, messages, call_content, tool_callback=None):
     log.info("handle_tool_calls: dispatching %d tool call(s)", len(tool_calls))
     for call in tool_calls:
@@ -368,7 +363,6 @@ def _run_streaming_turn(messages, args, included_tools, stream_callback, tool_ch
 
 CONTEXT_BUDGET_THRESHOLDS = {'small': 0.60, 'mid': 0.75, 'large': 0.80}
 
-
 def _compact_messages(messages, model):
     """Summarize middle turns into a memory message to free up context space."""
     # Determine the slice to compact: after [system?][first_user], before last 4 messages
@@ -401,7 +395,6 @@ def _compact_messages(messages, model):
     log.info("compaction: replaced %d messages with memory (%d chars)", len(compactable), len(summary))
     messages[start_idx:end_idx] = [memory]
 
-
 def _check_context_budget(messages, usage, profile, args, status_callback=None):
     """Compact messages if prompt token usage exceeds the tier threshold."""
     prompt_tokens = usage.get('prompt_tokens', 0)
@@ -424,7 +417,6 @@ def _check_context_budget(messages, usage, profile, args, status_callback=None):
             print(f"\n{msg}", file=sys.stderr, flush=True)
         _compact_messages(messages, args.model)
 
-
 def _warn_if_stuck(tool_calls, call_history, messages):
     """Track repeated identical tool calls and inject a warning into messages when stuck."""
     for call in tool_calls:
@@ -439,11 +431,9 @@ def _warn_if_stuck(tool_calls, call_history, messages):
             log.warning("stuck detection: '%s' called %d times with same args", name, call_history[key])
             messages.append({"role": "user", "content": warning})
 
-
 def _emit_status(text, status_callback):
     if status_callback:
         status_callback(text)
-
 
 def call_llm(messages,
              args,

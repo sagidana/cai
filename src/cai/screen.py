@@ -222,8 +222,10 @@ class Screen:
         sys.stdout.write("\033[m")     # reset all attributes (color, bold, etc.)
         sys.stdout.write("\033[0 q")   # reset cursor shape to terminal default
         sys.stdout.write("\033[r")     # reset scrolling region
-        sys.stdout.write("\033[2J")    # clear entire screen
-        sys.stdout.write("\033[H")     # move cursor to top-left
+        # Clear status line and move cursor to bottom-left
+        sr = self._status_row()
+        sys.stdout.write(f"\033[{sr};1H\033[m\033[K")  # move to status row, clear it
+        sys.stdout.write(f"\033[{sr};1H")               # park cursor at bottom-left
         sys.stdout.write("\033[?25h")  # show cursor
         sys.stdout.flush()
         signal.signal(signal.SIGWINCH, signal.SIG_DFL)
