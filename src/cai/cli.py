@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 global config
-global tools
+global available_tools
 global api_key
 global openai_api
 global openrouter_api
@@ -177,7 +177,7 @@ def setup_shell_completion():
 
 def init():
     global config
-    global tools
+    global available_tools
     global api_key
     global openai_api
     global openrouter_api
@@ -231,11 +231,11 @@ def init():
         with open(config_path, "w") as f:
             json.dump(config, f, indent=2)
 
-    tools = get_tools()
+    available_tools = get_tools()
     api_key = open(api_key_path).read().strip()
     openai_api = OpenAiApi(config.get('base_url'), api_key, ssl_verify=config.get('ssl_verify', True))
     openrouter_api = OpenRouterApi(api_key)
-    log.info("init: done (base_url=%s, tools=%d)", config.get('base_url'), len(tools))
+    log.info("init: done (base_url=%s, available_tools=%d)", config.get('base_url'), len(available_tools))
 
     # models = openrouter_api.get_models()
     # stats = openrouter_api.get_account_stats()
@@ -252,15 +252,16 @@ def read_stdin_if_available():
         return sys.stdin.read()
     return None
 
-def _execute_tool(call_name, arguments):
-    """Validate and run a single tool call. Always returns a result string."""
-    known_tool_names = {t.get('function', {}).get('name') for t in tools}
-    for mcp_tools in external_mcps.values():
-        known_tool_names.update(t.get('function', {}).get('name') for t in mcp_tools)
+def _execute_tool(call_name, arguments, allowed_tool_names):
+    """Validate and run a single tool call. Always returns a result string.
 
-    if call_name not in known_tool_names:
-        log.warning("tool call: unknown tool '%s'", call_name)
-        return f"Error: unknown tool '{call_name}'. Available tools: {sorted(known_tool_names)}"
+    allowed_tool_names is the set of tool names actually sent to the LLM for
+    this session — validates against it so disabled tools cannot be executed
+    even if the LLM hallucinates a call to one.
+    """
+    if call_name not in allowed_tool_names:
+        log.warning("tool call: rejected tool '%s' (not in selected tools)", call_name)
+        return f"Error: tool '{call_name}' is not enabled. Enabled tools: {sorted(allowed_tool_names)}"
 
     try:
         call_args = json.loads(arguments) if arguments else {}
@@ -290,7 +291,7 @@ def _execute_tool(call_name, arguments):
     log.info("tool call: %s -> result length=%d", call_name, len(result))
     return trim_tool_result(result)
 
-def handle_tool_calls(tool_calls, messages, call_content, tool_callback=None):
+def handle_tool_calls(tool_calls, messages, call_content, allowed_tool_names, tool_callback=None):
     log.info("handle_tool_calls: dispatching %d tool call(s)", len(tool_calls))
     for call in tool_calls:
         if call.get('type') != 'function':
@@ -300,7 +301,7 @@ def handle_tool_calls(tool_calls, messages, call_content, tool_callback=None):
         call_function = call.get('function', {})
         call_name = call_function.get('name')
         arguments = call_function.get('arguments') or ''
-        result = _execute_tool(call_name, arguments)
+        result = _execute_tool(call_name, arguments, allowed_tool_names)
         if tool_callback:
             tool_callback(f"  <- {call_name}: {len(result)} chars\n")
         messages.append({
@@ -437,22 +438,24 @@ def _emit_status(text, status_callback):
 
 def call_llm(messages,
              args,
-             tools,
+             available_tools,
              external_mcps,
              stream_callback=None,
              status_callback=None,
              tool_callback=None,
              ctx_callback=None):
-    # handling available tools for LLM.
-    included_tools = []
-    internal_tool_names = getattr(args, 'internal_tools', set())
-    for tool in tools:
-        tool_name = tool.get('function', {}).get('name')
-        if tool_name in internal_tool_names:
-            included_tools.append(tool)
-
+    # Build the tool list actually sent to the LLM:
+    # only internal tools the user has selected, plus all external MCP tools.
+    selected_tool_names = getattr(args, 'selected_tools', set())
+    included_tools = [
+        tool for tool in available_tools
+        if tool.get('function', {}).get('name') in selected_tool_names
+    ]
     for mcp_path in external_mcps:
         included_tools.extend(external_mcps[mcp_path])
+
+    # Names the LLM was given — used to gate execution in _execute_tool.
+    allowed_tool_names = {t.get('function', {}).get('name') for t in included_tools}
 
     profile = get_model_profile(args.model)
 
@@ -526,7 +529,7 @@ def call_llm(messages,
                 for fmt in tool_calls_fmt:
                     tool_callback(f"-> {fmt}\n")
 
-        handle_tool_calls(tool_calls, messages, content, tool_callback=tool_callback)
+        handle_tool_calls(tool_calls, messages, content, allowed_tool_names, tool_callback=tool_callback)
         if tool_callback:
             tool_callback("\n")
 
@@ -538,7 +541,7 @@ def call_llm(messages,
     _emit_status(f"[!] reached max turns ({max_turns})", status_callback)
     raise MaxTurnsReached(max_turns)
 
-def prompt_line_by_line(args, messages, tools, external_mcps):
+def prompt_line_by_line(args, messages, available_tools, external_mcps):
     if not sys.stdin.isatty():
         log.info("prompt_line_by_line: mode=streaming_stdin")
         streaming_stdin = True
@@ -575,7 +578,7 @@ def prompt_line_by_line(args, messages, tools, external_mcps):
         local_messages.append({"role": "user", "content": line})
         local_messages.append({"role": "user", "content": args.prompt})
 
-        response = call_llm(local_messages, args, tools, external_mcps)
+        response = call_llm(local_messages, args, available_tools, external_mcps)
 
         with lock:
             completed_count[0] += 1
@@ -627,7 +630,7 @@ def _read_file_numbered(path):
 
 
 ACTION_PROMPT = "prompt"
-def action_prompt(args, tools, external_mcps):
+def action_prompt(args, available_tools, external_mcps):
     if not args.prompt:
         print("this action require --prompt to be provided.")
         return
@@ -663,7 +666,7 @@ def action_prompt(args, tools, external_mcps):
             messages.append({"role": "user", "content": f"<cursor_location> line number: {ln}, column number: {cn} </cursor_location>"})
 
     if args.line_by_line:
-        return prompt_line_by_line(args, messages, tools, external_mcps)
+        return prompt_line_by_line(args, messages, available_tools, external_mcps)
 
     messages.append({"role": "user", "content": args.prompt})
 
@@ -672,7 +675,7 @@ def action_prompt(args, tools, external_mcps):
         try:
             call_llm(messages,
                      args,
-                     tools,
+                     available_tools,
                      external_mcps,
                      stream_callback=lambda chunk: (sys.stdout.write(chunk), sys.stdout.flush()),
                      tool_callback=lambda chunk: (sys.stderr.write(chunk), sys.stderr.flush()))
@@ -683,7 +686,7 @@ def action_prompt(args, tools, external_mcps):
     else:
         log.info("action_prompt: calling LLM (non-streaming)")
         try:
-            content = call_llm(messages, args, tools, external_mcps)
+            content = call_llm(messages, args, available_tools, external_mcps)
             if args.oneline:
                 content = content.replace('\n', ' ')
             print(content)
@@ -710,10 +713,10 @@ def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_c
         last_ctx[0] = f"ctx 0% (0/{profile['context']})"
         status_callback("ready")
     elif cmd == "tools":
-        tool_names = [t.get('function', {}).get('name') for t in tools
+        tool_names = [t.get('function', {}).get('name') for t in available_tools
                       if t.get('function', {}).get('name')]
-        new_enabled = screen.prompt_tools_overlay(tool_names, args.internal_tools)
-        args.internal_tools = new_enabled
+        new_selected = screen.prompt_tools_overlay(tool_names, args.selected_tools)
+        args.selected_tools = new_selected
         status_callback("ready")
     elif cmd == "":
         pass  # empty command, do nothing
@@ -722,7 +725,7 @@ def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_c
 
 
 ACTION_INTERACTIVE = "interactive"
-def action_interactive(args, tools, external_mcps):
+def action_interactive(args, available_tools, external_mcps):
     """Multi-turn TUI conversation loop using Screen for display."""
     from cai.screen import Screen
 
@@ -800,7 +803,7 @@ def action_interactive(args, tools, external_mcps):
             try:
                 response = call_llm(messages,
                                     args,
-                                    tools, external_mcps,
+                                    available_tools, external_mcps,
                                     stream_callback=stream_cb,
                                     status_callback=status_callback,
                                     tool_callback=tool_cb,
@@ -828,7 +831,7 @@ def action_interactive(args, tools, external_mcps):
             screen.show_prompt_placeholder("> ")
             screen.write(_LLM_STYLE)
             try:
-                response = call_llm(messages, args, tools, external_mcps,
+                response = call_llm(messages, args, available_tools, external_mcps,
                                     stream_callback=stream_cb,
                                     status_callback=status_callback,
                                     tool_callback=tool_cb,
@@ -915,7 +918,7 @@ def main():
         args.model = config.get('model', "arcee-ai/trinity-mini:free")
 
     external_mcps = {}
-    args.internal_tools = set()
+    args.selected_tools = set()
     for entry in args.tools:
         entry = entry.strip().rstrip(',')
         if not entry:
@@ -925,22 +928,22 @@ def main():
             external_mcps[entry] = get_external_tools(entry)
         else:
             log.info("main: enabling internal tool %s", entry)
-            args.internal_tools.add(entry)
+            args.selected_tools.add(entry)
 
     if args.interactive:
         if args.line_by_line or args.oneline:
             parser.error("--interactive is incompatible with --line-by-line / --oneline")
 
-    log.info("main: action=%s model=%s internal_tools=%s external_mcps=%s interactive=%s",
-             args.action, args.model, sorted(args.internal_tools), list(external_mcps.keys()),
+    log.info("main: action=%s model=%s selected_tools=%s external_mcps=%s interactive=%s",
+             args.action, args.model, sorted(args.selected_tools), list(external_mcps.keys()),
              args.interactive)
 
     if args.interactive:
-        action_interactive(args, tools, external_mcps)
+        action_interactive(args, available_tools, external_mcps)
         return
 
     if args.action == ACTION_PROMPT:
-        action_prompt(args, tools, external_mcps)
+        action_prompt(args, available_tools, external_mcps)
 
 
 if __name__ == "__main__":
