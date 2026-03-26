@@ -474,9 +474,10 @@ class Screen:
             sys.stdout.write('\033[?1049l')
             sys.stdout.flush()
             subprocess.run(['vim', tmp])
-            # Re-enter alternate screen
+            # Re-enter alternate screen and restore raw mode for the prompt loop
             sys.stdout.write('\033[?1049h')
             sys.stdout.flush()
+            tty.setraw(self._tty_fd)
             with open(tmp, 'r') as f:
                 new_content = f.read().rstrip('\n')
         finally:
@@ -875,6 +876,7 @@ class Screen:
             tty.setraw(self._tty_fd)
             _redraw()
 
+            prev_key = ''
             while True:
                 if _resize_pending[0]:
                     _resize_pending[0] = False
@@ -954,7 +956,21 @@ class Screen:
                     else:
                         search_match_idx = (search_match_idx + 1) % len(search_matches)
                     selected_idx = search_matches[search_match_idx]
+                elif key == 'G':   # jump to last tool
+                    selected_idx = len(tool_names) - 1
+                elif key == 'g' and prev_key == 'g':   # gg → jump to first tool
+                    selected_idx = 0
+                else:
+                    # Ctrl-U / Ctrl-D: move cursor half a visible page
+                    _overhead = 4
+                    _vis = max(1, min(len(tool_names), max(5, int(self._rows * 0.85)) - _overhead))
+                    _half = max(1, _vis // 2)
+                    if key == '\x15':   # Ctrl-U — half page up
+                        selected_idx = max(0, selected_idx - _half)
+                    elif key == '\x04':   # Ctrl-D — half page down
+                        selected_idx = min(len(tool_names) - 1, selected_idx + _half)
 
+                prev_key = key
                 _redraw()
 
         finally:
