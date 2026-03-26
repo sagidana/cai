@@ -17,7 +17,7 @@ class OpenRouterApi:
         url = "https://openrouter.ai/api/v1/models"
         r = requests.get(url)
         if r.status_code != 200:
-            print(f"[!] request {url} failed with {r.status_code}, {r.text}")
+            log.error("api: request %s failed: %s %s", url, r.status_code, r.text)
             return
         response = r.json()
 
@@ -30,7 +30,7 @@ class OpenRouterApi:
 
         r = requests.get(url, headers=headers)
         if r.status_code != 200:
-            print(f"[!] request {url} failed with {r.status_code}, {r.text}")
+            log.error("api: request %s failed: %s %s", url, r.status_code, r.text)
             return
 
         return r.json()
@@ -62,20 +62,20 @@ class OpenAiApi:
 
         r = requests.post(url, headers=headers, json=data, verify=self.ssl_verify)
         if r.status_code != 200:
-            print(f"[!] request {url} failed: {r.status_code}, {r.text}")
+            log.error("api: request %s failed: %s %s", url, r.status_code, r.text)
             return
 
         result = r.json()
         choices = result.get("choices", [])
         if len(choices) != 1:
-            print(f"[!] len(choices) != 1: {choices}")
+            log.error("api: unexpected choices count=%d: %s", len(choices), choices)
             return
 
         choice = choices[0]
 
         message = choice.get('message', None)
         if not message:
-            print(f"[!] choice message is None")
+            log.error("api: choice message is None")
             return
 
         content = message.get('content', "")
@@ -188,9 +188,9 @@ class AnthropicApi:
 
         r = requests.post(url, headers=headers, json=data)
         if r.status_code != 200:
-            print(f"[!] request {url} failed: {r.status_code}, {r.text}")
+            log.error("api: request %s failed: %s %s", url, r.status_code, r.text)
             return
-        print(r.json())
+        log.info("api: anthropic response: %s", r.json())
 
 
 def main():

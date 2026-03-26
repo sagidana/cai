@@ -344,10 +344,10 @@ def _retry_until_format(call_fn, system_prompt, check_fn, fail_msg_fn, format_la
         if ok:
             return normalised, reasoning, tool_calls, usage
 
-        log.error(f"failed to get requested format from LLM: {format_label=} -> {orig_content=}, {reasoning=}, {tool_calls=}")
-        print(f"[enforce_strict_format] attempt {attempt}/{max_attempts}: {fail_msg_fn(attempt, max_attempts, orig_content)}", file=sys.stderr)
+        log.warning("enforce_strict_format: attempt %d/%d format=%s content=%r",
+                    attempt, max_attempts, format_label, (orig_content or "")[:120])
         if attempt == max_attempts:
-            print(f"[enforce_strict_format] giving up after {max_attempts} attempts", file=sys.stderr)
+            log.error("enforce_strict_format: giving up after %d attempts, format=%s", max_attempts, format_label)
             return None
         if messages is not None:
             messages.append({'role': 'user', 'content': fail_msg_fn(attempt, max_attempts, orig_content)})

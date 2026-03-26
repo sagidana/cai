@@ -265,9 +265,14 @@ class TaskRunner:
         self._external_mcps = external_mcps
         self._interrupt_event = callbacks.get('interrupt_event')
 
+        _depth = task.depth
+        _goal_short = task.goal[:60] + "..." if len(task.goal) > 60 else task.goal
+        log.info("task[depth=%d]: starting — %s", _depth, _goal_short)
+
         # Fast-exit: if already interrupted before this task even starts, skip everything.
         if self._interrupt_event and self._interrupt_event.is_set():
             task.state = "done"
+            log.info("task[depth=%d]: interrupted before start, skipping", _depth)
             return ""
 
         # Subtasks run silently — only the root response streams to the screen.
@@ -292,42 +297,59 @@ class TaskRunner:
 
         # --- pre_hook: run all strategies in order ---
         task.state = "pre_hook"
+        log.info("task[depth=%d]: state=pre_hook hooks=%d", _depth, len(self.hooks))
         for hook in self.hooks:
+            hook_name = type(hook).__name__
             subtasks = hook.pre(task, self)
             if subtasks:
-                results = []
                 total = len(subtasks)
+                log.info("task[depth=%d]: %s decomposed into %d subtask(s)", _depth, hook_name, total)
+                results = []
                 for i, st in enumerate(subtasks, 1):
                     # Stop launching new subtasks the moment interrupt is set.
                     if self._interrupt_event and self._interrupt_event.is_set():
+                        log.info("task[depth=%d]: interrupted, stopping subtask loop at %d/%d", _depth, i, total)
                         break
                     st.parent = task
                     task.children.append(st)
+                    st_goal_short = st.goal[:60] + "..." if len(st.goal) > 60 else st.goal
+                    log.info("task[depth=%d]: subtask[%d/%d] starting — %s", _depth, i, total, st_goal_short)
                     if task_callback:
                         task_callback(_fmt_task_line("▸", st.depth, i, total, st.goal))
                     r = self.run(st, args, available_tools, external_mcps,
                                  task_callback=task_callback, **callbacks)
                     if task_callback:
                         task_callback(_fmt_task_line("✓", st.depth, i, total))
+                    log.info("task[depth=%d]: subtask[%d/%d] done — result length=%d", _depth, i, total, len(r))
                     results.append((st.goal, r))
                 task.messages.append({
                     "role": "user",
                     "content": _format_subtask_results(results),
                 })
+                log.info("task[depth=%d]: subtask results injected into messages (%d subtask(s))", _depth, len(results))
                 break  # once decomposed, remaining pre-hooks don't apply
+            else:
+                log.info("task[depth=%d]: %s → no decomposition", _depth, hook_name)
 
         # --- running ---
         task.state = "running"
+        log.info("task[depth=%d]: state=running", _depth)
         task.result = call_llm(task.messages, args, available_tools, external_mcps, **callbacks)
 
         # --- post_hook: run all strategies in reverse ---
         task.state = "post_hook"
+        log.info("task[depth=%d]: state=post_hook", _depth)
         for hook in reversed(self.hooks):
+            hook_name = type(hook).__name__
             revised = hook.post(task, self)
             if revised is not None:
+                log.info("task[depth=%d]: %s revised result (length=%d)", _depth, hook_name, len(revised))
                 task.result = revised
+            else:
+                log.info("task[depth=%d]: %s → result kept as-is", _depth, hook_name)
 
         task.state = "done"
+        log.info("task[depth=%d]: done — result length=%d", _depth, len(task.result) if task.result else 0)
         return task.result
 
     @classmethod
