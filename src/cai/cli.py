@@ -316,43 +316,90 @@ def handle_tool_calls(tool_calls, messages, call_content, allowed_tool_names, to
         })
         messages.append({'role': 'tool', 'tool_call_id': call_id, 'content': result})
 
+def _retry_until_format(call_fn, system_prompt, check_fn, fail_msg_fn, format_label, messages, max_attempts):
+    """Shared retry loop for format enforcement.
+
+    call_fn      -- callable returning (content, reasoning, tool_calls, usage) or falsy
+    system_prompt -- injected as a system message before the first attempt (if messages given)
+    check_fn     -- callable(content) -> (ok: bool, normalised_content: str)
+    fail_msg_fn  -- callable(attempt, max_attempts, content) -> str  (user feedback on failure)
+    format_label -- short label used in stderr messages
+    messages     -- conversation list mutated between retries; may be None
+    max_attempts -- maximum number of LLM calls
+    """
+    if messages is not None:
+        messages.insert(0, {'role': 'system', 'content': system_prompt})
+
+    for attempt in range(1, max_attempts + 1):
+        result = call_fn()
+        if not result:
+            return result
+        orig_content, reasoning, tool_calls, usage = result
+
+        # do not enforce format when tool calls are present
+        if tool_calls:
+            return orig_content, reasoning, tool_calls, usage
+
+        ok, normalised = check_fn(orig_content)
+        if ok:
+            return normalised, reasoning, tool_calls, usage
+
+        log.error(f"failed to get requested format from LLM: {format_label=} -> {orig_content=}, {reasoning=}, {tool_calls=}")
+        print(f"[enforce_strict_format] attempt {attempt}/{max_attempts}: {fail_msg_fn(attempt, max_attempts, orig_content)}", file=sys.stderr)
+        if attempt == max_attempts:
+            print(f"[enforce_strict_format] giving up after {max_attempts} attempts", file=sys.stderr)
+            return None
+        if messages is not None:
+            messages.append({'role': 'user', 'content': fail_msg_fn(attempt, max_attempts, orig_content)})
+
+def _check_json(content):
+    try:
+        return True, json.dumps(json.loads(content))
+    except Exception:
+        return False, content
+
+def _check_regex(pattern, content):
+    import re
+    return (True, content) if re.search(pattern, content) else (False, content)
+
 def enforce_strict_format(call_fn, strict_format, messages=None, max_attempts=4):
     """Retry call_fn() until its content matches strict_format.
-    call_fn must return (content, reasoning, tool_calls) or None/falsy.
-    messages, if provided, is mutated between retries to inject feedback."""
+    call_fn must return (content, reasoning, tool_calls, usage) or None/falsy.
+    messages, if provided, is mutated between retries to inject feedback.
 
+    Supported values for strict_format:
+      'json'           -- response must be a valid JSON object
+      'regex:<pattern>'-- response must match the given regex pattern
+    """
     if strict_format == 'json':
-        if messages is not None:
-            messages.insert(0, {
-                'role': 'system',
-                'content': 'Respond only with a valid JSON object. Do not include markdown fences, explanations, or any text outside the JSON.',
-            })
+        return _retry_until_format(
+            call_fn,
+            system_prompt='Respond only with a valid JSON object. Do not include markdown fences, explanations, or any text outside the JSON.',
+            check_fn=_check_json,
+            fail_msg_fn=lambda attempt, max_attempts, content: (
+                f"Your previous response was not valid JSON (attempt {attempt}/{max_attempts}). "
+                "Please respond with only a valid JSON object. "
+                "Do not include markdown fences, explanations, or any text outside the JSON."
+            ),
+            format_label='json',
+            messages=messages,
+            max_attempts=max_attempts,
+        )
 
-        for attempt in range(1, max_attempts + 1):
-            result = call_fn()
-            if not result: return result
-            orig_content, reasoning, tool_calls, usage = result
-            if tool_calls: # do not enforce format in case of tool calls
-                return orig_content, reasoning, tool_calls, usage
-
-            try:
-                content = json.dumps(json.loads(orig_content))
-                return content, reasoning, tool_calls, usage
-            except Exception:
-                log.error(f"failed to get requested format from LLM: {strict_format=} -> {orig_content=}, {reasoning=}, {tool_calls=}")
-                print(f"[enforce_strict_format] attempt {attempt}/{max_attempts}: response is not valid JSON: {orig_content!r}", file=sys.stderr)
-                if attempt == max_attempts:
-                    print(f"[enforce_strict_format] giving up after {max_attempts} attempts", file=sys.stderr)
-                    return None
-                if messages is not None:
-                    messages.append({
-                        'role': 'user',
-                        'content': (
-                            f"Your previous response was not valid JSON (attempt {attempt}/{max_attempts}). "
-                            "Please respond with only a valid JSON object. "
-                            "Do not include markdown fences, explanations, or any text outside the JSON."
-                        ),
-                    })
+    if strict_format and strict_format.startswith('regex:'):
+        pattern = strict_format[len('regex:'):]
+        return _retry_until_format(
+            call_fn,
+            system_prompt=f'Your response must match the regular expression pattern: {pattern}',
+            check_fn=lambda content: _check_regex(pattern, content),
+            fail_msg_fn=lambda attempt, max_attempts, content: (
+                f"Your previous response did not match the required pattern (attempt {attempt}/{max_attempts}). "
+                f"Please ensure your response matches the regular expression: {pattern}"
+            ),
+            format_label=f'regex:{pattern}',
+            messages=messages,
+            max_attempts=max_attempts,
+        )
 
     return call_fn()
 
@@ -956,7 +1003,7 @@ def main():
                         help="show progess bar.")
     parser.add_argument("--oneline", action="store_true",
                         help="print results in a oneline all data.")
-    parser.add_argument("--strict-format", default=None, choices=['json'],
+    parser.add_argument("--strict-format", default=None,
                         help="the expected format provided from the LLM response.")
     parser.add_argument("--include-reasoning", action="store_true",
                         help="let the action know whether or not to include reasoning in the output.")

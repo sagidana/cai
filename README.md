@@ -110,13 +110,22 @@ cat list_of_questions.txt | cai --line-by-line --cores 8 -p "Answer briefly"
 
 Each line is sent as a separate LLM call, parallelized with `--cores`.
 
-### Force JSON output
+### Force strict output format
+
+`--strict-format` retries the LLM until its response matches the required format, injecting a system prompt to guide it and feeding back failure messages between attempts (up to 4 by default).
+
+**JSON** — response must be a valid JSON object:
 
 ```bash
 cai --strict-format json -p "List 3 refactoring suggestions" --file ./cli.py
 ```
 
-Retries the LLM until it returns valid JSON.
+**Regex** — response must match a regular expression:
+
+```bash
+cai --strict-format "regex:^\d{4}-\d{2}-\d{2}$" -p "What is today's date?"
+cai --strict-format "regex:^(yes|no)$" -p "Is this code thread-safe?" --file ./worker.py
+```
 
 ### Custom model + system prompt
 
@@ -145,7 +154,7 @@ cai --oneline -p "Summarize this function in one sentence" --file ./cli.py
 | `-t` | MCP tool server path or internal tool name |
 | `--line-by-line` | Process each line independently |
 | `--cores N` | Parallel threads for batch processing |
-| `--strict-format json` | Force JSON output |
+| `--strict-format json\|regex:<pattern>` | Force output format (JSON or regex match) |
 | `--oneline` | Collapse response to single line |
 | `--model` | Override model |
 | `--system-prompt` | Set system prompt |
