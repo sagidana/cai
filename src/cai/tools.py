@@ -468,7 +468,6 @@ if __name__ == '__main__':
                     queue.append(full)
 
         result = "\n".join(entries) if entries else "(empty)"
-        print(result)
         return result
 
     @mcp.tool()

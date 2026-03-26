@@ -671,9 +671,13 @@ class Screen:
 
     def prompt_tools_overlay(self, tool_names: list[str], enabled: set) -> set:
         """
-        Interactive toggle list of tools.  Returns the updated enabled set.
+        Interactive tools toggle overlay — centered floating box.
 
-        Navigate with up/down or j/k, toggle with Space/Enter, close with ESC.
+        Navigation : j / k / arrows
+        Toggle     : Space
+        Search fwd : /pattern  then Enter to confirm, n / N to cycle
+        Search bwd : ?pattern  then Enter to confirm, N / n to cycle
+        Close      : ESC or Enter (normal mode)
         """
         if not tool_names:
             return set(enabled)
@@ -681,71 +685,291 @@ class Screen:
         enabled = set(enabled)
         selected_idx = 0
 
-        old = termios.tcgetattr(self._tty_fd)
+        # Search state
+        search_mode      = False
+        search_direction = 1          # +1 = forward (/), -1 = backward (?)
+        search_buf: list[str] = []
+        search_pattern   = ''
+        search_matches: list[int] = []
+        search_match_idx = -1
+        pre_search_idx   = 0          # cursor position before entering search
+
+        _resize_pending = [False]
+
+        def _on_overlay_resize(signum, frame):
+            ts = shutil.get_terminal_size()
+            self._rows, self._cols = ts.lines, ts.columns
+            _resize_pending[0] = True
+
+        def _find_matches(pattern: str) -> list[int]:
+            if not pattern:
+                return []
+            try:
+                rx = re.compile(pattern, re.IGNORECASE)
+            except re.error:
+                rx = re.compile(re.escape(pattern), re.IGNORECASE)
+            return [i for i, nm in enumerate(tool_names) if rx.search(nm)]
+
+        def _nearest_fwd(matches: list[int], from_idx: int) -> int:
+            for i, m in enumerate(matches):
+                if m >= from_idx:
+                    return i
+            return 0
+
+        def _nearest_bwd(matches: list[int], from_idx: int) -> int:
+            for i in range(len(matches) - 1, -1, -1):
+                if matches[i] <= from_idx:
+                    return i
+            return len(matches) - 1
+
+        def _sync_cursor_to_search() -> None:
+            nonlocal selected_idx, search_match_idx
+            if search_matches:
+                if search_direction == 1:
+                    search_match_idx = _nearest_fwd(search_matches, pre_search_idx)
+                else:
+                    search_match_idx = _nearest_bwd(search_matches, pre_search_idx)
+                selected_idx = search_matches[search_match_idx]
+            else:
+                search_match_idx = -1
+                selected_idx = pre_search_idx
+
+        def _redraw() -> None:
+            self._draw_tools_overlay(
+                tool_names, enabled, selected_idx,
+                search_pattern, search_matches, search_match_idx,
+                search_mode, search_buf, search_direction,
+            )
+
+        old_attrs    = termios.tcgetattr(self._tty_fd)
+        orig_handler = signal.getsignal(signal.SIGWINCH)
         try:
+            signal.signal(signal.SIGWINCH, _on_overlay_resize)
             tty.setraw(self._tty_fd)
-            self._draw_tools_overlay(tool_names, enabled, selected_idx)
+            _redraw()
 
             while True:
+                if _resize_pending[0]:
+                    _resize_pending[0] = False
+                    _redraw()
+
                 key = self._read_key()
-                if key in ('\033', '\x03'):
+
+                # ── Search input mode ────────────────────────────────────
+                if search_mode:
+                    if key in ('\r', '\n'):
+                        search_mode = False          # confirm, cursor stays
+                    elif key == '\033':
+                        search_mode    = False       # cancel — restore cursor
+                        selected_idx   = pre_search_idx
+                        search_pattern = ''
+                        search_buf     = []
+                        search_matches = []
+                        search_match_idx = -1
+                    elif key == '\x7f':              # backspace
+                        if search_buf:
+                            search_buf.pop()
+                            search_pattern = ''.join(search_buf)
+                            search_matches = _find_matches(search_pattern)
+                            _sync_cursor_to_search()
+                        else:
+                            search_mode    = False   # empty buf → cancel
+                            selected_idx   = pre_search_idx
+                            search_pattern = ''
+                            search_matches = []
+                            search_match_idx = -1
+                    elif len(key) == 1 and ord(key) >= 32:
+                        search_buf.append(key)
+                        search_pattern = ''.join(search_buf)
+                        search_matches = _find_matches(search_pattern)
+                        _sync_cursor_to_search()
+                    _redraw()
+                    continue
+
+                # ── Normal navigation mode ───────────────────────────────
+                if key in ('\033', '\r', '\n', '\x03'):
                     break
                 elif key in ('\033[A', 'k'):
                     selected_idx = max(0, selected_idx - 1)
-                    self._draw_tools_overlay(tool_names, enabled, selected_idx)
                 elif key in ('\033[B', 'j'):
                     selected_idx = min(len(tool_names) - 1, selected_idx + 1)
-                    self._draw_tools_overlay(tool_names, enabled, selected_idx)
-                elif key in (' ', '\r', '\n'):
-                    name = tool_names[selected_idx]
-                    if name in enabled:
-                        enabled.discard(name)
+                elif key == ' ':
+                    nm = tool_names[selected_idx]
+                    if nm in enabled:
+                        enabled.discard(nm)
                     else:
-                        enabled.add(name)
-                    self._draw_tools_overlay(tool_names, enabled, selected_idx)
+                        enabled.add(nm)
+                elif key == '/':
+                    search_mode      = True
+                    search_direction = 1
+                    search_buf       = []
+                    search_pattern   = ''
+                    search_matches   = []
+                    search_match_idx = -1
+                    pre_search_idx   = selected_idx
+                elif key == '?':
+                    search_mode      = True
+                    search_direction = -1
+                    search_buf       = []
+                    search_pattern   = ''
+                    search_matches   = []
+                    search_match_idx = -1
+                    pre_search_idx   = selected_idx
+                elif key == 'n' and search_matches:
+                    if search_direction == 1:
+                        search_match_idx = (search_match_idx + 1) % len(search_matches)
+                    else:
+                        search_match_idx = (search_match_idx - 1) % len(search_matches)
+                    selected_idx = search_matches[search_match_idx]
+                elif key == 'N' and search_matches:
+                    if search_direction == 1:
+                        search_match_idx = (search_match_idx - 1) % len(search_matches)
+                    else:
+                        search_match_idx = (search_match_idx + 1) % len(search_matches)
+                    selected_idx = search_matches[search_match_idx]
+
+                _redraw()
+
         finally:
-            termios.tcsetattr(self._tty_fd, termios.TCSADRAIN, old)
-            # Restore conversation view (we are still in the alternate screen)
-            sys.stdout.write('\033[2J')
+            termios.tcsetattr(self._tty_fd, termios.TCSADRAIN, old_attrs)
+            signal.signal(signal.SIGWINCH, orig_handler)
+            sys.stdout.write('\033[?25l\033[2J')
             self._redraw_main_view()
             self._redraw_status()
             sys.stdout.flush()
 
         return enabled
 
-    def _draw_tools_overlay(self, tool_names: list[str], enabled: set, selected_idx: int) -> None:
-        """Render the full-screen tools toggle overlay."""
+    def _draw_tools_overlay(
+        self,
+        tool_names: list[str],
+        enabled: set,
+        selected_idx: int,
+        search_pattern: str,
+        search_matches: list[int],
+        search_match_idx: int,
+        search_mode: bool,
+        search_buf: list[str],
+        search_direction: int,
+    ) -> None:
+        """Render the centered floating tools overlay on top of the conversation."""
         rows, cols = self._rows, self._cols
+        n = len(tool_names)
 
+        # ── Box dimensions ────────────────────────────────────────────────
+        max_name_len = max((len(nm) for nm in tool_names), default=10)
+        # "  [x] <name>  " → prefix 6 chars + name + 2 padding
+        content_w  = max_name_len + 8
+        max_inner_w = max(20, int(cols * 0.40) - 2)
+        inner_w    = max(20, min(content_w, max_inner_w))
+        box_w      = inner_w + 2   # side borders
+
+        # Layout rows:  ┌─┐ title ├─┤ [tools…] ├─┤ search/status └─┘
+        overhead   = 7
+        max_box_h  = max(overhead + 1, int(rows * 0.50))
+        visible_n  = max(1, min(n, max_box_h - overhead))
+        box_h      = visible_n + overhead
+
+        # Center the box
+        start_r = max(1, (rows - box_h) // 2 + 1)
+        start_c = max(1, (cols - box_w) // 2 + 1)
+
+        # ── Scroll window ─────────────────────────────────────────────────
+        scroll = 0
+        if selected_idx >= visible_n:
+            scroll = selected_idx - visible_n + 1
+        scroll = max(0, min(scroll, n - visible_n))
+
+        # ── Box chars ─────────────────────────────────────────────────────
+        H  = '─'; TL, TR = '┌', '┐'; BL, BR = '└', '┘'
+        VL = '│'; ML, MR = '├', '┤'
+        h_line = H * inner_w
+
+        # Title with hints if space allows
+        hints = '  j/k:nav  Spc:toggle  /:search  n/N:next  ESC/↵:close'
+        title_base = ' Tools'
+        title_text = (title_base + hints)[:inner_w] if len(title_base + hints) <= inner_w else title_base
+        title_content = title_text.ljust(inner_w)
+
+        dir_char = '/' if search_direction == 1 else '?'
+
+        buf: list[str] = []
+
+        def put(row_off: int, text: str) -> None:
+            r = start_r + row_off
+            if 1 <= r <= rows:
+                buf.append(f'\033[{r};{start_c}H{text}')
+
+        # Redraw the conversation as background, then draw the overlay on top
         sys.stdout.write('\033[2J')
+        self._redraw_main_view()
 
-        # Title bar
-        title = ' Tools  (j/k navigate   Space/Enter toggle   ESC close) '
-        sys.stdout.write(f'\033[1;1H\033[7m{title[:cols].ljust(cols)}\033[m')
+        # ── Draw box ──────────────────────────────────────────────────────
+        put(0, f'{TL}{h_line}{TR}')
+        put(1, f'{VL}\033[1m{title_content}\033[m{VL}')
+        put(2, f'{ML}{h_line}{MR}')
 
-        list_start_row = 3
-        max_visible = max(1, rows - list_start_row - 1)
+        for i in range(visible_n):
+            ai = i + scroll
+            if ai >= n:
+                put(3 + i, f'{VL}{" " * inner_w}{VL}')
+                continue
 
-        # Scroll to keep the selected item visible
-        scroll_off = 0
-        if selected_idx >= max_visible:
-            scroll_off = selected_idx - max_visible + 1
+            nm    = tool_names[ai]
+            check = '[x]' if nm in enabled else '[ ]'
+            max_nm_len = inner_w - 7
+            display    = nm[:max_nm_len] if len(nm) > max_nm_len else nm
+            raw_line   = f'  {check} {display}'
+            cell       = raw_line[:inner_w].ljust(inner_w)
 
-        visible = tool_names[scroll_off: scroll_off + max_visible]
-        for i, name in enumerate(visible):
-            actual_idx = i + scroll_off
-            row = list_start_row + i
-            check = '[x]' if name in enabled else '[ ]'
-            line = f'  {check} {name}'
-            sys.stdout.write(f'\033[{row};1H')
-            if actual_idx == selected_idx:
-                sys.stdout.write(f'\033[7m{line[:cols]}\033[m')
+            is_sel   = (ai == selected_idx)
+            is_match = bool(search_matches) and (ai in search_matches)
+
+            if is_sel and is_match:
+                styled = f'\033[7;33m{cell}\033[m'
+            elif is_sel:
+                styled = f'\033[7m{cell}\033[m'
+            elif is_match:
+                styled = f'\033[33m{cell}\033[m'
             else:
-                sys.stdout.write(line[:cols])
+                styled = cell
 
-        # Footer: enabled count
-        enabled_count = sum(1 for n in tool_names if n in enabled)
-        footer = f' {enabled_count}/{len(tool_names)} tools enabled '
-        sys.stdout.write(f'\033[{rows};1H\033[7m{footer[:cols].ljust(cols)}\033[m')
+            put(3 + i, f'{VL}{styled}{VL}')
 
+        put(3 + visible_n, f'{ML}{h_line}{MR}')
+
+        # ── Search / status bar ───────────────────────────────────────────
+        enabled_count = sum(1 for nm in tool_names if nm in enabled)
+        if search_mode:
+            search_text = ''.join(search_buf)
+            if search_matches:
+                m_info = f' [{search_match_idx + 1}/{len(search_matches)}]'
+            elif search_text:
+                m_info = ' [no match]'
+            else:
+                m_info = ''
+            raw_status = f' {dir_char}{search_text}{m_info}'
+            status_cell = raw_status[:inner_w].ljust(inner_w)
+            put(3 + visible_n + 1, f'{VL}\033[7m{status_cell}\033[m{VL}')
+        else:
+            count_str = f' {enabled_count}/{n} enabled'
+            if search_pattern:
+                m_label = f' [{search_match_idx + 1}/{len(search_matches)}]' if search_matches else ''
+                count_str += f'   {dir_char}{search_pattern}{m_label}'
+            status_cell = count_str[:inner_w].ljust(inner_w)
+            put(3 + visible_n + 1, f'{VL}{status_cell}{VL}')
+
+        put(3 + visible_n + 2, f'{BL}{h_line}{BR}')
+
+        # ── Cursor visibility ─────────────────────────────────────────────
+        if search_mode:
+            search_text = ''.join(search_buf)
+            # position: border(1) + space(1) + dir_char(1) + len(search_text)
+            cursor_col = start_c + 1 + 1 + 1 + len(search_text)
+            cursor_row = start_r + 3 + visible_n + 1
+            buf.append(f'\033[?25h\033[{cursor_row};{cursor_col}H')
+        else:
+            buf.append('\033[?25l')
+
+        sys.stdout.write(''.join(buf))
         sys.stdout.flush()
