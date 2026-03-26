@@ -275,9 +275,18 @@ class TaskRunner:
         # streaming path means call_llm checks interrupt_event between chunks, so
         # Ctrl-C aborts the in-flight request on the next received chunk rather than
         # waiting for the full HTTP response to arrive.
-        if task.depth > 0 and 'stream_callback' in callbacks:
+        if task.depth > 0:
             callbacks = dict(callbacks)
-            callbacks['stream_callback'] = lambda chunk: None
+            if 'stream_callback' in callbacks:
+                callbacks['stream_callback'] = lambda chunk: None
+            if 'tool_callback' in callbacks:
+                _indent = "  " * task.depth
+                _orig_tool_cb = callbacks['tool_callback']
+                callbacks['tool_callback'] = (
+                    lambda line, error=False, _cb=_orig_tool_cb, _ind=_indent:
+                        _cb(line, error=error) if line == "\n"
+                        else _cb(f"{_ind}{line}", error=error)
+                )
 
         from cai.cli import call_llm  # deferred to avoid circular import
 
