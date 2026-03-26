@@ -400,8 +400,26 @@ class Screen:
             self._handle_cmd_key(key)
             return
 
-        # ---- Scroll: Page Up / Page Down ----
+        # ---- Scroll: Page Up / Page Down (full page) ----
         if key == '\033[5~':   # Page Up
+            self._follow_tail = False
+            full = max(1, self._main_rows())
+            max_off = max(0, len(self._display_lines) - self._main_rows())
+            self._scroll_offset = min(self._scroll_offset + full, max_off)
+            self._redraw_main_view()
+            self._redraw_prompt_line(msg)
+            return
+        if key == '\033[6~':   # Page Down
+            full = max(1, self._main_rows())
+            self._scroll_offset = max(0, self._scroll_offset - full)
+            if self._scroll_offset == 0:
+                self._follow_tail = True
+            self._redraw_main_view()
+            self._redraw_prompt_line(msg)
+            return
+
+        # ---- Scroll: Ctrl-U / Ctrl-D (half page) ----
+        if key == '\x15':   # Ctrl-U — scroll half page up
             self._follow_tail = False
             half = max(1, self._main_rows() // 2)
             max_off = max(0, len(self._display_lines) - self._main_rows())
@@ -409,7 +427,7 @@ class Screen:
             self._redraw_main_view()
             self._redraw_prompt_line(msg)
             return
-        if key == '\033[6~':   # Page Down
+        if key == '\x04':   # Ctrl-D — scroll half page down
             half = max(1, self._main_rows() // 2)
             self._scroll_offset = max(0, self._scroll_offset - half)
             if self._scroll_offset == 0:
@@ -468,15 +486,6 @@ class Screen:
         if key == '\x03':
             raise KeyboardInterrupt
 
-        # ---- Ctrl-D ----
-        if key == '\x04':
-            if not self._input_buf:
-                raise EOFError
-            if self._cursor_pos < len(self._input_buf):
-                del self._input_buf[self._cursor_pos]
-                self._redraw_prompt_line(msg)
-            return
-
         # ---- Arrow keys ----
         if key == '\033[A':   # up — history
             self._history_navigate(1, msg)
@@ -502,13 +511,6 @@ class Screen:
             return
         if key in ('\033[F', '\x05'):
             self._cursor_pos = len(self._input_buf)
-            self._redraw_prompt_line(msg)
-            return
-
-        # ---- Ctrl-U (kill to start) ----
-        if key == '\x15':
-            self._input_buf = self._input_buf[self._cursor_pos:]
-            self._cursor_pos = 0
             self._redraw_prompt_line(msg)
             return
 
@@ -711,9 +713,7 @@ class Screen:
 
         return enabled
 
-    def _draw_tools_overlay(
-        self, tool_names: list[str], enabled: set, selected_idx: int
-    ) -> None:
+    def _draw_tools_overlay(self, tool_names: list[str], enabled: set, selected_idx: int) -> None:
         """Render the full-screen tools toggle overlay."""
         rows, cols = self._rows, self._cols
 
