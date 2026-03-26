@@ -675,8 +675,8 @@ def action_prompt(args, available_tools, external_mcps):
         print("this action require --prompt to be provided.")
         return
 
-    log.info("action_prompt: model=%s file=%s location=%s line_by_line=%s oneline=%s",
-             args.model, args.file, args.location, args.line_by_line, args.oneline)
+    log.info("action_prompt: model=%s file=%s cursor=%s line_by_line=%s oneline=%s",
+             args.model, args.file, args.cursor, args.line_by_line, args.oneline)
 
     messages = []
     if args.system_prompt:
@@ -697,11 +697,11 @@ def action_prompt(args, available_tools, external_mcps):
         log.info("action_prompt: including file %s", args.file)
         messages.append({"role": "user", "content": f"<file_content> {_read_file_numbered(args.file)} </file_content>"})
 
-    if args.location:
-        m = re.match(r"^(?P<file_path>.*):(?P<line_num>\d+):(?P<col_num>\d+)$", args.location)
+    if args.cursor:
+        m = re.match(r"^(?P<file_path>.*):(?P<line_num>\d+):(?P<col_num>\d+)$", args.cursor)
         if m:
             fp, ln, cn = m.group('file_path'), m.group('line_num'), m.group('col_num')
-            log.info("action_prompt: including location %s:%s:%s", fp, ln, cn)
+            log.info("action_prompt: including cursor location %s:%s:%s", fp, ln, cn)
             messages.append({"role": "user", "content": f"<file_content> {_read_file_numbered(fp)} </file_content>"})
             messages.append({"role": "user", "content": f"<cursor_location> line number: {ln}, column number: {cn} </cursor_location>"})
 
@@ -794,7 +794,7 @@ def action_interactive(args, available_tools, external_mcps):
         messages.append({"role": "user",
                          "content": f"<file_content>{_read_file_numbered(args.file)}</file_content>"})
 
-    if args.location:
+    if args.cursor:
         m = re.match(r"^(?P<file_path>.*):(?P<line_num>\d+):(?P<col_num>\d+)$", args.location)
         if m:
             fp, ln, cn = m.group('file_path'), m.group('line_num'), m.group('col_num')
@@ -926,8 +926,8 @@ def main():
                         help="the system prompt to send to the LLM.")
     parser.add_argument("--file",
                         help="file path to include in the LLM context.")
-    parser.add_argument("--location",
-                        help="the location in the codebase to be used by the action. in the format of => <file_path>:<line_num>:<col_num>")
+    parser.add_argument("--cursor",
+                        help="the cursor location in the codebase to be used by the action. in the format of => <file_path>:<line_num>:<col_num>")
     parser.add_argument("--model", default=None,
                         help="the model to be used by the LLM")
     parser.add_argument("--force-tools", action="store_true",

@@ -77,7 +77,7 @@ cai --file ./src/cai/cli.py -p "What does this file do?"
 ### Cursor-aware code generation
 
 ```bash
-cai --location "./mymodule.py:42:4" -p "Implement this method"
+cai --cursor "./mymodule.py:42:4" -p "Implement this method"
 ```
 
 The file is included with the cursor position marked — great for Vim/editor integrations.
@@ -141,7 +141,7 @@ cai --oneline -p "Summarize this function in one sentence" --file ./cli.py
 | `--force-tools` | Require the LLM to call a tool every turn |
 | `--max-turns N` | Max tool-call turns (default: tier-based 5/10/20) |
 | `--file` | Include a file in context |
-| `--location file:line:col` | Cursor-aware generation |
+| `--cursor file:line:col` | Cursor-aware generation |
 | `-t` | MCP tool server path or internal tool name |
 | `--line-by-line` | Process each line independently |
 | `--cores N` | Parallel threads for batch processing |
