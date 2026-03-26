@@ -4,6 +4,7 @@ import json
 import sys
 import os
 import re
+import signal
 import threading
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -580,11 +581,14 @@ def prompt_line_by_line(args, messages, available_tools, external_mcps):
                     print(file=sys.stderr)
 
     def process_line(line):
+        if shutdown_event.is_set():
+            return
         local_messages = messages.copy()
         local_messages.append({"role": "user", "content": line})
         local_messages.append({"role": "user", "content": args.prompt})
 
-        response = call_llm(local_messages, args, available_tools, external_mcps)
+        response = call_llm(local_messages, args, available_tools, external_mcps,
+                            interrupt_event=shutdown_event)
 
         with lock:
             completed_count[0] += 1
@@ -600,22 +604,52 @@ def prompt_line_by_line(args, messages, available_tools, external_mcps):
                 if response:
                     print(response)
 
-    with ThreadPoolExecutor(max_workers=args.cores) as executor:
+    shutdown_event = threading.Event()
+
+    original_sigint = signal.getsignal(signal.SIGINT)
+
+    executor = ThreadPoolExecutor(max_workers=args.cores)
+    futures = []
+
+    def _sigint_handler(signum, frame):
+        shutdown_event.set()
+        for f in futures:
+            f.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+
+    signal.signal(signal.SIGINT, _sigint_handler)
+
+    try:
         if streaming_stdin:
-            futures = []
             for raw_line in sys.stdin:
+                if shutdown_event.is_set():
+                    break
                 line = raw_line.rstrip('\n')
                 if line.strip():
                     futures.append(executor.submit(process_line, line))
         else:
             futures = [executor.submit(process_line, line) for line in lines]
+
         for future in as_completed(futures):
+            if shutdown_event.is_set():
+                break
             try:
                 future.result()
             except Exception as e:
                 log.error("thread error in prompt_line_by_line: %s", e)
                 with lock:
                     print(f"[!] thread error: {e}")
+    except KeyboardInterrupt:
+        shutdown_event.set()
+        for f in futures:
+            f.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+    else:
+        executor.shutdown(wait=True)
+    finally:
+        signal.signal(signal.SIGINT, original_sigint)
+        if shutdown_event.is_set():
+            print("\n[!] interrupted — all pending tasks cancelled.", file=sys.stderr)
 
 TOOL_RESULT_MAX_CHARS = 8000
 
