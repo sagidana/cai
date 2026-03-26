@@ -17,6 +17,7 @@ import shutil
 import signal
 import sys
 import termios
+import threading
 import tty
 
 
@@ -177,9 +178,17 @@ class Screen:
         # Guard against double-close
         self._closed: bool = False
 
+        # Threading: render lock + input listener for scroll/interrupt during streaming
+        self._render_lock = threading.RLock()
+        self._interrupt_event = threading.Event()
+        self._listener_active = False
+        self._listener_thread: threading.Thread | None = None
+
         # Open /dev/tty so keyboard input works even when stdin is piped
         self._tty_file = open('/dev/tty', 'rb+', buffering=0)
         self._tty_fd = self._tty_file.fileno()
+        # Save "cooked" terminal attrs for vim handoff
+        self._cooked_attrs = termios.tcgetattr(self._tty_fd)
 
         # Enter alternate screen, clear it, hide cursor
         sys.stdout.write('\033[?1049h\033[2J\033[?25l')
@@ -287,14 +296,15 @@ class Screen:
         """Append *text* to the conversation view and redraw."""
         if not text:
             return
-        self._segments.append(text)
-        self._rebuild_display_lines()
-        self._redraw_main_view()
-        if self._in_prompt:
-            self._redraw_prompt_line(self._current_prompt_msg)
-        if not self._cmd_mode:
-            self._redraw_status()
-        sys.stdout.flush()
+        with self._render_lock:
+            self._segments.append(text)
+            self._rebuild_display_lines()
+            self._redraw_main_view()
+            if self._in_prompt:
+                self._redraw_prompt_line(self._current_prompt_msg)
+            if not self._cmd_mode:
+                self._redraw_status()
+            sys.stdout.flush()
 
     def set_status(self, text: str) -> None:
         """Update the status bar in place."""
@@ -362,6 +372,74 @@ class Screen:
 
         return result  # type: ignore[return-value]
 
+    # ------------------------------------------------------------------ streaming listener
+
+    def start_input_listener(self) -> None:
+        """Start a daemon thread that reads scroll/interrupt keys during LLM streaming."""
+        self._interrupt_event.clear()
+        self._listener_active = True
+        self._listener_thread = threading.Thread(
+            target=self._input_listener_loop, daemon=True, name='cai-input-listener'
+        )
+        self._listener_thread.start()
+
+    def stop_input_listener(self) -> None:
+        """Stop the input listener thread and wait for it to exit."""
+        self._listener_active = False
+        if self._listener_thread is not None:
+            self._listener_thread.join(timeout=0.5)
+            self._listener_thread = None
+
+    def _input_listener_loop(self) -> None:
+        """Daemon loop: read raw keys and handle scroll/interrupt during streaming."""
+        old = termios.tcgetattr(self._tty_fd)
+        try:
+            tty.setraw(self._tty_fd)
+            while self._listener_active:
+                rlist, _, _ = select.select([self._tty_fd], [], [], 0.05)
+                if not rlist:
+                    continue
+                key = self._read_key()
+                self._handle_listener_key(key)
+        finally:
+            termios.tcsetattr(self._tty_fd, termios.TCSADRAIN, old)
+
+    def _handle_listener_key(self, key: str) -> None:
+        """Handle a keypress received during streaming (scroll + Ctrl-C interrupt)."""
+        if key == '\x03':    # Ctrl-C → signal interrupt
+            self._interrupt_event.set()
+            return
+
+        with self._render_lock:
+            if key == '\033[5~':   # Page Up
+                self._follow_tail = False
+                full = max(1, self._main_rows())
+                max_off = max(0, len(self._display_lines) - self._main_rows())
+                self._scroll_offset = min(self._scroll_offset + full, max_off)
+                self._redraw_main_view()
+                sys.stdout.flush()
+            elif key == '\033[6~':   # Page Down
+                full = max(1, self._main_rows())
+                self._scroll_offset = max(0, self._scroll_offset - full)
+                if self._scroll_offset == 0:
+                    self._follow_tail = True
+                self._redraw_main_view()
+                sys.stdout.flush()
+            elif key == '\x15':   # Ctrl-U — half page up
+                self._follow_tail = False
+                half = max(1, self._main_rows() // 2)
+                max_off = max(0, len(self._display_lines) - self._main_rows())
+                self._scroll_offset = min(self._scroll_offset + half, max_off)
+                self._redraw_main_view()
+                sys.stdout.flush()
+            elif key == '\x04':   # Ctrl-D — half page down
+                half = max(1, self._main_rows() // 2)
+                self._scroll_offset = max(0, self._scroll_offset - half)
+                if self._scroll_offset == 0:
+                    self._follow_tail = True
+                self._redraw_main_view()
+                sys.stdout.flush()
+
     def close(self) -> None:
         """Exit alternate screen and restore the terminal."""
         if self._closed:
@@ -379,6 +457,38 @@ class Screen:
     def set_cmd_completions(self, cmds: list[str]) -> None:
         """Set the list of command names available for tab completion."""
         self._cmd_completions = list(cmds)
+
+    # ------------------------------------------------------------------ vim integration
+
+    def _open_in_vim(self, prompt_msg: str) -> None:
+        """Open the current prompt buffer in vim; load the result back on exit."""
+        import subprocess
+        import tempfile
+        content = ''.join(self._input_buf)
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+            f.write(content)
+            tmp = f.name
+        try:
+            # Restore cooked terminal + leave alternate screen
+            termios.tcsetattr(self._tty_fd, termios.TCSADRAIN, self._cooked_attrs)
+            sys.stdout.write('\033[?1049l')
+            sys.stdout.flush()
+            subprocess.run(['vim', tmp])
+            # Re-enter alternate screen
+            sys.stdout.write('\033[?1049h')
+            sys.stdout.flush()
+            with open(tmp, 'r') as f:
+                new_content = f.read().rstrip('\n')
+        finally:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+        self._input_buf = list(new_content)
+        self._cursor_pos = len(self._input_buf)
+        self._redraw_all()
+        self._redraw_prompt_line(prompt_msg)
+        sys.stdout.flush()
 
     # ------------------------------------------------------------------ input internals
 
@@ -492,6 +602,11 @@ class Screen:
                 self._redraw_prompt_line(msg)
                 return
             raise KeyboardInterrupt
+
+        # ---- Ctrl-V — open prompt in vim ----
+        if key == '\x16':
+            self._open_in_vim(msg)
+            return
 
         # ---- Arrow keys ----
         if key == '\033[A':   # up — history

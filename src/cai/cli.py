@@ -335,7 +335,7 @@ def enforce_strict_format(call_fn, strict_format):
                 continue
     return call_fn()
 
-def _run_nonstreaming_turn(messages, args, included_tools, stream_callback=None, tool_choice="auto"):
+def _run_nonstreaming_turn(messages, args, included_tools, stream_callback=None, tool_choice="auto", interrupt_event=None):
     """Single non-streaming LLM call. Returns (content, tool_calls, usage)."""
     result = enforce_strict_format(lambda: openai_api.chat( messages,
                                                             model=args.model,
@@ -348,7 +348,7 @@ def _run_nonstreaming_turn(messages, args, included_tools, stream_callback=None,
     content, _reasoning, tool_calls, usage = result
     return content or "", tool_calls, usage
 
-def _run_streaming_turn(messages, args, included_tools, stream_callback, tool_choice="auto"):
+def _run_streaming_turn(messages, args, included_tools, stream_callback, tool_choice="auto", interrupt_event=None):
     """Single streaming LLM call. Returns (accumulated_text, tool_calls, usage)."""
     accumulated = []
     last_tool_calls = None
@@ -357,6 +357,8 @@ def _run_streaming_turn(messages, args, included_tools, stream_callback, tool_ch
                                                            model=args.model,
                                                            tools=included_tools,
                                                            tool_choice=tool_choice):
+        if interrupt_event and interrupt_event.is_set():
+            break
         if chunk:
             accumulated.append(chunk)
             if stream_callback:
@@ -446,7 +448,8 @@ def call_llm(messages,
              stream_callback=None,
              status_callback=None,
              tool_callback=None,
-             ctx_callback=None):
+             ctx_callback=None,
+             interrupt_event=None):
     # Build the tool list actually sent to the LLM:
     # only internal tools the user has selected, plus all external MCP tools.
     selected_tool_names = getattr(args, 'selected_tools', set())
@@ -492,7 +495,7 @@ def call_llm(messages,
         else:
             tool_choice = "auto"
 
-        content, tool_calls, usage = run_turn(messages, args, included_tools, stream_callback, tool_choice=tool_choice)
+        content, tool_calls, usage = run_turn(messages, args, included_tools, stream_callback, tool_choice=tool_choice, interrupt_event=interrupt_event)
         log.info("call_llm: turn=%d tokens prompt=%s completion=%s total=%s",
                  turn,
                  usage.get('prompt_tokens'),
@@ -804,6 +807,7 @@ def action_interactive(args, available_tools, external_mcps):
             status_callback("thinking...")
             screen.show_prompt_placeholder("> ")
             screen.write(_LLM_STYLE)
+            screen.start_input_listener()
             try:
                 response = call_llm(messages,
                                     args,
@@ -811,15 +815,22 @@ def action_interactive(args, available_tools, external_mcps):
                                     stream_callback=stream_cb,
                                     status_callback=status_callback,
                                     tool_callback=tool_cb,
-                                    ctx_callback=ctx_cb)
-                screen.write(f"\n{_RESET}\n")
-                messages.append({"role": "assistant", "content": response})
+                                    ctx_callback=ctx_cb,
+                                    interrupt_event=screen._interrupt_event)
+                if screen._interrupt_event.is_set():
+                    screen.write(f"\n{_RESET}{_META_STYLE}[interrupted]{_RESET}\n\n")
+                    status_callback("interrupted")
+                else:
+                    screen.write(f"\n{_RESET}\n")
+                    messages.append({"role": "assistant", "content": response})
             except LLMError as e:
                 screen.write(f"\n{_RESET}{_ERROR_STYLE}[error] {e}{_RESET}\n\n")
                 status_callback("error")
             except BaseException:
                 screen.write(_RESET)
                 raise
+            finally:
+                screen.stop_input_listener()
 
         # Main interactive loop
         _status("ready")
@@ -834,12 +845,18 @@ def action_interactive(args, available_tools, external_mcps):
             status_callback("thinking...")
             screen.show_prompt_placeholder("> ")
             screen.write(_LLM_STYLE)
+            screen.start_input_listener()
             try:
                 response = call_llm(messages, args, available_tools, external_mcps,
                                     stream_callback=stream_cb,
                                     status_callback=status_callback,
                                     tool_callback=tool_cb,
-                                    ctx_callback=ctx_cb)
+                                    ctx_callback=ctx_cb,
+                                    interrupt_event=screen._interrupt_event)
+                if screen._interrupt_event.is_set():
+                    screen.write(f"\n{_RESET}{_META_STYLE}[interrupted]{_RESET}\n\n")
+                    status_callback("interrupted")
+                    continue
                 screen.write(f"\n{_RESET}\n")
                 messages.append({"role": "assistant", "content": response})
             except LLMError as e:
@@ -848,6 +865,8 @@ def action_interactive(args, available_tools, external_mcps):
             except BaseException:
                 screen.write(_RESET)
                 raise
+            finally:
+                screen.stop_input_listener()
 
     except (KeyboardInterrupt, EOFError):
         screen.write(f"{_RESET}\n[exiting]\n")
