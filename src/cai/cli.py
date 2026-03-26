@@ -432,7 +432,7 @@ def _warn_if_stuck(tool_calls, call_history, messages):
         args_str = call.get('function', {}).get('arguments', '')
         key = (name, args_str)
         call_history[key] = call_history.get(key, 0) + 1
-        if call_history[key] >= 3:
+        if call_history[key] >= 2:
             warning = (f"Warning: you have already called tool '{name}' with these exact arguments "
                        f"{call_history[key]} times and received the same result. "
                        f"Try a different approach or tool to make progress.")
@@ -447,12 +447,12 @@ def _emit_status(text, status_callback):
 
 def call_llm(messages,
              args,
+             tools,
+             external_mcps,
              stream_callback=None,
              status_callback=None,
              tool_callback=None,
              ctx_callback=None):
-    global external_mcps
-
     # handling available tools for LLM.
     included_tools = []
     internal_tool_names = getattr(args, 'internal_tools', set())
@@ -491,7 +491,7 @@ def call_llm(messages,
         # Force at least one tool call on turn 1 in agentic mode so the model
         # doesn't skip tools and answer directly from training data.
         # tool_choice = "required" if (agentic and turn == 1 and included_tools) else "auto"
-        if args.require_tools:
+        if args.force_tools:
             tool_choice = "required"
         else:
             tool_choice = "auto"
@@ -548,7 +548,7 @@ def call_llm(messages,
     _emit_status(f"[!] reached max turns ({max_turns})", status_callback)
     raise MaxTurnsReached(max_turns)
 
-def prompt_line_by_line(args, messages):
+def prompt_line_by_line(args, messages, tools, external_mcps):
     if not sys.stdin.isatty():
         log.info("prompt_line_by_line: mode=streaming_stdin")
         streaming_stdin = True
@@ -582,12 +582,10 @@ def prompt_line_by_line(args, messages):
 
     def process_line(line):
         local_messages = messages.copy()
-        file_path = line_num = col_num = match_text = None
-
         local_messages.append({"role": "user", "content": line})
         local_messages.append({"role": "user", "content": args.prompt})
 
-        response = call_llm(local_messages, args)
+        response = call_llm(local_messages, args, tools, external_mcps)
 
         with lock:
             completed_count[0] += 1
@@ -639,7 +637,7 @@ def _read_file_numbered(path):
 
 
 ACTION_PROMPT = "prompt"
-def action_prompt(args):
+def action_prompt(args, tools, external_mcps):
     if not args.prompt:
         print("this action require --prompt to be provided.")
         return
@@ -675,7 +673,7 @@ def action_prompt(args):
             messages.append({"role": "user", "content": f"<cursor_location> line number: {ln}, column number: {cn} </cursor_location>"})
 
     if args.line_by_line:
-        return prompt_line_by_line(args, messages)
+        return prompt_line_by_line(args, messages, tools, external_mcps)
 
     messages.append({"role": "user", "content": args.prompt})
 
@@ -684,6 +682,8 @@ def action_prompt(args):
         try:
             call_llm(messages,
                      args,
+                     tools,
+                     external_mcps,
                      stream_callback=lambda chunk: (sys.stdout.write(chunk), sys.stdout.flush()),
                      tool_callback=lambda chunk: (sys.stderr.write(chunk), sys.stderr.flush()))
             print()
@@ -693,7 +693,7 @@ def action_prompt(args):
     else:
         log.info("action_prompt: calling LLM (non-streaming)")
         try:
-            content = call_llm(messages, args)
+            content = call_llm(messages, args, tools, external_mcps)
             if args.oneline:
                 content = content.replace('\n', ' ')
             print(content)
@@ -732,7 +732,7 @@ def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_c
 
 
 ACTION_INTERACTIVE = "interactive"
-def action_interactive(args):
+def action_interactive(args, tools, external_mcps):
     """Multi-turn TUI conversation loop using Screen for display."""
     from cai.screen import Screen
 
@@ -808,7 +808,9 @@ def action_interactive(args):
             screen.show_prompt_placeholder("> ")
             screen.write(_LLM_STYLE)
             try:
-                response = call_llm(messages, args,
+                response = call_llm(messages,
+                                    args,
+                                    tools, external_mcps,
                                     stream_callback=stream_cb,
                                     status_callback=status_callback,
                                     tool_callback=tool_cb,
@@ -836,7 +838,7 @@ def action_interactive(args):
             screen.show_prompt_placeholder("> ")
             screen.write(_LLM_STYLE)
             try:
-                response = call_llm(messages, args,
+                response = call_llm(messages, args, tools, external_mcps,
                                     stream_callback=stream_cb,
                                     status_callback=status_callback,
                                     tool_callback=tool_cb,
@@ -872,15 +874,13 @@ def main():
                         help="the prompt to send to the LLM.")
     parser.add_argument("--system-prompt",
                         help="the system prompt to send to the LLM.")
-    parser.add_argument("--cwd", default=".",
-                        help="the current working for the script to operate at.")
     parser.add_argument("--file",
                         help="file path to include in the LLM context.")
     parser.add_argument("--location",
                         help="the location in the codebase to be used by the action. in the format of => <file_path>:<line_num>:<col_num>")
     parser.add_argument("--model", default=None,
                         help="the model to be used by the LLM")
-    parser.add_argument("--require-tools", action="store_true",
+    parser.add_argument("--force-tools", action="store_true",
                         help="require from llm to make tool use")
     parser.add_argument("--progress", action="store_true",
                         help="show progess bar.")
@@ -892,7 +892,7 @@ def main():
                         help="let the action know whether or not to include reasoning in the output.")
     parser.add_argument("--non-streaming", action="store_true",
                         help="let the action know whether or not to use the non-streaming api.")
-    parser.add_argument("--interactive", action="store_true",
+    parser.add_argument("-i", "--interactive", action="store_true",
                         help="open a persistent TUI session; implies --agentic. Ctrl-C or Ctrl-D to exit.")
     parser.add_argument("--max-turns", type=int, default=None,
                         help="max tool-call turns in agentic mode (default: 5/10/20 by model tier).")
@@ -938,7 +938,6 @@ def main():
             args.internal_tools.add(entry)
 
     if args.interactive:
-        args.agentic = True
         if args.line_by_line or args.oneline:
             parser.error("--interactive is incompatible with --line-by-line / --oneline")
 
@@ -947,11 +946,11 @@ def main():
              args.interactive)
 
     if args.interactive:
-        action_interactive(args)
+        action_interactive(args, tools, external_mcps)
         return
 
     if args.action == ACTION_PROMPT:
-        action_prompt(args)
+        action_prompt(args, tools, external_mcps)
 
 
 if __name__ == "__main__":

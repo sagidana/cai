@@ -467,7 +467,9 @@ if __name__ == '__main__':
                 if os.path.isdir(full):
                     queue.append(full)
 
-        return "\n".join(entries) if entries else "(empty)"
+        result = "\n".join(entries) if entries else "(empty)"
+        print(result)
+        return result
 
     @mcp.tool()
     def pattern_search(pattern: str, path: str = ".", file_glob: str = "") -> str:
