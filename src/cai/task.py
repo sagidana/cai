@@ -216,15 +216,13 @@ class AnswerVerifier(ReasoningStrategy):
         tool_cb = runner._callbacks.get('tool_callback')
 
         # Verdict check is a silent internal call — no streaming needed.
-        verdict = call_llm(
-            task.messages
-            + [{"role": "assistant", "content": task.result}]
-            + [REFLECT_PROMPT],
-            runner._args,
-            [],
-            {},
-            interrupt_event=runner._interrupt_event,
-        )
+        verdict = call_llm( task.messages + \
+                                [{"role": "assistant", "content": task.result}] + \
+                                [REFLECT_PROMPT],
+                            runner._args,
+                            [],
+                            {},
+                            interrupt_event=runner._interrupt_event)
         log.info("AnswerVerifier: verdict=%r", verdict[:80] if verdict else "")
 
         if runner._interrupt_event and runner._interrupt_event.is_set():
@@ -245,14 +243,14 @@ class AnswerVerifier(ReasoningStrategy):
         if tool_cb:
             tool_cb("\n[revising answer...]\n")
 
+        task.messages.append({"role": "assistant", "content": task.result})
         task.messages.append({"role": "user", "content": f"Revision needed: {verdict}"})
-        revised = call_llm(
-            task.messages,
-            runner._args,
-            runner._available_tools,
-            runner._external_mcps,
-            **runner._callbacks,
-        )
+
+        revised = call_llm( task.messages,
+                            runner._args,
+                            runner._available_tools,
+                            runner._external_mcps,
+                            **runner._callbacks)
         if not revised:
             log.warning("AnswerVerifier: revised call_llm returned empty, keeping original")
             return None
@@ -303,15 +301,11 @@ class TaskRunner:
             log.info("task[depth=%d]: interrupted before start, skipping", _depth)
             return ""
 
-        # Subtasks run silently — only the root response streams to the screen.
-        # Replace stream_callback with a no-op instead of removing it: keeping the
-        # streaming path means call_llm checks interrupt_event between chunks, so
-        # Ctrl-C aborts the in-flight request on the next received chunk rather than
-        # waiting for the full HTTP response to arrive.
         if task.depth > 0:
             callbacks = dict(callbacks)
             if 'stream_callback' in callbacks:
                 callbacks['stream_callback'] = lambda chunk: None
+
             if 'tool_callback' in callbacks:
                 _indent = "  " * task.depth
                 _orig_tool_cb = callbacks['tool_callback']
@@ -356,22 +350,27 @@ class TaskRunner:
                     if self._interrupt_event and self._interrupt_event.is_set():
                         log.info("task[depth=%d]: interrupted, stopping subtask loop at %d/%d", _depth, i, total)
                         break
+
                     st.parent = task
                     task.children.append(st)
+
                     st_goal_short = st.goal[:60] + "..." if len(st.goal) > 60 else st.goal
                     log.info("task[depth=%d]: subtask[%d/%d] starting — %s", _depth, i, total, st_goal_short)
+
                     if task_callback:
                         task_callback(_fmt_task_line("▸", st.depth, i, total, st.goal))
-                    r = self.run(st, args, available_tools, external_mcps,
-                                 task_callback=task_callback, **callbacks)
+
+                    r = self.run(st, args, available_tools, external_mcps, task_callback=task_callback, **callbacks)
+
                     if task_callback:
                         task_callback(_fmt_task_line("✓", st.depth, i, total))
+
                     log.info("task[depth=%d]: subtask[%d/%d] done — result length=%d", _depth, i, total, len(r))
+
                     results.append((st.goal, r))
-                task.messages.append({
-                    "role": "user",
-                    "content": _format_subtask_results(results),
-                })
+
+                task.messages.append({ "role": "user", "content": _format_subtask_results(results) })
+
                 log.info("task[depth=%d]: subtask results injected into messages (%d subtask(s))", _depth, len(results))
                 break  # once decomposed, remaining pre-hooks don't apply
             else:
@@ -380,7 +379,9 @@ class TaskRunner:
         # --- running ---
         task.state = "running"
         log.info("task[depth=%d]: state=running", _depth)
+
         task.result = call_llm(task.messages, args, available_tools, external_mcps, **main_callbacks)
+
         if not task.result:
             log.warning("task[depth=%d]: call_llm returned empty result", _depth)
             _tcb = callbacks.get('tool_callback')
@@ -390,9 +391,12 @@ class TaskRunner:
         # --- post_hook: run all strategies in reverse ---
         task.state = "post_hook"
         log.info("task[depth=%d]: state=post_hook", _depth)
+
         for hook in reversed(self.hooks):
             hook_name = type(hook).__name__
+
             revised = hook.post(task, self)
+
             if revised is not None:
                 log.info("task[depth=%d]: %s revised result (length=%d)", _depth, hook_name, len(revised))
                 task.result = revised
@@ -401,6 +405,7 @@ class TaskRunner:
 
         task.state = "done"
         log.info("task[depth=%d]: done — result length=%d", _depth, len(task.result) if task.result else 0)
+
         return task.result
 
     @classmethod
