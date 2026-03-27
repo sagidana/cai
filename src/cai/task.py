@@ -39,11 +39,6 @@ class Task:
 # ---------------------------------------------------------------------------
 
 class ReasoningStrategy(ABC):
-    # Set to True in subclasses that take ownership of displaying the final
-    # answer (e.g. AnswerVerifier).  When any active hook sets this, the main
-    # call_llm stream is silenced so only the hook's output is shown.
-    replaces_output = False
-
     def pre(self, task: Task, runner: 'TaskRunner'):
         """
         Called before main execution.
@@ -205,55 +200,35 @@ class TaskDecomposer(ReasoningStrategy):
 
 
 class AnswerVerifier(ReasoningStrategy):
-    """After getting a result, asks the LLM to verify it and optionally retries once.
-
-    The original answer always streams normally.  If revision is needed a
-    separator is shown and the revised answer streams via the same callbacks.
-    """
+    """After getting a result, asks the LLM to verify it and optionally retries once."""
 
     def post(self, task: Task, runner: 'TaskRunner'):
         from cai.cli import call_llm  # deferred to avoid circular import at module level
-        tool_cb = runner._callbacks.get('tool_callback')
-
-        # Verdict check is a silent internal call — no streaming needed.
-        verdict = call_llm( task.messages + \
-                                [{"role": "assistant", "content": task.result}] + \
-                                [REFLECT_PROMPT],
-                            runner._args,
-                            [],
-                            {},
-                            interrupt_event=runner._interrupt_event)
+        verdict = call_llm(
+            task.messages
+            + [{"role": "assistant", "content": task.result}]
+            + [REFLECT_PROMPT],
+            runner._args,
+            [],
+            {},
+            interrupt_event=runner._interrupt_event,
+        )
         log.info("AnswerVerifier: verdict=%r", verdict[:80] if verdict else "")
 
-        if runner._interrupt_event and runner._interrupt_event.is_set():
-            log.info("AnswerVerifier: interrupted, skipping revision")
-            return None
-
-        if not verdict:
-            log.warning("AnswerVerifier: verdict call returned empty/None, skipping revision")
-            return None
-
-        if "SATISFACTORY" in verdict:
-            log.info("AnswerVerifier: verdict=SATISFACTORY, no revision needed")
-            return None
+        if (not verdict
+                or "SATISFACTORY" in verdict
+                or (runner._interrupt_event and runner._interrupt_event.is_set())):
+            return None  # satisfied, interrupted, or unparseable verdict
 
         log.info("AnswerVerifier: revision needed, retrying")
-
-        # Notify the user we are revising, then stream the revised answer.
-        if tool_cb:
-            tool_cb("\n[revising answer...]\n")
-
-        task.messages.append({"role": "assistant", "content": task.result})
         task.messages.append({"role": "user", "content": f"Revision needed: {verdict}"})
-
-        revised = call_llm( task.messages,
-                            runner._args,
-                            runner._available_tools,
-                            runner._external_mcps,
-                            **runner._callbacks)
-        if not revised:
-            log.warning("AnswerVerifier: revised call_llm returned empty, keeping original")
-            return None
+        revised = call_llm(
+            task.messages,
+            runner._args,
+            runner._available_tools,
+            runner._external_mcps,
+            interrupt_event=runner._interrupt_event,
+        )
         return revised
 
 
@@ -281,7 +256,6 @@ class TaskRunner:
         self._available_tools = None
         self._external_mcps = None
         self._interrupt_event = None  # forwarded so strategies respect Ctrl-C
-        self._callbacks = {}         # stream/tool/status callbacks for the current task
 
     def run(self, task: Task, args, available_tools, external_mcps,
             task_callback=None, **callbacks) -> str:
@@ -291,121 +265,60 @@ class TaskRunner:
         self._external_mcps = external_mcps
         self._interrupt_event = callbacks.get('interrupt_event')
 
-        _depth = task.depth
-        _goal_short = task.goal[:60] + "..." if len(task.goal) > 60 else task.goal
-        log.info("task[depth=%d]: starting — %s", _depth, _goal_short)
-
         # Fast-exit: if already interrupted before this task even starts, skip everything.
         if self._interrupt_event and self._interrupt_event.is_set():
             task.state = "done"
-            log.info("task[depth=%d]: interrupted before start, skipping", _depth)
             return ""
 
-        if task.depth > 0:
+        # Subtasks run silently — only the root response streams to the screen.
+        # Replace stream_callback with a no-op instead of removing it: keeping the
+        # streaming path means call_llm checks interrupt_event between chunks, so
+        # Ctrl-C aborts the in-flight request on the next received chunk rather than
+        # waiting for the full HTTP response to arrive.
+        if task.depth > 0 and 'stream_callback' in callbacks:
             callbacks = dict(callbacks)
-            if 'stream_callback' in callbacks:
-                callbacks['stream_callback'] = lambda chunk: None
-
-            if 'tool_callback' in callbacks:
-                _indent = "  " * task.depth
-                _orig_tool_cb = callbacks['tool_callback']
-                callbacks['tool_callback'] = (
-                    lambda line, error=False, _cb=_orig_tool_cb, _ind=_indent:
-                        _cb(line, error=error) if line == "\n"
-                        else _cb(f"{_ind}{line}", error=error)
-                )
-            if 'ctx_callback' in callbacks:
-                _orig_ctx_cb = callbacks['ctx_callback']
-                callbacks['ctx_callback'] = (
-                    lambda ctx_str, _cb=_orig_ctx_cb, _d=task.depth:
-                        _cb(f"[subtask depth:{_d}] {ctx_str}")
-                )
-
-        # Store the (depth-adjusted) callbacks so hook strategies can use them.
-        self._callbacks = callbacks
-
-        # If any active hook owns displaying the output (replaces_output=True),
-        # silence the main call_llm stream so the hook controls what is shown.
-        # Use a separate dict for the main call so self._callbacks stays intact
-        # (hooks need the real stream_callback to display the final answer).
-        main_callbacks = callbacks
-        if any(getattr(h, 'replaces_output', False) for h in self.hooks):
-            main_callbacks = dict(callbacks)
-            main_callbacks['stream_callback'] = lambda chunk: None
+            callbacks['stream_callback'] = lambda chunk: None
 
         from cai.cli import call_llm  # deferred to avoid circular import
 
         # --- pre_hook: run all strategies in order ---
         task.state = "pre_hook"
-        log.info("task[depth=%d]: state=pre_hook hooks=%d", _depth, len(self.hooks))
         for hook in self.hooks:
-            hook_name = type(hook).__name__
             subtasks = hook.pre(task, self)
             if subtasks:
-                total = len(subtasks)
-                log.info("task[depth=%d]: %s decomposed into %d subtask(s)", _depth, hook_name, total)
                 results = []
+                total = len(subtasks)
                 for i, st in enumerate(subtasks, 1):
                     # Stop launching new subtasks the moment interrupt is set.
                     if self._interrupt_event and self._interrupt_event.is_set():
-                        log.info("task[depth=%d]: interrupted, stopping subtask loop at %d/%d", _depth, i, total)
                         break
-
                     st.parent = task
                     task.children.append(st)
-
-                    st_goal_short = st.goal[:60] + "..." if len(st.goal) > 60 else st.goal
-                    log.info("task[depth=%d]: subtask[%d/%d] starting — %s", _depth, i, total, st_goal_short)
-
                     if task_callback:
                         task_callback(_fmt_task_line("▸", st.depth, i, total, st.goal))
-
-                    r = self.run(st, args, available_tools, external_mcps, task_callback=task_callback, **callbacks)
-
+                    r = self.run(st, args, available_tools, external_mcps,
+                                 task_callback=task_callback, **callbacks)
                     if task_callback:
                         task_callback(_fmt_task_line("✓", st.depth, i, total))
-
-                    log.info("task[depth=%d]: subtask[%d/%d] done — result length=%d", _depth, i, total, len(r))
-
                     results.append((st.goal, r))
-
-                task.messages.append({ "role": "user", "content": _format_subtask_results(results) })
-
-                log.info("task[depth=%d]: subtask results injected into messages (%d subtask(s))", _depth, len(results))
+                task.messages.append({
+                    "role": "user",
+                    "content": _format_subtask_results(results),
+                })
                 break  # once decomposed, remaining pre-hooks don't apply
-            else:
-                log.info("task[depth=%d]: %s → no decomposition", _depth, hook_name)
 
         # --- running ---
         task.state = "running"
-        log.info("task[depth=%d]: state=running", _depth)
-
-        task.result = call_llm(task.messages, args, available_tools, external_mcps, **main_callbacks)
-
-        if not task.result:
-            log.warning("task[depth=%d]: call_llm returned empty result", _depth)
-            _tcb = callbacks.get('tool_callback')
-            if _tcb:
-                _tcb("[warning: LLM returned empty response]\n", error=True)
+        task.result = call_llm(task.messages, args, available_tools, external_mcps, **callbacks)
 
         # --- post_hook: run all strategies in reverse ---
         task.state = "post_hook"
-        log.info("task[depth=%d]: state=post_hook", _depth)
-
         for hook in reversed(self.hooks):
-            hook_name = type(hook).__name__
-
             revised = hook.post(task, self)
-
             if revised is not None:
-                log.info("task[depth=%d]: %s revised result (length=%d)", _depth, hook_name, len(revised))
                 task.result = revised
-            else:
-                log.info("task[depth=%d]: %s → result kept as-is", _depth, hook_name)
 
         task.state = "done"
-        log.info("task[depth=%d]: done — result length=%d", _depth, len(task.result) if task.result else 0)
-
         return task.result
 
     @classmethod
