@@ -1005,6 +1005,8 @@ def main():
                         help="process stdin (or --file) one line at a time, calling LLM per line.")
     parser.add_argument('prompt_words', nargs='*',
                         help="prompt words after -- (alternative to -p)")
+    parser.add_argument('--harness', default=None,
+                        help="path to a .harness.cai orchestration file.")
 
     # Must be called before init() so tab completion exits immediately without
     # running any heavy initialization (API clients, tree-sitter, etc.).
@@ -1041,6 +1043,13 @@ def main():
     log.info("main: action=%s model=%s selected_tools=%s external_mcps=%s interactive=%s",
              args.action, args.model, sorted(args.selected_tools), list(external_mcps.keys()),
              args.interactive)
+
+    if args.harness:
+        from cai.harness import execute_harness, parse_harness_file
+        instructions, label_map = parse_harness_file(args.harness)
+        user_prompt = args.prompt or ""
+        execute_harness(instructions, label_map, user_prompt, args, available_tools)
+        return
 
     if args.interactive:
         action_interactive(args, available_tools, external_mcps)
