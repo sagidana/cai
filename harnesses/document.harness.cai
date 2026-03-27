@@ -19,7 +19,7 @@ gather-code:
     --name "gather-code"
     --prepend-user-prompt
     --enrich-global-context
-    --tools read, list_files
+    --tools read, read_lines, list_files, pattern_search, symbol_search, file_code_outline
     --max-turns 100
     --force-tools
     --system-prompt "You are a technical writer in the context-gathering phase. Your job is to read the code being documented with the precision of someone who must describe it perfectly to an outsider. Do not write any documentation yet — only read and understand."
@@ -60,7 +60,7 @@ gather-conventions:
 ---
     --name "gather-conventions"
     --enrich-global-context
-    --tools read, list_files
+    --tools read, read_lines, list_files, pattern_search
     --max-turns 50
     --force-tools
     --system-prompt "You are a technical writer studying the project's documentation style. Your goal is to understand how documentation is written in this project so that what you produce is indistinguishable from existing docs in format, tone, and depth."
@@ -176,7 +176,7 @@ write:
 ---
     --name "write"
     --enrich-global-context
-    --tools read, list_files
+    --tools read, read_lines, list_files, edit_file, create_file
     --max-turns 100
     --system-prompt "You are a technical writer producing final documentation. You write with precision, clarity, and consistency. Every statement must be accurate — never approximate. Follow the project's conventions exactly."
     '''

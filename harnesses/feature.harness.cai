@@ -21,7 +21,7 @@ enrichment:
     --name "gather"
     --prepend-user-prompt
     --enrich-global-context
-    --tools read, list_files
+    --tools read, read_lines, list_files, pattern_search, symbol_search, file_code_outline, project_code_outline
     --max-turns 100
     --force-tools
     --system-prompt "You are a senior engineer in the context-gathering phase before designing a new feature. Your only job is to understand the codebase deeply enough to design something that fits naturally. Do not design or implement anything yet."
@@ -180,7 +180,7 @@ implement:
 ---
     --name "implement"
     --enrich-global-context
-    --tools read, list_files
+    --tools read, read_lines, list_files, pattern_search, symbol_search, create_file, edit_file
     --max-turns 100
     --system-prompt "You are a senior engineer implementing an approved feature design. Follow the design precisely. Do not add anything not in the design. Do not improve or refactor adjacent code. A minimal, correct implementation is the goal."
     '''
@@ -209,7 +209,7 @@ write-tests:
 ---
     --name "write-tests"
     --enrich-global-context
-    --tools read, list_files
+    --tools read, read_lines, list_files, pattern_search, create_file, edit_file
     --max-turns 100
     --system-prompt "You are a test engineer writing tests for a newly implemented feature. Your tests must be thorough, match project conventions exactly, and cover the full testing surface defined in the design."
     '''

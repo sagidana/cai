@@ -20,7 +20,7 @@ enrichment:
     --name "gather"
     --prepend-user-prompt
     --enrich-global-context
-    --tools read, list_files
+    --tools read, read_lines, list_files, pattern_search, symbol_search, file_code_outline
     --max-turns 100
     --force-tools
     --system-prompt "You are an expert security engineer performing a code audit. In this phase your only job is to gather source code. Read every file that handles user input, authentication, authorisation, data persistence, external API calls, or sensitive data. Security bugs hide in dependencies and edge cases — read thoroughly."
@@ -152,7 +152,7 @@ audit:
 ---
     --name "audit"
     --enrich-global-context
-    --tools read, list_files
+    --tools read, read_lines, list_files, pattern_search, symbol_search
     --max-turns 100
     --system-prompt "You are an expert application security engineer performing a detailed vulnerability audit. You think like an attacker. You are methodical. You cite specific code locations. You do not report hypothetical issues — every finding is grounded in actual code you have read."
     '''

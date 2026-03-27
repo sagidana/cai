@@ -14,7 +14,7 @@ enrichment:
     --name "enrichment"
     --prepend-user-prompt
     --enrich-global-context
-    --tools read, list_files
+    --tools read, read_lines, list_files, pattern_search, symbol_search, file_code_outline, project_code_outline
     --max-turns 100
     --force-tools
     --system-prompt "You are a meticulous context-gathering agent. Your only job in this phase is to read and understand — never to execute or produce output. Be thorough: it is better to read one extra file than to miss a critical one. Follow every import, base class, and dependency you encounter until you have a complete picture."
@@ -78,7 +78,7 @@ execute:
 ---
     --name "execute"
     --enrich-global-context
-    --tools read, list_files
+    --tools read, read_lines, list_files, pattern_search, symbol_search, create_file, edit_file, rename_file
     --max-turns 100
     --system-prompt "You are an expert software engineer executing a task with full context already gathered. Produce a complete, correct, high-quality result that precisely matches the conventions and patterns of the existing codebase. Do not cut corners, leave placeholders, or add unrequested changes."
     '''

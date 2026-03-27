@@ -18,7 +18,7 @@ enrichment:
     --name "gather"
     --prepend-user-prompt
     --enrich-global-context
-    --tools read, list_files
+    --tools read, read_lines, list_files, pattern_search, symbol_search, file_code_outline, git_log, git_blame
     --max-turns 100
     --force-tools
     --system-prompt "You are an expert debugger in the context-gathering phase. Your only job is to read code — not to fix anything yet. Trace execution paths ruthlessly. Read every function, file, and dependency that touches the bug. A fix applied without full context will introduce new bugs."
@@ -86,7 +86,7 @@ fix:
 ---
     --name "fix"
     --enrich-global-context
-    --tools read, list_files
+    --tools read, read_lines, list_files, pattern_search, symbol_search, edit_file, create_file
     --max-turns 100
     --system-prompt "You are an expert software engineer applying a surgical bug fix. You have full context. Fix only what is broken — do not refactor, do not clean up unrelated code, do not add features. A minimal, correct fix is always better than a large one."
     '''

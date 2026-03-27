@@ -21,7 +21,7 @@ enrichment:
     --name "gather"
     --prepend-user-prompt
     --enrich-global-context
-    --tools read, list_files
+    --tools read, read_lines, list_files, pattern_search, symbol_search, fetch_url
     --max-turns 100
     --force-tools
     --system-prompt "You are a migration engineer in the context-gathering phase. Your first job is to find and read every file that uses the old API, dependency, or pattern being migrated. Miss a file and it becomes a silent regression."
@@ -173,7 +173,7 @@ execute:
 ---
     --name "execute"
     --enrich-global-context
-    --tools read, list_files
+    --tools read, read_lines, list_files, pattern_search, edit_file, create_file, rename_file
     --max-turns 100
     --system-prompt "You are a migration engineer executing an approved migration plan. Follow the plan precisely, file by file. Every usage in the audit must be migrated — do not skip any. Do not make changes not required by the migration."
     '''

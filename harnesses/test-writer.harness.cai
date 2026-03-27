@@ -19,7 +19,7 @@ gather-source:
     --name "gather-source"
     --prepend-user-prompt
     --enrich-global-context
-    --tools read, list_files
+    --tools read, read_lines, list_files, pattern_search, symbol_search, file_code_outline
     --max-turns 100
     --force-tools
     --system-prompt "You are a test engineer in the context-gathering phase. Your job right now is to deeply understand the code you will be testing — its intended behaviour, its edge cases, its failure modes, and its dependencies. Do not write tests yet."
@@ -53,7 +53,7 @@ gather-tests:
 ---
     --name "gather-tests"
     --enrich-global-context
-    --tools read, list_files
+    --tools read, read_lines, list_files, pattern_search
     --max-turns 50
     --force-tools
     --system-prompt "You are a test engineer studying the project's testing conventions. Your goal is to understand exactly how tests are structured in this project so that any tests you write will fit naturally."
@@ -155,7 +155,7 @@ write:
 ---
     --name "write"
     --enrich-global-context
-    --tools read, list_files
+    --tools read, read_lines, list_files, pattern_search, create_file, edit_file
     --max-turns 100
     --system-prompt "You are a test engineer implementing a pre-approved test plan. Write every test case in the plan. No shortcuts, no skipping cases. Each test should be self-contained, readable, and follow the project's exact conventions."
     '''

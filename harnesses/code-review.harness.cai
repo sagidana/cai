@@ -19,7 +19,7 @@ enrichment:
     --name "gather"
     --prepend-user-prompt
     --enrich-global-context
-    --tools read, list_files
+    --tools read, read_lines, list_files, pattern_search, symbol_search, file_code_outline, git_diff, git_log, git_blame
     --max-turns 100
     --force-tools
     --system-prompt "You are an experienced code reviewer in the context-gathering phase. Before you can review code fairly and accurately, you must understand its full context: what it is supposed to do, what it depends on, how it fits into the larger system, and what the project's conventions are. Gather all of that now."

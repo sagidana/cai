@@ -21,7 +21,7 @@ enrichment:
     --name "gather"
     --prepend-user-prompt
     --enrich-global-context
-    --tools read, list_files
+    --tools read, read_lines, list_files, pattern_search, symbol_search, file_code_outline, project_code_outline
     --max-turns 100
     --force-tools
     --system-prompt "You are an expert refactoring engineer in the context-gathering phase. Refactoring without full context causes regressions. Your only job now is to read — every file the refactor touches, every callsite, every test. Do not begin planning yet."
@@ -166,7 +166,7 @@ execute:
 ---
     --name "execute"
     --enrich-global-context
-    --tools read, list_files
+    --tools read, read_lines, list_files, pattern_search, symbol_search, edit_file, create_file, rename_file, remove_file
     --max-turns 100
     --system-prompt "You are an expert engineer executing an approved refactor plan. Follow the plan precisely. Do not improvise. Do not add unrequested changes. If you discover something unexpected, handle the minimal case that preserves the plan's goals — do not expand the scope."
     '''

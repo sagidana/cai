@@ -20,7 +20,7 @@ enrichment:
     --name "gather"
     --prepend-user-prompt
     --enrich-global-context
-    --tools read, list_files
+    --tools read, read_lines, list_files, pattern_search, symbol_search, file_code_outline, project_code_outline
     --max-turns 100
     --force-tools
     --system-prompt "You are an expert engineer in the context-gathering phase. Your goal is to read every piece of code involved in the topic being explained — not to explain it yet, but to understand it completely and accurately. Surface-level reading produces inaccurate explanations."
