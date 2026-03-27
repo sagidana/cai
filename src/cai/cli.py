@@ -593,7 +593,12 @@ def call_llm(messages,
         else:
             tool_choice = "auto"
 
-        content, tool_calls, usage = run_turn(messages, args, included_tools, stream_callback, tool_choice=tool_choice, interrupt_event=interrupt_event)
+        content, tool_calls, usage = run_turn(messages,
+                                              args,
+                                              included_tools,
+                                              stream_callback,
+                                              tool_choice=tool_choice,
+                                              interrupt_event=interrupt_event)
         log.info("call_llm: turn=%d tokens prompt=%s completion=%s total=%s",
                  turn,
                  usage.get('prompt_tokens'),
