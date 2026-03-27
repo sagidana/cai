@@ -82,6 +82,11 @@ class ExitInstruction:
     pass
 
 
+@dataclass
+class CompactInstruction:
+    pass
+
+
 # ─── Parser ──────────────────────────────────────────────────────────────────
 
 _NORMAL = 'normal'
@@ -221,6 +226,11 @@ def parse_harness_file(path: str):
                 instructions.append(ExitInstruction())
                 continue
 
+            # compact-if-needed
+            if stripped == 'compact-if-needed':
+                instructions.append(CompactInstruction())
+                continue
+
             raise SyntaxError(f"harness:{lineno}: unexpected token: {stripped!r}")
 
         elif state == _BLOCK_HEADER:
@@ -339,8 +349,9 @@ def run_block(block, global_messages, user_prompt, base_args, available_tools):
 
     # Use streaming for non-strict-format blocks so output appears live.
     # Strict-format blocks must use the non-streaming path so enforcement works.
+    # All streamed output goes to stderr; only the final harness result is written to stdout.
     use_streaming = not block.strict_format
-    stream_cb = (lambda chunk: (sys.stdout.write(chunk), sys.stdout.flush())) if use_streaming else None
+    stream_cb = (lambda chunk: (sys.stderr.write(chunk), sys.stderr.flush())) if use_streaming else None
 
     _status_cb(f"running")
     try:
@@ -355,7 +366,8 @@ def run_block(block, global_messages, user_prompt, base_args, available_tools):
             ctx_callback=_ctx_cb,
         )
         if use_streaming:
-            print()  # newline after streamed output
+            sys.stderr.write('\n')
+            sys.stderr.flush()
     except MaxTurnsReached as e:
         content = ""
         sys.stderr.write(f"{prefix}[!] reached max turns ({e.max_turns})\n")
@@ -367,6 +379,47 @@ def run_block(block, global_messages, user_prompt, base_args, available_tools):
         global_messages.extend(local_messages[global_end:])
 
     return content.strip()
+
+
+def _compact_global_if_needed(global_messages, base_args):
+    """
+    Compact global_messages if the estimated token usage is significant.
+
+    Uses character count as a token proxy (≈4 chars/token) compared against
+    the model's context window. Compacts when estimated usage exceeds 30% of
+    context — conservative enough to act before a block tips the model over
+    the limit, but high enough not to compact unnecessarily early.
+
+    Delegates to cli._compact_messages which summarises the middle turns into
+    a single [memory] system message, preserving the first exchange and the
+    last four messages verbatim.
+    """
+    from cai.cli import _compact_messages, get_model_profile
+
+    if not global_messages:
+        return
+
+    total_chars = sum(len(str(m.get('content', ''))) for m in global_messages)
+    estimated_tokens = total_chars // 4
+
+    profile = get_model_profile(base_args.model)
+    context_limit = profile.get('context', 16000)
+    threshold = 0.30  # compact when global context alone is >30% of the window
+
+    if estimated_tokens < context_limit * threshold:
+        sys.stderr.write(
+            f"[compact-if-needed] skipped "
+            f"(~{estimated_tokens} tokens, {estimated_tokens/context_limit:.0%} of {context_limit})\n"
+        )
+        sys.stderr.flush()
+        return
+
+    sys.stderr.write(
+        f"[compact-if-needed] compacting "
+        f"(~{estimated_tokens} tokens, {estimated_tokens/context_limit:.0%} of {context_limit})\n"
+    )
+    sys.stderr.flush()
+    _compact_messages(global_messages, base_args.model)
 
 
 def execute_harness(instructions, label_map, user_prompt, base_args, available_tools):
@@ -419,6 +472,10 @@ def execute_harness(instructions, label_map, user_prompt, base_args, available_t
 
         elif isinstance(instr, ExitInstruction):
             break
+
+        elif isinstance(instr, CompactInstruction):
+            _compact_global_if_needed(global_messages, base_args)
+            pc += 1
 
         else:
             pc += 1
