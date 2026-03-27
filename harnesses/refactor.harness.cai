@@ -16,6 +16,7 @@
 #   cai --harness harnesses/refactor.harness.cai -- "extract the retry logic in api.py into a standalone utility"
 
 enrichment:
+no-more-than 3
 
 ---
     --name "gather"
@@ -87,6 +88,7 @@ if verify == retry: goto enrichment
 exit
 
 plan:
+no-more-than 3
 
 ---
     --name "plan"
@@ -162,6 +164,7 @@ if validate-plan == revise: goto plan
 exit
 
 execute:
+no-more-than 3
 
 ---
     --name "execute"

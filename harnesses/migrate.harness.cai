@@ -16,6 +16,7 @@
 #   cai --harness harnesses/migrate.harness.cai -- "migrate from requests to httpx, replacing all usages"
 
 enrichment:
+no-more-than 3
 
 ---
     --name "gather"
@@ -169,6 +170,7 @@ plan:
 ---
 
 execute:
+no-more-than 3
 
 ---
     --name "execute"

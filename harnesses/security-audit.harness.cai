@@ -15,6 +15,7 @@
 #   cai --harness harnesses/security-audit.harness.cai -- "audit the authentication and payment modules"
 
 enrichment:
+no-more-than 3
 
 ---
     --name "gather"

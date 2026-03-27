@@ -15,6 +15,7 @@
 #   cai --harness harnesses/explain.harness.cai -- "explain how request authentication works end-to-end"
 
 enrichment:
+no-more-than 3
 
 ---
     --name "gather"

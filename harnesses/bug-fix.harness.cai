@@ -13,6 +13,7 @@
 #   cai --harness harnesses/bug-fix.harness.cai -- "describe the bug here"
 
 enrichment:
+no-more-than 3
 
 ---
     --name "gather"
@@ -82,6 +83,7 @@ if verify == retry: goto enrichment
 exit
 
 fix:
+no-more-than 3
 
 ---
     --name "fix"

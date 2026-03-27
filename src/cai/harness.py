@@ -28,6 +28,7 @@ harness.cai format overview:
 
     if x == ok: goto label
     goto label
+    no-more-than <number>   # exit if this point has been passed more than <number> times
     exit
 """
 
@@ -89,6 +90,11 @@ class ExitInstruction:
 @dataclass
 class CompactInstruction:
     pass
+
+
+@dataclass
+class NoMoreThanInstruction:
+    limit: int
 
 
 # ─── Parser ──────────────────────────────────────────────────────────────────
@@ -233,6 +239,12 @@ def parse_harness_file(path: str):
             # compact-if-needed
             if stripped == 'compact-if-needed':
                 instructions.append(CompactInstruction())
+                continue
+
+            # no-more-than <number>
+            m = re.match(r"^no-more-than\s+(\d+)$", stripped)
+            if m:
+                instructions.append(NoMoreThanInstruction(limit=int(m.group(1))))
                 continue
 
             raise SyntaxError(f"harness:{lineno}: unexpected token: {stripped!r}")
@@ -461,6 +473,7 @@ def execute_harness(instructions, label_map, user_prompt, base_args, available_t
     block_results = {}   # block name → last text output
     pc = 0
     interrupted = False
+    no_more_than_counts = {}   # pc → execution count
 
     log.info("execute_harness: start instructions=%d user_prompt_len=%d model=%s",
              len(instructions), len(user_prompt or ""), base_args.model)
@@ -528,6 +541,18 @@ def execute_harness(instructions, label_map, user_prompt, base_args, available_t
             elif isinstance(instr, CompactInstruction):
                 log.info("execute_harness: pc=%d compact-if-needed", pc)
                 _compact_global_if_needed(global_messages, base_args)
+                pc += 1
+
+            elif isinstance(instr, NoMoreThanInstruction):
+                count = no_more_than_counts.get(pc, 0) + 1
+                no_more_than_counts[pc] = count
+                log.info("execute_harness: pc=%d no-more-than %d (count=%d)", pc, instr.limit, count)
+                if count > instr.limit:
+                    sys.stderr.write(
+                        f"[harness] no-more-than {instr.limit} exceeded (ran {count} times) — stopping.\n"
+                    )
+                    sys.stderr.flush()
+                    break
                 pc += 1
 
             else:

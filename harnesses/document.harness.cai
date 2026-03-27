@@ -93,6 +93,7 @@ gather-conventions:
 ---
 
 outline:
+no-more-than 3
 
 ---
     --name "outline"

@@ -84,6 +84,7 @@ gather-tests:
 ---
 
 plan:
+no-more-than 3
 
 ---
     --name "plan"

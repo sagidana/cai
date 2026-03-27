@@ -16,6 +16,7 @@
 #   cai --harness harnesses/feature.harness.cai -- "add rate limiting to the API endpoints"
 
 enrichment:
+no-more-than 3
 
 ---
     --name "gather"
@@ -90,6 +91,7 @@ if verify == retry: goto enrichment
 exit
 
 design:
+no-more-than 3
 
 ---
     --name "design"

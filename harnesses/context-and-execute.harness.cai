@@ -9,6 +9,7 @@
 #   cai --harness harnesses/context-and-execute.harness.cai -- "your task here"
 
 enrichment:
+no-more-than 3
 
 ---
     --name "enrichment"
