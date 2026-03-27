@@ -35,6 +35,7 @@ import copy
 import logging
 import os
 import re
+import signal
 import sys
 from dataclasses import dataclass, field
 from typing import Optional
@@ -459,66 +460,93 @@ def execute_harness(instructions, label_map, user_prompt, base_args, available_t
     global_messages = []
     block_results = {}   # block name → last text output
     pc = 0
+    interrupted = False
 
     log.info("execute_harness: start instructions=%d user_prompt_len=%d model=%s",
              len(instructions), len(user_prompt or ""), base_args.model)
 
-    while pc < len(instructions):
-        instr = instructions[pc]
+    original_sigint = signal.getsignal(signal.SIGINT)
 
-        if isinstance(instr, BlockInstruction):
-            log.info("execute_harness: pc=%d block=%s", pc, instr.block.name)
-            output = run_block(
-                instr.block,
-                global_messages,
-                user_prompt,
-                base_args,
-                available_tools,
-            )
-            block_results[instr.block.name] = output
-            pc += 1
+    def _sigint_handler(signum, frame):
+        # Raise KeyboardInterrupt so the current call_llm/streaming is interrupted immediately.
+        # The except block below will set `interrupted` and break the loop cleanly.
+        raise KeyboardInterrupt
 
-        elif isinstance(instr, IfGotoInstruction):
-            actual = block_results.get(instr.block_name, "")
-            if actual == instr.expected_value:
+    signal.signal(signal.SIGINT, _sigint_handler)
+
+    try:
+        while pc < len(instructions):
+            instr = instructions[pc]
+
+            if isinstance(instr, BlockInstruction):
+                log.info("execute_harness: pc=%d block=%s", pc, instr.block.name)
+                try:
+                    output = run_block(
+                        instr.block,
+                        global_messages,
+                        user_prompt,
+                        base_args,
+                        available_tools,
+                    )
+                except KeyboardInterrupt:
+                    interrupted = True
+                    sys.stderr.write(f"\n[harness] interrupted during block '{instr.block.name}' — stopping.\n")
+                    sys.stderr.flush()
+                    log.warning("execute_harness: interrupted during block=%s pc=%d", instr.block.name, pc)
+                    break
+                block_results[instr.block.name] = output
+                pc += 1
+
+            elif isinstance(instr, IfGotoInstruction):
+                actual = block_results.get(instr.block_name, "")
+                if actual == instr.expected_value:
+                    target = label_map.get(instr.label)
+                    if target is None:
+                        raise RuntimeError(f"harness: undefined label '{instr.label}'")
+                    log.info("execute_harness: pc=%d if %s==%r -> goto %s (pc=%d)",
+                             pc, instr.block_name, instr.expected_value, instr.label, target)
+                    pc = target
+                else:
+                    log.info("execute_harness: pc=%d if %s==%r -> no jump (actual=%r)",
+                             pc, instr.block_name, instr.expected_value, actual)
+                    pc += 1
+
+            elif isinstance(instr, GotoInstruction):
                 target = label_map.get(instr.label)
                 if target is None:
                     raise RuntimeError(f"harness: undefined label '{instr.label}'")
-                log.info("execute_harness: pc=%d if %s==%r -> goto %s (pc=%d)",
-                         pc, instr.block_name, instr.expected_value, instr.label, target)
+                log.info("execute_harness: pc=%d goto %s (pc=%d)", pc, instr.label, target)
                 pc = target
-            else:
-                log.info("execute_harness: pc=%d if %s==%r -> no jump (actual=%r)",
-                         pc, instr.block_name, instr.expected_value, actual)
+
+            elif isinstance(instr, LabelInstruction):
+                pc += 1  # no-op; just a jump target
+
+            elif isinstance(instr, ExitInstruction):
+                log.info("execute_harness: pc=%d exit", pc)
+                break
+
+            elif isinstance(instr, CompactInstruction):
+                log.info("execute_harness: pc=%d compact-if-needed", pc)
+                _compact_global_if_needed(global_messages, base_args)
                 pc += 1
 
-        elif isinstance(instr, GotoInstruction):
-            target = label_map.get(instr.label)
-            if target is None:
-                raise RuntimeError(f"harness: undefined label '{instr.label}'")
-            log.info("execute_harness: pc=%d goto %s (pc=%d)", pc, instr.label, target)
-            pc = target
+            else:
+                pc += 1
 
-        elif isinstance(instr, LabelInstruction):
-            pc += 1  # no-op; just a jump target
+    except KeyboardInterrupt:
+        interrupted = True
+        sys.stderr.write("\n[harness] interrupted — stopping.\n")
+        sys.stderr.flush()
+        log.warning("execute_harness: interrupted at pc=%d", pc)
 
-        elif isinstance(instr, ExitInstruction):
-            log.info("execute_harness: pc=%d exit", pc)
-            break
-
-        elif isinstance(instr, CompactInstruction):
-            log.info("execute_harness: pc=%d compact-if-needed", pc)
-            _compact_global_if_needed(global_messages, base_args)
-            pc += 1
-
-        else:
-            pc += 1
+    finally:
+        signal.signal(signal.SIGINT, original_sigint)
 
     # Emit the last block's output to stdout
     last_output = block_results.get(next(reversed(block_results), None), "") if block_results else ""
-    log.info("execute_harness: done blocks_executed=%d last_block=%s output_len=%d",
+    log.info("execute_harness: done blocks_executed=%d last_block=%s output_len=%d interrupted=%s",
              len(block_results), next(reversed(block_results), None) if block_results else None,
-             len(last_output))
+             len(last_output), interrupted)
     if last_output:
         print(last_output)
     return last_output
