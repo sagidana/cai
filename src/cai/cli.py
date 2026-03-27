@@ -736,6 +736,42 @@ def _read_file_numbered(path):
         return "".join(f"{i + 1}: {line}" for i, line in enumerate(f))
 
 
+def _build_base_messages(args, stdin_content=None, always_agentic=False):
+    """Build the initial messages list (system prompt, stdin, file, cursor)."""
+    messages = []
+
+    if args.system_prompt:
+        messages.append({"role": "system", "content": args.system_prompt})
+    elif always_agentic or getattr(args, 'agentic', False):
+        profile = get_model_profile(args.model)
+        prompt_text = AGENTIC_SYSTEM_PROMPTS.get(profile['tier'], AGENTIC_SYSTEM_PROMPTS['mid'])
+        messages.append({"role": "system", "content": prompt_text})
+        log.info("_build_base_messages: injected agentic system prompt (tier=%s)", profile['tier'])
+
+    line_by_line = getattr(args, 'line_by_line', False)
+    if stdin_content is None and not line_by_line:
+        stdin_content = read_stdin_if_available()
+    if stdin_content:
+        messages.append({"role": "user", "content": stdin_content})
+
+    if args.file and (not line_by_line or not sys.stdin.isatty()):
+        log.info("_build_base_messages: including file %s", args.file)
+        messages.append({"role": "user",
+                         "content": f"<file_content> {_read_file_numbered(args.file)} </file_content>"})
+
+    if args.cursor:
+        m = re.match(r"^(?P<file_path>.*):(?P<line_num>\d+):(?P<col_num>\d+)$", args.cursor)
+        if m:
+            fp, ln, cn = m.group('file_path'), m.group('line_num'), m.group('col_num')
+            log.info("_build_base_messages: including cursor %s:%s:%s", fp, ln, cn)
+            messages.append({"role": "user",
+                             "content": f"<file_content> {_read_file_numbered(fp)} </file_content>"})
+            messages.append({"role": "user",
+                             "content": f"<cursor_location> line number: {ln}, column number: {cn} </cursor_location>"})
+
+    return messages
+
+
 ACTION_PROMPT = "prompt"
 def action_prompt(args, available_tools, external_mcps):
     if not args.prompt:
@@ -745,32 +781,7 @@ def action_prompt(args, available_tools, external_mcps):
     log.info("action_prompt: model=%s file=%s cursor=%s line_by_line=%s oneline=%s",
              args.model, args.file, args.cursor, args.line_by_line, args.oneline)
 
-    messages = []
-    if args.system_prompt:
-        messages.append({"role": "system", "content": args.system_prompt})
-    elif getattr(args, 'agentic', False):
-        profile = get_model_profile(args.model)
-        prompt_text = AGENTIC_SYSTEM_PROMPTS.get(profile['tier'], AGENTIC_SYSTEM_PROMPTS['mid'])
-        messages.append({"role": "system", "content": prompt_text})
-        log.info("action_prompt: injected agentic system prompt (tier=%s)", profile['tier'])
-
-    if not args.line_by_line:
-        stdin = read_stdin_if_available()
-        if stdin:
-            log.info("action_prompt: including stdin (%d bytes)", len(stdin))
-            messages.append({"role": "user", "content": stdin})
-
-    if args.file and ((not args.line_by_line) or not sys.stdin.isatty()):
-        log.info("action_prompt: including file %s", args.file)
-        messages.append({"role": "user", "content": f"<file_content> {_read_file_numbered(args.file)} </file_content>"})
-
-    if args.cursor:
-        m = re.match(r"^(?P<file_path>.*):(?P<line_num>\d+):(?P<col_num>\d+)$", args.cursor)
-        if m:
-            fp, ln, cn = m.group('file_path'), m.group('line_num'), m.group('col_num')
-            log.info("action_prompt: including cursor location %s:%s:%s", fp, ln, cn)
-            messages.append({"role": "user", "content": f"<file_content> {_read_file_numbered(fp)} </file_content>"})
-            messages.append({"role": "user", "content": f"<cursor_location> line number: {ln}, column number: {cn} </cursor_location>"})
+    messages = _build_base_messages(args)
 
     if args.line_by_line:
         return prompt_line_by_line(args, messages, available_tools, external_mcps)
@@ -864,33 +875,7 @@ def action_interactive(args, available_tools, external_mcps):
     # Pre-capture piped stdin BEFORE Screen (tty.setraw) takes over keyboard input
     stdin_content = read_stdin_if_available()
 
-    # Build base messages — mirrors action_prompt's setup
-    messages = []
-    if args.system_prompt:
-        messages.append({"role": "system", "content": args.system_prompt})
-    else:
-        profile = get_model_profile(args.model)
-        prompt_text = AGENTIC_SYSTEM_PROMPTS.get(profile['tier'], AGENTIC_SYSTEM_PROMPTS['mid'])
-        messages.append({"role": "system", "content": prompt_text})
-
-    if stdin_content:
-        log.info("action_interactive: including stdin (%d bytes)", len(stdin_content))
-        messages.append({"role": "user", "content": stdin_content})
-
-    if args.file:
-        log.info("action_interactive: including file %s", args.file)
-        messages.append({"role": "user",
-                         "content": f"<file_content>{_read_file_numbered(args.file)}</file_content>"})
-
-    if args.cursor:
-        m = re.match(r"^(?P<file_path>.*):(?P<line_num>\d+):(?P<col_num>\d+)$", args.location)
-        if m:
-            fp, ln, cn = m.group('file_path'), m.group('line_num'), m.group('col_num')
-            log.info("action_interactive: including location %s:%s:%s", fp, ln, cn)
-            messages.append({"role": "user",
-                             "content": f"<file_content>{_read_file_numbered(fp)}</file_content>"})
-            messages.append({"role": "user",
-                             "content": f"<cursor_location> line number: {ln}, column number: {cn} </cursor_location>"})
+    messages = _build_base_messages(args, stdin_content=stdin_content, always_agentic=True)
 
     screen = Screen()
     screen.set_cmd_completions(["compact", "tools", "clear"])
@@ -921,43 +906,17 @@ def action_interactive(args, available_tools, external_mcps):
         screen.write(f"{style}{line}{_RESET}{_LLM_STYLE}")
 
     try:
-        # If an initial prompt was given (-p or trailing words), run it first
-        if args.prompt:
-            messages.append({"role": "user", "content": args.prompt})
-            screen.write(f"{Screen._USER_STYLE}> {args.prompt}{Screen._RESET}\n")
-            screen.write("\n")
-            status_callback("thinking...")
-            screen.show_prompt_placeholder("> ")
-            screen.write(_LLM_STYLE)
-            screen.start_input_listener()
-            try:
-                response = call_llm(messages,
-                                    args,
-                                    available_tools, external_mcps,
-                                    stream_callback=stream_cb,
-                                    status_callback=status_callback,
-                                    tool_callback=tool_cb,
-                                    ctx_callback=ctx_cb,
-                                    interrupt_event=screen._interrupt_event)
-                if screen._interrupt_event.is_set():
-                    screen.write(f"\n{_RESET}{_META_STYLE}[interrupted]{_RESET}\n\n")
-                    status_callback("interrupted")
-                else:
-                    screen.write(f"\n{_RESET}\n")
-                    messages.append({"role": "assistant", "content": response})
-            except LLMError as e:
-                screen.write(f"\n{_RESET}{_ERROR_STYLE}[error] {e}{_RESET}\n\n")
-                status_callback("error")
-            except BaseException:
-                screen.write(_RESET)
-                raise
-            finally:
-                screen.stop_input_listener()
+        pending_input = args.prompt  # seed loop with initial prompt if provided
 
         # Main interactive loop
         _status("ready")
         while True:
-            user_input = screen.prompt("> ")
+            if pending_input is not None:
+                user_input = pending_input
+                pending_input = None
+                screen.write(f"{Screen._USER_STYLE}> {user_input}{Screen._RESET}\n\n")
+            else:
+                user_input = screen.prompt("> ")
             if not user_input.strip():
                 continue
             if user_input.startswith(":"):
