@@ -82,6 +82,8 @@
     '''
 ---
 
+verify_step:
+
 ---
     --name "verify"
     --dont-enrich-global-context
@@ -140,7 +142,7 @@ no-more-than 2
     '''
 ---
 
-goto verify
+goto verify_step
 
 frontier_seed:
 
