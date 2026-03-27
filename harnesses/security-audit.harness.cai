@@ -16,6 +16,7 @@
 
 enrichment:
 no-more-than 3
+compact-if-more-than 30
 
 ---
     --name "gather"

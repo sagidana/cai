@@ -159,7 +159,7 @@ label:               # jump target (word followed by colon)
 if x == ok: goto label       # conditional jump (exact string match)
 goto label                   # unconditional jump
 exit                         # terminate harness
-compact-if-needed            # compact global context if token usage is significant
+compact-if-more-than <percentage>  # compact global context if usage exceeds <percentage>% of window
 ```
 
 ### Context enrichment
@@ -173,18 +173,18 @@ compact-if-needed            # compact global context if token usage is signific
   runs. Use for quality-gate blocks (verify, classify) whose deliberation is
   not useful to subsequent blocks.
 
-### `compact-if-needed`
+### `compact-if-more-than <percentage>`
 
 Placed anywhere in the control flow (typically before a block that will add
 a large new exchange, or at the top of a retry loop), this command checks
-whether the accumulated `global_messages` are consuming a significant portion
-of the model's context window. If they are (>30% estimated), it summarises
+whether the accumulated `global_messages` are consuming more than
+`<percentage>%` of the model's context window. If they are, it summarises
 the middle turns into a single `[memory]` entry, preserving the first exchange
 and the last four messages verbatim. If not, it is a no-op.
 
 ```
 enrichment:
-compact-if-needed   # trim context before re-running enrichment
+compact-if-more-than 30   # trim context before re-running enrichment
 ---
     --name "enrichment"
     ...

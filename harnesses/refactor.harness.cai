@@ -17,6 +17,7 @@
 
 enrichment:
 no-more-than 3
+compact-if-more-than 30
 
 ---
     --name "gather"
@@ -89,6 +90,7 @@ exit
 
 plan:
 no-more-than 3
+compact-if-more-than 30
 
 ---
     --name "plan"
@@ -165,6 +167,7 @@ exit
 
 execute:
 no-more-than 3
+compact-if-more-than 30
 
 ---
     --name "execute"

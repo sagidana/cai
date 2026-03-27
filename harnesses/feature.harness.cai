@@ -17,6 +17,7 @@
 
 enrichment:
 no-more-than 3
+compact-if-more-than 30
 
 ---
     --name "gather"
@@ -92,6 +93,7 @@ exit
 
 design:
 no-more-than 3
+compact-if-more-than 30
 
 ---
     --name "design"

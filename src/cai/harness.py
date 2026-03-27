@@ -28,7 +28,8 @@ harness.cai format overview:
 
     if x == ok: goto label
     goto label
-    no-more-than <number>   # exit if this point has been passed more than <number> times
+    no-more-than <number>              # exit if this point has been passed more than <number> times
+    compact-if-more-than <percentage>  # compact global context if usage exceeds <percentage>% of window
     exit
 """
 
@@ -89,7 +90,7 @@ class ExitInstruction:
 
 @dataclass
 class CompactInstruction:
-    pass
+    threshold: float   # compact when global context exceeds this % of context window (0–100)
 
 
 @dataclass
@@ -236,9 +237,10 @@ def parse_harness_file(path: str):
                 instructions.append(ExitInstruction())
                 continue
 
-            # compact-if-needed
-            if stripped == 'compact-if-needed':
-                instructions.append(CompactInstruction())
+            # compact-if-more-than <percentage>
+            m = re.match(r"^compact-if-more-than\s+(\d+(?:\.\d+)?)$", stripped)
+            if m:
+                instructions.append(CompactInstruction(threshold=float(m.group(1))))
                 continue
 
             # no-more-than <number>
@@ -414,18 +416,14 @@ def run_block(block, global_messages, user_prompt, base_args, available_tools):
     return result
 
 
-def _compact_global_if_needed(global_messages, base_args):
+def _compact_global_if_needed(global_messages, base_args, threshold_pct):
     """
-    Compact global_messages if the estimated token usage is significant.
+    Compact global_messages if estimated token usage exceeds threshold_pct% of the context window.
 
-    Uses character count as a token proxy (≈4 chars/token) compared against
-    the model's context window. Compacts when estimated usage exceeds 30% of
-    context — conservative enough to act before a block tips the model over
-    the limit, but high enough not to compact unnecessarily early.
-
-    Delegates to cli._compact_messages which summarises the middle turns into
-    a single [memory] system message, preserving the first exchange and the
-    last four messages verbatim.
+    Uses character count as a token proxy (≈4 chars/token). Delegates to
+    cli._compact_messages which summarises the middle turns into a single
+    [memory] system message, preserving the first exchange and the last four
+    messages verbatim.
     """
     from cai.cli import _compact_messages, get_model_profile
 
@@ -437,23 +435,23 @@ def _compact_global_if_needed(global_messages, base_args):
 
     profile = get_model_profile(base_args.model)
     context_limit = profile.get('context', 16000)
-    threshold = 0.30  # compact when global context alone is >30% of the window
+    threshold = threshold_pct / 100.0
 
     if estimated_tokens < context_limit * threshold:
-        msg = (f"[compact-if-needed] skipped "
+        msg = (f"[compact-if-more-than {threshold_pct}%] skipped "
                f"(~{estimated_tokens} tokens, {estimated_tokens/context_limit:.0%} of {context_limit})")
         sys.stderr.write(msg + '\n')
         sys.stderr.flush()
-        log.info("compact_global: skipped estimated_tokens=%d context_limit=%d ratio=%.2f",
-                 estimated_tokens, context_limit, estimated_tokens / context_limit)
+        log.info("compact_global: skipped estimated_tokens=%d context_limit=%d ratio=%.2f threshold=%.0f%%",
+                 estimated_tokens, context_limit, estimated_tokens / context_limit, threshold_pct)
         return
 
-    msg = (f"[compact-if-needed] compacting "
+    msg = (f"[compact-if-more-than {threshold_pct}%] compacting "
            f"(~{estimated_tokens} tokens, {estimated_tokens/context_limit:.0%} of {context_limit})")
     sys.stderr.write(msg + '\n')
     sys.stderr.flush()
-    log.info("compact_global: compacting estimated_tokens=%d context_limit=%d ratio=%.2f messages=%d",
-             estimated_tokens, context_limit, estimated_tokens / context_limit, len(global_messages))
+    log.info("compact_global: compacting estimated_tokens=%d context_limit=%d ratio=%.2f threshold=%.0f%% messages=%d",
+             estimated_tokens, context_limit, estimated_tokens / context_limit, threshold_pct, len(global_messages))
     _compact_messages(global_messages, base_args.model)
     log.info("compact_global: done messages_after=%d", len(global_messages))
 
@@ -539,8 +537,8 @@ def execute_harness(instructions, label_map, user_prompt, base_args, available_t
                 break
 
             elif isinstance(instr, CompactInstruction):
-                log.info("execute_harness: pc=%d compact-if-needed", pc)
-                _compact_global_if_needed(global_messages, base_args)
+                log.info("execute_harness: pc=%d compact-if-more-than %.0f%%", pc, instr.threshold)
+                _compact_global_if_needed(global_messages, base_args, instr.threshold)
                 pc += 1
 
             elif isinstance(instr, NoMoreThanInstruction):
