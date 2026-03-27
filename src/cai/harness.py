@@ -286,7 +286,7 @@ def _build_block_args(block, base_args):
     return block_args, block_external_mcps
 
 
-def run_block(block, global_messages, user_prompt, base_args, available_tools, verbose=False):
+def run_block(block, global_messages, user_prompt, base_args, available_tools):
     """
     Execute a single harness block.
 
@@ -322,23 +322,44 @@ def run_block(block, global_messages, user_prompt, base_args, available_tools, v
 
     block_args, block_external_mcps = _build_block_args(block, base_args)
 
-    if verbose:
-        print(f"[harness] → '{block.name}'", file=sys.stderr, flush=True)
+    prefix = f"[{block.name}]"
 
+    def _tool_cb(chunk, error=False):
+        sys.stderr.write(chunk)
+        sys.stderr.flush()
+
+    def _status_cb(text):
+        if text:
+            sys.stderr.write(f"{prefix}[{text}]\n")
+            sys.stderr.flush()
+
+    def _ctx_cb(ctx_str):
+        sys.stderr.write(f"{prefix}[{ctx_str}]\n")
+        sys.stderr.flush()
+
+    # Use streaming for non-strict-format blocks so output appears live.
+    # Strict-format blocks must use the non-streaming path so enforcement works.
+    use_streaming = not block.strict_format
+    stream_cb = (lambda chunk: (sys.stdout.write(chunk), sys.stdout.flush())) if use_streaming else None
+
+    _status_cb(f"running")
     try:
         content = call_llm(
             local_messages,
             block_args,
             available_tools,
             block_external_mcps,
+            stream_callback=stream_cb,
+            tool_callback=_tool_cb,
+            status_callback=_status_cb,
+            ctx_callback=_ctx_cb,
         )
+        if use_streaming:
+            print()  # newline after streamed output
     except MaxTurnsReached as e:
         content = ""
-        if verbose:
-            print(f"[harness] '{block.name}' hit max turns ({e.max_turns})", file=sys.stderr, flush=True)
-
-    if verbose:
-        print(f"[harness] ← '{block.name}': {content.strip()!r}", file=sys.stderr, flush=True)
+        sys.stderr.write(f"{prefix}[!] reached max turns ({e.max_turns})\n")
+        sys.stderr.flush()
 
     # Enrich: extend global context with ALL messages added during this block
     # (user prompt, tool calls, tool results, assistant turns, final response).
@@ -348,7 +369,7 @@ def run_block(block, global_messages, user_prompt, base_args, available_tools, v
     return content.strip()
 
 
-def execute_harness(instructions, label_map, user_prompt, base_args, available_tools, verbose=True):
+def execute_harness(instructions, label_map, user_prompt, base_args, available_tools):
     """
     Execute a parsed harness program.
 
@@ -357,7 +378,6 @@ def execute_harness(instructions, label_map, user_prompt, base_args, available_t
     :param user_prompt:    the user's task string (from cai -- <prompt>)
     :param base_args:      argparse Namespace from cli.py main()
     :param available_tools: internal MCP tool definitions (module-level global from cli.py)
-    :param verbose:        print block progress to stderr
     :returns:              the last executed block's output, or ""
     """
     global_messages = []
@@ -374,7 +394,6 @@ def execute_harness(instructions, label_map, user_prompt, base_args, available_t
                 user_prompt,
                 base_args,
                 available_tools,
-                verbose=verbose,
             )
             block_results[instr.block.name] = output
             pc += 1
