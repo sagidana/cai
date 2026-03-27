@@ -1,0 +1,247 @@
+# refactor.harness.cai
+#
+# A safe, structured refactoring harness with five stages:
+#   1. Gather   — read everything the refactor touches, including callsites
+#   2. Verify   — confirm full context before planning
+#   3. Plan     — produce a step-by-step refactor plan
+#   4. Validate — check the plan is safe and correct before executing
+#   5. Execute  — carry out the plan precisely
+#   6. Sanity   — self-review for regressions; retry execute if issues found
+#
+# Refactoring is high risk because it changes structure without changing
+# behaviour — but only if done correctly. The plan→validate loop and
+# execute→sanity loop provide two layers of safety.
+#
+# Usage:
+#   cai --harness harnesses/refactor.harness.cai -- "extract the retry logic in api.py into a standalone utility"
+
+enrichment:
+
+---
+    --name "gather"
+    --prepend-user-prompt
+    --enrich-global-context
+    --tools read, list_files
+    --max-turns 100
+    --force-tools
+    --system-prompt "You are an expert refactoring engineer in the context-gathering phase. Refactoring without full context causes regressions. Your only job now is to read — every file the refactor touches, every callsite, every test. Do not begin planning yet."
+    '''
+    Gather the complete context needed to refactor safely.
+
+    Refactoring is only safe when you have a complete picture of:
+    (a) what the code does today, and
+    (b) what all the code that depends on it expects it to do.
+
+    Follow this process:
+    1. List the directory layout if you are not familiar with the project.
+    2. Read the file(s) to be refactored in full.
+    3. Identify everything the refactored code depends on: imports, base
+       classes, utility functions, constants, configuration. Read those too.
+    4. Find and read all callsites — every place in the codebase that calls
+       the code being refactored. Use list_files to search for usages if needed.
+       This is critical: refactoring that breaks a callsite you haven't seen
+       introduces a silent regression.
+    5. Read all test files that cover the code being refactored. Tests define
+       the contract that must be preserved. If a refactor breaks a test, it
+       broke the behaviour.
+    6. Read related code that solves similar problems — you may be able to
+       reuse existing utilities rather than creating new ones.
+    7. Note every public API, interface, or type the refactor may affect.
+       Anything exported or used across module boundaries requires special care.
+
+    Do not begin planning. Only read and understand everything the refactor touches.
+    '''
+---
+
+---
+    --name "verify"
+    --dont-enrich-global-context
+    --strict-format "regex:^(ok|retry)$"
+    --max-turns 5
+    --system-prompt "You are a strict quality gate. Answer only 'ok' or 'retry'. No punctuation, no explanation."
+    '''
+    Is your context complete enough to plan a safe refactor?
+
+    Answer 'ok' only if ALL of the following are true:
+    - You have read every file that will be changed by the refactor.
+    - You have found and read all known callsites of the code being refactored.
+    - You have read all tests that cover the affected code.
+    - You understand the public API surface that must be preserved.
+    - You can describe exactly what the code does today, before any change.
+    - You are aware of any existing utilities you could reuse.
+
+    Answer 'retry' if ANY of the following are true:
+    - You have not read all files involved in the refactor.
+    - You have not found all callsites.
+    - You have not read the relevant tests.
+    - You are unsure what the current code does in some scenarios.
+    - You have seen referenced modules or types you have not inspected.
+
+    Respond with exactly one word: ok or retry
+    '''
+---
+
+if verify == ok: goto plan
+if verify == retry: goto enrichment
+
+exit
+
+plan:
+
+---
+    --name "plan"
+    --enrich-global-context
+    --max-turns 20
+    --system-prompt "You are a senior engineer designing a refactor plan. A good refactor plan is a sequence of small, safe, independently-verifiable steps — not one big rewrite. Think carefully about order: each step should leave the code in a working state."
+    '''
+    Write a detailed, step-by-step plan for the refactor.
+
+    The plan must address:
+
+    1. GOAL: State clearly what the refactor achieves and what it does NOT
+       change (i.e., what behaviour must be preserved).
+
+    2. STEPS: List every step in the correct order. For each step:
+       - Which file(s) are changed.
+       - Exactly what change is made (extract, move, rename, inline, etc.).
+       - Whether any callsites need to be updated in this step.
+       - Whether any tests need to be updated or added in this step.
+       - The invariant preserved after this step completes (i.e., the code
+         should still work after each step, not just at the end).
+
+    3. PUBLIC API CHANGES: Explicitly state which public APIs, function
+       signatures, or module exports change — and which are preserved.
+       If anything is renamed, list the old name and new name.
+
+    4. CALLSITE UPDATES: List every file that calls the refactored code
+       and describe what must change in each.
+
+    5. RISK AREAS: Identify the highest-risk parts of the refactor —
+       places where a mistake would cause a regression — and describe
+       how the plan mitigates that risk.
+
+    Write the plan as a numbered, structured list. Be specific.
+    '''
+---
+
+---
+    --name "validate-plan"
+    --dont-enrich-global-context
+    --strict-format "regex:^(ok|revise)$"
+    --max-turns 5
+    --system-prompt "You are a principal engineer reviewing a refactor plan before execution. You are skeptical. Your job is to find flaws in the plan before any code is changed. Answer only 'ok' or 'revise'."
+    '''
+    Review the refactor plan critically.
+
+    Answer 'ok' only if ALL of the following are true:
+    - The plan preserves all existing behaviour and public APIs unless
+      explicitly changing them is the goal.
+    - Every callsite that needs updating is listed in the plan.
+    - The plan is ordered safely: each step leaves the codebase in a
+      working state (no intermediate broken states).
+    - Every file that will change is named explicitly in the plan.
+    - The plan accounts for all existing tests and notes which need updating.
+    - The steps are specific enough to execute without ambiguity.
+    - There are no missing steps that would leave the refactor incomplete.
+
+    Answer 'revise' if ANY of the following are true:
+    - The plan would break a callsite that is not addressed.
+    - A step would leave the code in a broken intermediate state.
+    - Any files to be changed are not listed.
+    - The plan is vague about what exactly changes in a step.
+    - A public API change is not acknowledged or managed.
+    - Important tests are not accounted for.
+
+    Respond with exactly one word: ok or revise
+    '''
+---
+
+if validate-plan == ok: goto execute
+if validate-plan == revise: goto plan
+
+exit
+
+execute:
+
+---
+    --name "execute"
+    --enrich-global-context
+    --tools read, list_files
+    --max-turns 100
+    --system-prompt "You are an expert engineer executing an approved refactor plan. Follow the plan precisely. Do not improvise. Do not add unrequested changes. If you discover something unexpected, handle the minimal case that preserves the plan's goals — do not expand the scope."
+    '''
+    Execute the refactor plan exactly as written.
+
+    Follow these rules strictly:
+    - Execute every step in the order given. Do not skip steps.
+    - Make only the changes specified in the plan. Do not refactor adjacent code,
+      clean up unrelated areas, or add features — even obvious ones.
+    - When updating callsites, update every callsite listed in the plan.
+    - When updating tests, make only the changes needed to reflect the refactor.
+      Do not rewrite tests beyond what the plan requires.
+    - If you discover a callsite not listed in the plan, update it minimally
+      to preserve correct behaviour, and note it.
+    - If you need to re-read a file to implement a step correctly, do so.
+    - Show the complete updated code for every file you change.
+
+    After each step, confirm that the invariant for that step holds before
+    moving to the next one.
+    '''
+---
+
+---
+    --name "sanity"
+    --dont-enrich-global-context
+    --strict-format "regex:^(clean|issues)$"
+    --max-turns 5
+    --system-prompt "You are a senior engineer performing a final regression check after a refactor. Answer only 'clean' or 'issues'."
+    '''
+    Review the completed refactor for regressions.
+
+    Answer 'clean' only if ALL of the following are true:
+    - Every callsite of the refactored code was updated correctly.
+    - All public APIs that must be preserved are still present and correct.
+    - All tests that were passing before should still pass after this change.
+    - Tests that needed updating were updated correctly and still test the
+      same behaviour (not a weaker assertion).
+    - No code was accidentally duplicated or left in an inconsistent state.
+    - The refactored code is complete — no partially-extracted functions,
+      no leftover dead code that should have been removed.
+
+    Answer 'issues' if ANY of the following are true:
+    - A callsite was missed or incorrectly updated.
+    - A public API was changed when it should have been preserved.
+    - A test was weakened or removed rather than updated correctly.
+    - There is dead code left behind that should have been cleaned up.
+    - A step from the plan was not fully executed.
+
+    Respond with exactly one word: clean or issues
+    '''
+---
+
+if sanity == clean: goto done
+if sanity == issues: goto execute
+
+exit
+
+done:
+
+---
+    --name "done"
+    --enrich-global-context
+    --max-turns 10
+    --system-prompt "You are a clear technical communicator. Write a concise, accurate refactor summary."
+    '''
+    The refactor is complete and has passed the sanity check.
+
+    Write a brief summary covering:
+    1. What was refactored and what the goal was.
+    2. Which files changed and what kind of changes were made in each.
+    3. Any callsites that were updated.
+    4. Any tests that were updated and why.
+    5. Any deviations from the original plan (unexpected callsites, etc.)
+       and how they were handled.
+
+    Keep it factual and concise. No padding.
+    '''
+---

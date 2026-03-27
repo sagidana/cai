@@ -1,0 +1,424 @@
+# security-audit.harness.cai
+#
+# A systematic security audit harness with five stages:
+#   1. Gather       — read all source code, focusing on attack-surface areas
+#   2. Threat-model — map the attack surface: entry points, trust boundaries,
+#                     data flows, and authentication/authorisation checks
+#   3. Audit        — examine every identified risk area in detail
+#   4. Severity     — classify overall severity (critical/high/medium/low/clean)
+#   5. Report       — produce a structured, actionable security report
+#
+# The threat-model stage as a separate enriched step ensures the audit phase
+# has a structured framework to work from, rather than free-form scanning.
+#
+# Usage:
+#   cai --harness harnesses/security-audit.harness.cai -- "audit the authentication and payment modules"
+
+enrichment:
+
+---
+    --name "gather"
+    --prepend-user-prompt
+    --enrich-global-context
+    --tools read, list_files
+    --max-turns 100
+    --force-tools
+    --system-prompt "You are an expert security engineer performing a code audit. In this phase your only job is to gather source code. Read every file that handles user input, authentication, authorisation, data persistence, external API calls, or sensitive data. Security bugs hide in dependencies and edge cases — read thoroughly."
+    '''
+    Gather all source code needed for a thorough security audit.
+
+    Focus your reading on the areas most likely to contain vulnerabilities:
+
+    ENTRY POINTS — read every place where untrusted data enters the system:
+    - HTTP request handlers (routes, controllers, middleware).
+    - CLI argument parsers.
+    - File upload handlers.
+    - Message queue consumers.
+    - Webhook receivers.
+    - Any other external-facing interface.
+
+    AUTHENTICATION & AUTHORISATION — read all code that:
+    - Verifies identities (login, token validation, session handling).
+    - Enforces permissions (access control, role checks, ownership checks).
+    - Manages credentials (password hashing, API key storage, token generation).
+
+    DATA HANDLING — read all code that:
+    - Constructs database queries or executes raw SQL.
+    - Calls external APIs with user-supplied parameters.
+    - Reads or writes to the filesystem using user-supplied paths.
+    - Serialises or deserialises data (JSON, XML, pickle, etc.).
+    - Renders templates or constructs HTML/JS output.
+    - Runs shell commands.
+
+    SENSITIVE DATA — read all code that handles:
+    - Passwords, API keys, tokens, certificates.
+    - Personal or financial data.
+    - Logging of any of the above.
+
+    CONFIGURATION — read:
+    - Configuration files and how secrets are loaded.
+    - Any CORS, CSP, or security-header configuration.
+    - Dependency manifests (requirements.txt, package.json, etc.).
+
+    After each file, ask: "Did I see anything that touches user data, external
+    systems, or privileged operations that I haven't read yet?" If yes, read it.
+
+    Do not audit yet. Only gather.
+    '''
+---
+
+---
+    --name "verify"
+    --dont-enrich-global-context
+    --strict-format "regex:^(ok|retry)$"
+    --max-turns 5
+    --system-prompt "You are a strict quality gate. Answer only 'ok' or 'retry'. No punctuation, no explanation."
+    '''
+    Have you gathered enough code to perform a thorough security audit?
+
+    Answer 'ok' only if ALL of the following are true:
+    - You have read all entry points where untrusted data enters the system.
+    - You have read all authentication and authorisation logic.
+    - You have read all code that constructs queries, runs commands, or
+      accesses the filesystem with user-supplied data.
+    - You have read all code that handles sensitive data.
+    - You have read relevant configuration and dependency files.
+
+    Answer 'retry' if ANY of the following are true:
+    - There are entry points, handlers, or middleware you have not read.
+    - You have not read the authentication or authorisation logic.
+    - You have seen references to security-relevant code you have not inspected.
+    - There are database query builders, template renderers, or shell executors
+      you have not read.
+
+    Respond with exactly one word: ok or retry
+    '''
+---
+
+if verify == ok: goto threat-model
+if verify == retry: goto enrichment
+
+exit
+
+threat-model:
+
+---
+    --name "threat-model"
+    --enrich-global-context
+    --max-turns 20
+    --system-prompt "You are a senior application security engineer building a threat model. Think like an attacker. Map every attack surface systematically before diving into individual vulnerabilities."
+    '''
+    Before auditing for specific vulnerabilities, build a structured threat
+    model of the code you have read.
+
+    Produce the following:
+
+    ATTACK SURFACE MAP
+    List every entry point where an attacker can supply input:
+    - Name the entry point (e.g., POST /api/login, file upload handler).
+    - Describe what data it accepts.
+    - Identify who can access it (unauthenticated public, authenticated user,
+      admin only, internal only).
+
+    TRUST BOUNDARIES
+    Identify where the system crosses trust boundaries:
+    - Between the internet and the application.
+    - Between the application and the database.
+    - Between the application and external APIs.
+    - Between different user privilege levels.
+    - Between the application and the filesystem or OS.
+
+    DATA FLOWS
+    Trace how untrusted data moves through the system:
+    - Where does user input enter?
+    - Where is it validated or sanitised (if at all)?
+    - Where does it get used in a query, command, template, or API call?
+
+    AUTHENTICATION & AUTHORISATION MODEL
+    - How does the system verify identity?
+    - How does it enforce permissions?
+    - Are there privilege escalation paths?
+
+    HIGH-RISK AREAS
+    Based on the above, list the five to ten code areas that pose the
+    greatest security risk and deserve the deepest scrutiny in the audit.
+
+    This threat model will guide the audit. Be systematic and specific.
+    '''
+---
+
+audit:
+
+---
+    --name "audit"
+    --enrich-global-context
+    --tools read, list_files
+    --max-turns 100
+    --system-prompt "You are an expert application security engineer performing a detailed vulnerability audit. You think like an attacker. You are methodical. You cite specific code locations. You do not report hypothetical issues — every finding is grounded in actual code you have read."
+    '''
+    Perform a detailed security audit using the threat model as your guide.
+
+    Examine every high-risk area identified in the threat model. For each area,
+    check for the following vulnerability classes:
+
+    INJECTION
+    - SQL injection: are queries constructed with string formatting or
+      concatenation? Is parameterised query use consistent?
+    - Command injection: are shell commands constructed with user data?
+    - Path traversal: are file paths constructed from user input without
+      normalisation and boundary checks?
+    - Template injection: is user data rendered into templates unsanitised?
+    - LDAP, XML, or other injection relevant to the stack.
+
+    AUTHENTICATION FLAWS
+    - Are passwords hashed with a strong, slow algorithm (bcrypt, argon2)?
+    - Are password resets safe (no token reuse, short expiry, no enumeration)?
+    - Are session tokens unpredictable and invalidated on logout?
+    - Is multi-factor authentication bypassed anywhere?
+    - Are there timing attacks in token or password comparison?
+
+    AUTHORISATION FLAWS
+    - Are authorisation checks performed on every protected endpoint?
+    - Are there insecure direct object references (IDOR)? Can a user access
+      another user's resources by changing an ID?
+    - Is authorisation enforced server-side, not just client-side?
+    - Are there privilege escalation paths (regular user gaining admin access)?
+
+    SENSITIVE DATA EXPOSURE
+    - Are credentials, tokens, or PII logged?
+    - Are secrets stored in code, config files, or environment variables
+      that may be committed or exposed?
+    - Is sensitive data transmitted without TLS?
+    - Are sensitive fields included in API responses unnecessarily?
+
+    CRYPTOGRAPHIC ISSUES
+    - Is weak cryptography used (MD5, SHA1 for passwords, ECB mode, etc.)?
+    - Are random values generated with a cryptographically secure source?
+    - Are keys and secrets of sufficient length and entropy?
+
+    THIRD-PARTY DEPENDENCIES
+    - Are there known vulnerable dependency versions?
+    - Are dependencies pinned?
+
+    INPUT VALIDATION
+    - Is all user input validated for type, length, format, and range?
+    - Are file uploads restricted by type and size?
+    - Are numeric inputs validated for overflow or underflow?
+
+    For every finding, document:
+    - File name and approximate line or function.
+    - The specific vulnerability class.
+    - The exact code pattern that causes it.
+    - The attack scenario: how an attacker could exploit it.
+    - The potential impact.
+
+    Be thorough. Miss nothing. If you need to re-read a file to confirm a
+    finding, do so.
+    '''
+---
+
+---
+    --name "severity"
+    --enrich-global-context
+    --strict-format "regex:^(critical|high|medium|low|clean)$"
+    --max-turns 5
+    --system-prompt "You are a senior security engineer assigning an overall severity rating. Answer with exactly one word. Base your rating on the worst finding — severity is determined by the most serious issue present."
+    '''
+    Based on your audit findings, classify the overall severity of the security
+    posture of the code reviewed:
+
+    - critical : there is at least one vulnerability that allows remote code
+                 execution, complete authentication bypass, direct database
+                 access, or full data breach with no authentication required.
+    - high     : there is at least one vulnerability that allows significant
+                 unauthorised access, sensitive data exposure, or privilege
+                 escalation that requires only low-privilege access to exploit.
+    - medium   : there are vulnerabilities that require specific conditions or
+                 authenticated access to exploit, or issues that expose limited
+                 data or functionality.
+    - low      : only minor issues: information disclosure, weak defaults,
+                 missing security headers, or theoretical vulnerabilities with
+                 no realistic exploit path.
+    - clean    : no meaningful security vulnerabilities were found. The code
+                 follows secure coding practices.
+
+    Respond with exactly one word: critical, high, medium, low, or clean
+    '''
+---
+
+if severity == critical: goto critical-report
+if severity == high: goto high-report
+if severity == medium: goto medium-report
+if severity == low: goto low-report
+if severity == clean: goto clean-report
+
+exit
+
+critical-report:
+
+---
+    --name "report"
+    --enrich-global-context
+    --max-turns 20
+    --system-prompt "You are a senior security engineer writing a critical security advisory. Be precise, direct, and urgent. Do not soften findings. Provide concrete reproduction steps and remediation guidance."
+    '''
+    Write a critical security audit report.
+
+    ## SECURITY AUDIT REPORT — CRITICAL
+
+    ### Executive Summary
+    One paragraph: what is the most severe finding, what is the impact,
+    and what is the immediate recommended action.
+
+    ### Critical Findings
+    For each critical finding:
+    **[VULN-N] Vulnerability Name**
+    - Location: file and function/line
+    - Vulnerability: precise technical description
+    - Attack scenario: step-by-step how an attacker exploits this
+    - Impact: what an attacker can achieve
+    - Remediation: concrete code-level fix with example
+
+    ### High Findings
+    Same format as Critical Findings.
+
+    ### Medium and Low Findings
+    Brief list format: location, issue, recommended fix.
+
+    ### Positive Security Controls
+    Note any security measures that were implemented correctly.
+
+    ### Recommended Immediate Actions
+    Numbered list of the three to five most urgent actions to take.
+    '''
+---
+
+exit
+
+high-report:
+
+---
+    --name "report"
+    --enrich-global-context
+    --max-turns 20
+    --system-prompt "You are a senior security engineer writing a high-severity security report. Be precise and direct. Provide actionable remediation guidance."
+    '''
+    Write a high-severity security audit report.
+
+    ## SECURITY AUDIT REPORT — HIGH SEVERITY
+
+    ### Summary
+    Two to three sentences: overall security posture and highest-priority concern.
+
+    ### High Severity Findings
+    For each high finding:
+    **[VULN-N] Vulnerability Name**
+    - Location: file and function/line
+    - Vulnerability: precise technical description
+    - Attack scenario: how an attacker exploits this
+    - Impact: what an attacker achieves
+    - Remediation: concrete fix with example code where applicable
+
+    ### Medium Findings
+    Same format, briefer.
+
+    ### Low Findings
+    Brief list: location, issue, recommendation.
+
+    ### Security Strengths
+    Note what was done well.
+
+    ### Remediation Priority
+    Ordered list: fix these issues in this sequence.
+    '''
+---
+
+exit
+
+medium-report:
+
+---
+    --name "report"
+    --enrich-global-context
+    --max-turns 20
+    --system-prompt "You are a senior security engineer writing a medium-severity security report. Be constructive and specific. Provide clear remediation steps."
+    '''
+    Write a medium-severity security audit report.
+
+    ## SECURITY AUDIT REPORT — MEDIUM SEVERITY
+
+    ### Summary
+    The overall security posture: what is good, what needs improvement.
+
+    ### Findings
+    For each finding (ordered by severity):
+    **[VULN-N] Vulnerability Name** [MEDIUM/LOW]
+    - Location: file and function/line
+    - Issue: what the problem is
+    - Impact: what could happen if exploited
+    - Remediation: how to fix it
+
+    ### Security Strengths
+    What was done well. Be specific.
+
+    ### Recommended Improvements
+    Prioritised list of actions.
+    '''
+---
+
+exit
+
+low-report:
+
+---
+    --name "report"
+    --enrich-global-context
+    --max-turns 10
+    --system-prompt "You are a senior security engineer writing a low-severity security report. Be constructive. The code is mostly secure but has room for improvement."
+    '''
+    Write a low-severity security audit report.
+
+    ## SECURITY AUDIT REPORT — LOW SEVERITY
+
+    ### Summary
+    The code is generally secure. Describe the overall posture in two to three
+    sentences.
+
+    ### Minor Findings
+    Brief list of low-severity issues with recommended improvements.
+
+    ### Security Strengths
+    What the code does well from a security standpoint. Be specific.
+
+    ### Hardening Recommendations
+    Optional improvements that would strengthen the security posture further.
+    '''
+---
+
+exit
+
+clean-report:
+
+---
+    --name "report"
+    --enrich-global-context
+    --max-turns 10
+    --system-prompt "You are a senior security engineer writing a clean security audit sign-off. Be specific about what makes the code secure."
+    '''
+    Write a clean security audit sign-off.
+
+    ## SECURITY AUDIT REPORT — NO SIGNIFICANT FINDINGS
+
+    ### Summary
+    Two to three sentences: what was audited and the overall conclusion.
+
+    ### Areas Reviewed
+    List the specific areas that were examined.
+
+    ### Security Strengths
+    Be specific about what was done correctly. Generic praise is unhelpful.
+
+    ### Optional Hardening
+    Any minor improvements worth considering, even if no vulnerabilities exist.
+    '''
+---

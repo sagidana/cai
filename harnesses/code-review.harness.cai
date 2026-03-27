@@ -1,0 +1,258 @@
+# code-review.harness.cai
+#
+# A thorough code review harness with five stages:
+#   1. Gather     — read changed files and all context needed to review them
+#   2. Verify     — confirm enough context to review meaningfully
+#   3. Analyze    — deep multi-dimensional review (correctness, style, security, perf)
+#   4. Classify   — determine overall severity (blocking / non-blocking / clean)
+#   5. Report     — produce a structured, actionable review report
+#
+# The severity classification drives a branching report format: blocking issues
+# get a clearly flagged report; clean code gets a lighter sign-off.
+#
+# Usage:
+#   cai --harness harnesses/code-review.harness.cai -- "review the changes in src/auth/"
+
+enrichment:
+
+---
+    --name "gather"
+    --prepend-user-prompt
+    --enrich-global-context
+    --tools read, list_files
+    --max-turns 100
+    --force-tools
+    --system-prompt "You are an experienced code reviewer in the context-gathering phase. Before you can review code fairly and accurately, you must understand its full context: what it is supposed to do, what it depends on, how it fits into the larger system, and what the project's conventions are. Gather all of that now."
+    '''
+    Gather all context needed to perform a meaningful and accurate code review.
+
+    Follow this process:
+    1. List the working directory if you are not familiar with the project
+       structure. Understand what kind of project this is before reading code.
+    2. Read every file that is part of or directly related to what is being
+       reviewed. Read them in full — do not skim diffs; read complete files.
+    3. For each changed or reviewed file, also read:
+       - Its direct imports and dependencies.
+       - The base classes or interfaces it implements.
+       - Any configuration or constants it reads from.
+       - Related test files that describe expected behaviour.
+    4. Read enough of the rest of the codebase to understand the project's
+       conventions: naming patterns, error-handling style, logging approach,
+       how similar problems are solved elsewhere.
+    5. If the change touches an API boundary (public method, HTTP endpoint,
+       CLI interface), read all known callsites.
+    6. After each file, ask: "Is there anything I saw here that I need to
+       understand better before I can review this code fairly?" Read those too.
+
+    Do not write the review yet. Only gather context.
+    '''
+---
+
+---
+    --name "verify"
+    --dont-enrich-global-context
+    --strict-format "regex:^(ok|retry)$"
+    --max-turns 5
+    --system-prompt "You are a strict quality gate. Answer only 'ok' or 'retry'. No punctuation, no explanation."
+    '''
+    Do you have enough context to write a fair, thorough, and accurate review?
+
+    Answer 'ok' only if ALL of the following are true:
+    - You have read every file involved in the change being reviewed.
+    - You understand what the changed code is supposed to do.
+    - You have seen enough of the surrounding codebase to judge whether the
+      change fits project conventions and patterns.
+    - You have read the relevant tests (or confirmed there are none).
+    - You can identify correctness issues, security concerns, and style
+      inconsistencies without guessing about code you have not read.
+
+    Answer 'retry' if ANY of the following are true:
+    - You have not read all files being reviewed.
+    - You don't know what the code is supposed to do.
+    - You lack enough context to judge whether something is a project convention
+      or an anomaly.
+    - You have seen referenced modules, types, or constants you have not read.
+
+    Respond with exactly one word: ok or retry
+    '''
+---
+
+if verify == ok: goto analyze
+if verify == retry: goto enrichment
+
+exit
+
+analyze:
+
+---
+    --name "analyze"
+    --enrich-global-context
+    --max-turns 20
+    --system-prompt "You are a senior engineer performing a thorough code review. You are thorough, fair, and constructive. You distinguish clearly between blocking issues (must fix before merge) and non-blocking suggestions (nice to have). You are particularly attentive to correctness, security, and maintainability."
+    '''
+    Perform a deep analysis of the code under review.
+
+    Examine every dimension listed below. For each finding, note whether it
+    is blocking (must be addressed before merge) or non-blocking (suggestion).
+
+    CORRECTNESS
+    - Are there logic errors, wrong conditions, or off-by-one mistakes?
+    - Are error cases handled correctly? Are exceptions caught at the right level?
+    - Are there race conditions or ordering assumptions that could fail?
+    - Does the code handle empty inputs, null values, and boundary conditions?
+    - Does the code produce the correct output for all expected inputs?
+
+    SECURITY
+    - Is user-supplied input validated and sanitised before use?
+    - Are there injection risks (SQL, shell, path traversal, XSS)?
+    - Are secrets, credentials, or sensitive data handled safely?
+    - Are authentication and authorisation checks present and correct?
+    - Are there information-disclosure risks in error messages or logs?
+
+    PERFORMANCE
+    - Are there obvious algorithmic inefficiencies (O(n²) where O(n) suffices)?
+    - Are expensive operations (network, disk, DB) called in tight loops?
+    - Is there unnecessary work done on every call that could be cached?
+
+    MAINTAINABILITY
+    - Is the code readable? Would a new team member understand it?
+    - Are variable and function names clear and consistent with the codebase?
+    - Is there duplicated logic that should be extracted or reused?
+    - Are complex sections explained with comments where the code alone is unclear?
+
+    TESTING
+    - Is the new code covered by tests?
+    - Do the tests cover the important edge cases and failure modes?
+    - Are tests structured consistently with the rest of the test suite?
+
+    CONVENTIONS
+    - Does the code follow the naming, formatting, and structural patterns of
+      the project?
+    - Does it use the same error-handling idioms as the rest of the codebase?
+    - Does it import and use existing utilities rather than reimplementing them?
+
+    Produce your full analysis now. Be specific: cite exact lines or patterns.
+    Do not write the final report yet — just the analysis.
+    '''
+---
+
+---
+    --name "classify"
+    --enrich-global-context
+    --strict-format "regex:^(blocking|non-blocking|clean)$"
+    --max-turns 5
+    --system-prompt "You are a senior engineer making a merge decision. Answer with exactly one word."
+    '''
+    Based on your analysis, classify the overall verdict for this review:
+
+    - blocking     : there is at least one issue that must be fixed before this
+                     can be merged (correctness bug, security flaw, data loss
+                     risk, API breakage, or critical missing test coverage).
+    - non-blocking : no blocking issues, but there are suggestions or style
+                     improvements worth addressing.
+    - clean        : the code is correct, well-tested, and consistent with
+                     project conventions. Ready to merge as-is.
+
+    Respond with exactly one word: blocking, non-blocking, or clean
+    '''
+---
+
+if classify == blocking: goto blocking-report
+if classify == non-blocking: goto suggestions-report
+if classify == clean: goto clean-report
+
+exit
+
+blocking-report:
+
+---
+    --name "report"
+    --enrich-global-context
+    --max-turns 20
+    --system-prompt "You are a senior engineer writing a code review report. Be clear, direct, and constructive. Structure the report so blocking issues are impossible to miss."
+    '''
+    Write the final code review report. This review has BLOCKING issues.
+
+    Structure the report as follows:
+
+    ## Verdict: CHANGES REQUIRED
+
+    ### Blocking Issues
+    List each blocking issue with:
+    - The file and approximate location.
+    - A clear description of the problem.
+    - Why it is blocking (what could go wrong if not fixed).
+    - A concrete suggestion for how to fix it.
+
+    ### Non-blocking Suggestions
+    List any non-blocking suggestions, improvements, or style notes.
+    Keep these brief — they are secondary to the blocking issues.
+
+    ### Positive Notes
+    Briefly note anything done well. A good review acknowledges strengths
+    alongside problems.
+
+    Be specific and actionable. Do not pad. Do not soften blocking issues.
+    '''
+---
+
+exit
+
+suggestions-report:
+
+---
+    --name "report"
+    --enrich-global-context
+    --max-turns 20
+    --system-prompt "You are a senior engineer writing a code review report. Be constructive, specific, and encouraging. The code is mergeable but can be improved."
+    '''
+    Write the final code review report. This review has NON-BLOCKING suggestions.
+
+    Structure the report as follows:
+
+    ## Verdict: APPROVED WITH SUGGESTIONS
+
+    ### Suggestions
+    List each suggestion with:
+    - The file and approximate location.
+    - What the issue or improvement opportunity is.
+    - Why it matters (even if it is not blocking).
+    - A concrete recommendation.
+
+    ### Positive Notes
+    Note what was done well. Be specific — generic praise is unhelpful.
+
+    ### Summary
+    One or two sentences: what is the overall quality of this change?
+
+    Be specific and actionable. Suggestions should be easy to act on.
+    '''
+---
+
+exit
+
+clean-report:
+
+---
+    --name "report"
+    --enrich-global-context
+    --max-turns 10
+    --system-prompt "You are a senior engineer writing a clean code review sign-off. Be concise and specific about what makes the code good."
+    '''
+    Write the final code review report. This code is CLEAN and ready to merge.
+
+    Structure the report as follows:
+
+    ## Verdict: APPROVED
+
+    ### Summary
+    Two to four sentences describing what the change does and why it is correct.
+
+    ### Highlights
+    Briefly note two or three specific things that were done particularly well.
+    Generic praise ("good code!") is unhelpful — be specific.
+
+    Keep it short. The author did good work; acknowledge it specifically and
+    let them merge.
+    '''
+---
