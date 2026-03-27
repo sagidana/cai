@@ -32,11 +32,14 @@ harness.cai format overview:
 """
 
 import copy
+import logging
 import os
 import re
 import sys
 from dataclasses import dataclass, field
 from typing import Optional
+
+log = logging.getLogger("cai.harness")
 
 
 # ─── Data model ──────────────────────────────────────────────────────────────
@@ -261,6 +264,9 @@ def parse_harness_file(path: str):
     if state != _NORMAL:
         raise SyntaxError("harness: unexpected end of file (unclosed block)")
 
+    block_count = sum(1 for i in instructions if isinstance(i, BlockInstruction))
+    log.info("parse_harness_file: path=%s instructions=%d blocks=%d labels=%s",
+             path, len(instructions), block_count, list(label_map.keys()))
     return instructions, label_map
 
 
@@ -353,6 +359,12 @@ def run_block(block, global_messages, user_prompt, base_args, available_tools):
     use_streaming = not block.strict_format
     stream_cb = (lambda chunk: (sys.stderr.write(chunk), sys.stderr.flush())) if use_streaming else None
 
+    log.info("run_block: name=%s model=%s tools=%s max_turns=%s enrich=%s "
+             "prepend_user_prompt=%s strict_format=%s prompt_len=%d global_messages=%d",
+             block.name, block_args.model, block.tools, block_args.max_turns,
+             block.enrich_global_context, block.prepend_user_prompt,
+             block.strict_format, len(prompt), len(global_messages))
+
     _status_cb(f"running")
     try:
         content = call_llm(
@@ -372,13 +384,21 @@ def run_block(block, global_messages, user_prompt, base_args, available_tools):
         content = ""
         sys.stderr.write(f"{prefix}[!] reached max turns ({e.max_turns})\n")
         sys.stderr.flush()
+        log.warning("run_block: name=%s reached max_turns=%d", block.name, e.max_turns)
+
+    result = content.strip()
+    log.info("run_block: name=%s done result_len=%d result_preview=%r",
+             block.name, len(result), result[:120])
 
     # Enrich: extend global context with ALL messages added during this block
     # (user prompt, tool calls, tool results, assistant turns, final response).
     if block.enrich_global_context:
+        new_msgs = len(local_messages) - global_end
         global_messages.extend(local_messages[global_end:])
+        log.info("run_block: name=%s enriched global_messages with %d new messages (total=%d)",
+                 block.name, new_msgs, len(global_messages))
 
-    return content.strip()
+    return result
 
 
 def _compact_global_if_needed(global_messages, base_args):
@@ -407,19 +427,22 @@ def _compact_global_if_needed(global_messages, base_args):
     threshold = 0.30  # compact when global context alone is >30% of the window
 
     if estimated_tokens < context_limit * threshold:
-        sys.stderr.write(
-            f"[compact-if-needed] skipped "
-            f"(~{estimated_tokens} tokens, {estimated_tokens/context_limit:.0%} of {context_limit})\n"
-        )
+        msg = (f"[compact-if-needed] skipped "
+               f"(~{estimated_tokens} tokens, {estimated_tokens/context_limit:.0%} of {context_limit})")
+        sys.stderr.write(msg + '\n')
         sys.stderr.flush()
+        log.info("compact_global: skipped estimated_tokens=%d context_limit=%d ratio=%.2f",
+                 estimated_tokens, context_limit, estimated_tokens / context_limit)
         return
 
-    sys.stderr.write(
-        f"[compact-if-needed] compacting "
-        f"(~{estimated_tokens} tokens, {estimated_tokens/context_limit:.0%} of {context_limit})\n"
-    )
+    msg = (f"[compact-if-needed] compacting "
+           f"(~{estimated_tokens} tokens, {estimated_tokens/context_limit:.0%} of {context_limit})")
+    sys.stderr.write(msg + '\n')
     sys.stderr.flush()
+    log.info("compact_global: compacting estimated_tokens=%d context_limit=%d ratio=%.2f messages=%d",
+             estimated_tokens, context_limit, estimated_tokens / context_limit, len(global_messages))
     _compact_messages(global_messages, base_args.model)
+    log.info("compact_global: done messages_after=%d", len(global_messages))
 
 
 def execute_harness(instructions, label_map, user_prompt, base_args, available_tools):
@@ -437,10 +460,14 @@ def execute_harness(instructions, label_map, user_prompt, base_args, available_t
     block_results = {}   # block name → last text output
     pc = 0
 
+    log.info("execute_harness: start instructions=%d user_prompt_len=%d model=%s",
+             len(instructions), len(user_prompt or ""), base_args.model)
+
     while pc < len(instructions):
         instr = instructions[pc]
 
         if isinstance(instr, BlockInstruction):
+            log.info("execute_harness: pc=%d block=%s", pc, instr.block.name)
             output = run_block(
                 instr.block,
                 global_messages,
@@ -457,23 +484,30 @@ def execute_harness(instructions, label_map, user_prompt, base_args, available_t
                 target = label_map.get(instr.label)
                 if target is None:
                     raise RuntimeError(f"harness: undefined label '{instr.label}'")
+                log.info("execute_harness: pc=%d if %s==%r -> goto %s (pc=%d)",
+                         pc, instr.block_name, instr.expected_value, instr.label, target)
                 pc = target
             else:
+                log.info("execute_harness: pc=%d if %s==%r -> no jump (actual=%r)",
+                         pc, instr.block_name, instr.expected_value, actual)
                 pc += 1
 
         elif isinstance(instr, GotoInstruction):
             target = label_map.get(instr.label)
             if target is None:
                 raise RuntimeError(f"harness: undefined label '{instr.label}'")
+            log.info("execute_harness: pc=%d goto %s (pc=%d)", pc, instr.label, target)
             pc = target
 
         elif isinstance(instr, LabelInstruction):
             pc += 1  # no-op; just a jump target
 
         elif isinstance(instr, ExitInstruction):
+            log.info("execute_harness: pc=%d exit", pc)
             break
 
         elif isinstance(instr, CompactInstruction):
+            log.info("execute_harness: pc=%d compact-if-needed", pc)
             _compact_global_if_needed(global_messages, base_args)
             pc += 1
 
@@ -482,6 +516,9 @@ def execute_harness(instructions, label_map, user_prompt, base_args, available_t
 
     # Emit the last block's output to stdout
     last_output = block_results.get(next(reversed(block_results), None), "") if block_results else ""
+    log.info("execute_harness: done blocks_executed=%d last_block=%s output_len=%d",
+             len(block_results), next(reversed(block_results), None) if block_results else None,
+             len(last_output))
     if last_output:
         print(last_output)
     return last_output
