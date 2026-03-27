@@ -25,6 +25,36 @@ logging.basicConfig(
 )
 log = logging.getLogger("cai")
 
+# ─── Diagnostic output (stderr, TTY-only) ────────────────────────────────────
+# Diagnostics are dim/faint so the final result is easy to spot.
+# When stderr is not a TTY (e.g. piped) all diagnostic output is suppressed.
+_STDERR_TTY = sys.stderr.isatty()
+_DIM   = "\033[2m"   # faint — signals "not the result"
+_RESET = "\033[0m"
+# Start pessimistic: stdout may have written content without a trailing newline,
+# so the first diagnostic needs to push itself onto a fresh line.
+_at_bol = False  # is the terminal cursor currently at beginning-of-line?
+
+def _diag(text, end='\n'):
+    """Write a diagnostic line to stderr only when stderr is a TTY.
+
+    Always starts on its own line: if the cursor is mid-line (e.g. after a
+    streamed stdout chunk) a leading newline is emitted first.
+    """
+    global _at_bol
+    if not _STDERR_TTY:
+        return
+    prefix = '' if _at_bol else '\n'
+    sys.stderr.write(f"{prefix}{_DIM}{text}{_RESET}{end}")
+    sys.stderr.flush()
+    _at_bol = end.endswith('\n') if end else False
+
+def _note_output(text):
+    """Update BOL state after writing *text* to any terminal stream."""
+    global _at_bol
+    if text:
+        _at_bol = text.endswith('\n')
+
 
 # ---------------------------------------------------------------------------
 # call_llm error hierarchy
@@ -345,9 +375,9 @@ def _retry_until_format(call_fn, system_prompt, check_fn, fail_msg_fn, format_la
             return normalised, reasoning, tool_calls, usage
 
         log.error(f"failed to get requested format from LLM: {format_label=} -> {orig_content=}, {reasoning=}, {tool_calls=}")
-        print(f"[enforce_strict_format] attempt {attempt}/{max_attempts}: {fail_msg_fn(attempt, max_attempts, orig_content)}", file=sys.stderr)
+        _diag(f"[enforce_strict_format] attempt {attempt}/{max_attempts}: {fail_msg_fn(attempt, max_attempts, orig_content)}")
         if attempt == max_attempts:
-            print(f"[enforce_strict_format] giving up after {max_attempts} attempts", file=sys.stderr)
+            _diag(f"[enforce_strict_format] giving up after {max_attempts} attempts")
             return None
         if messages is not None:
             messages.append({'role': 'user', 'content': fail_msg_fn(attempt, max_attempts, orig_content)})
@@ -489,7 +519,7 @@ def _check_context_budget(messages, usage, profile, args, status_callback=None):
         if status_callback:
             status_callback(msg)
         else:
-            print(f"\n{msg}", file=sys.stderr, flush=True)
+            _diag(f"\n{msg}")
         _compact_messages(messages, args.model)
 
 def _warn_if_stuck(tool_calls, call_history, messages):
@@ -643,9 +673,9 @@ def prompt_line_by_line(args, messages, available_tools, external_mcps):
                 bar_len = 30
                 filled = int(bar_len * completed / total)
                 bar = '█' * filled + '░' * (bar_len - filled)
-                print(f'\rProgress: [{bar}] {completed}/{total} ', end='', flush=True, file=sys.stderr)
+                _diag(f'\rProgress: [{bar}] {completed}/{total} ', end='')
                 if completed == total:
-                    print(file=sys.stderr)
+                    _diag('', end='\n')
 
     def process_line(line):
         if shutdown_event.is_set():
@@ -716,7 +746,7 @@ def prompt_line_by_line(args, messages, available_tools, external_mcps):
     finally:
         signal.signal(signal.SIGINT, original_sigint)
         if shutdown_event.is_set():
-            print("\n[!] interrupted — all pending tasks cancelled.", file=sys.stderr)
+            _diag("\n[!] interrupted — all pending tasks cancelled.")
 
 TOOL_RESULT_MAX_CHARS = 8000
 
@@ -789,33 +819,38 @@ def action_prompt(args, available_tools, external_mcps):
     messages.append({"role": "user", "content": args.prompt})
 
     def _stderr_tool(chunk, error=False):
-        sys.stderr.write(chunk)
-        sys.stderr.flush()
+        if _STDERR_TTY:
+            sys.stderr.write(_DIM + chunk + _RESET)
+            sys.stderr.flush()
+            _note_output(chunk)
 
     def _stderr_status(text):
         if text:
-            sys.stderr.write(f"[{text}]\n")
-            sys.stderr.flush()
+            _diag(f"[{text}]")
 
     def _stderr_ctx(ctx_str):
-        sys.stderr.write(f"[{ctx_str}]\n")
-        sys.stderr.flush()
+        _diag(f"[{ctx_str}]")
 
     if not args.non_streaming and not args.oneline and not args.strict_format:
         log.info("action_prompt: calling LLM (streaming)")
         try:
+            def _stream_to_stdout(chunk):
+                sys.stdout.write(chunk)
+                sys.stdout.flush()
+                _note_output(chunk)
+
             call_llm(messages,
                      args,
                      available_tools,
                      external_mcps,
-                     stream_callback=lambda chunk: (sys.stdout.write(chunk), sys.stdout.flush()),
+                     stream_callback=_stream_to_stdout,
                      tool_callback=_stderr_tool,
                      status_callback=_stderr_status,
                      ctx_callback=_stderr_ctx)
             print()
         except LLMError as e:
             print()
-            print(f"[error] {e}", file=sys.stderr)
+            _diag(f"[error] {e}")
     else:
         log.info("action_prompt: calling LLM (non-streaming)")
         try:
@@ -830,7 +865,7 @@ def action_prompt(args, available_tools, external_mcps):
                 content = content.replace('\n', ' ')
             print(content)
         except LLMError as e:
-            print(f"[error] {e}", file=sys.stderr)
+            _diag(f"[error] {e}")
 
 def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_ctx):
     """Execute a vim-style colon command from interactive mode."""
@@ -869,7 +904,7 @@ def action_interactive(args, available_tools, external_mcps):
     from cai.screen import Screen
 
     if not sys.stdout.isatty():
-        print("[!] --interactive requires a TTY stdout.", file=sys.stderr)
+        _diag("[!] --interactive requires a TTY stdout.")
         return
 
     # Pre-capture piped stdin BEFORE Screen (tty.setraw) takes over keyboard input

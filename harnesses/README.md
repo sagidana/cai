@@ -133,6 +133,36 @@ cai --harness harnesses/document.harness.cai -- "document the public API of src/
 
 ---
 
+### `web-search.harness.cai`
+**Generic web research with automatic task decomposition and synthesis.**
+
+Handles any information-gathering task by breaking it into 3–5 focused
+sub-questions, researching each independently via web search, then merging
+all findings into one comprehensive answer.
+
+The only tool used is `fetch_url`. Web search is performed by fetching
+DuckDuckGo's HTML endpoint (`html.duckduckgo.com/html/?q=…`) and then
+reading the most relevant result pages. Each sub-question runs in an
+isolated context so quality does not degrade with topic breadth.
+
+Stages: decompose → (per sub-question: search → verify → report) → synthesize.
+
+```
+cai --harness harnesses/web-search.harness.cai -- "what are the trade-offs between PostgreSQL and MongoDB for a high-write SaaS product?"
+cai --harness harnesses/web-search.harness.cai -- "what happened at the 2024 Paris Olympics?"
+cai --harness harnesses/web-search.harness.cai -- "explain how transformer attention mechanisms work"
+```
+
+The sub-harness (`web-search-fetch.harness.cai`) is invoked automatically
+for each sub-question via `for-each`. It can also be run directly to
+research a single focused question:
+
+```
+cai --harness harnesses/web-search-fetch.harness.cai -- "what is the current Python GIL removal status?"
+```
+
+---
+
 ## Format Reference
 
 ```

@@ -45,6 +45,35 @@ from typing import Optional
 
 log = logging.getLogger("cai.harness")
 
+# ─── Diagnostic output (stderr, TTY-only) ────────────────────────────────────
+# Diagnostics are dim/faint so the final result is easy to spot.
+# When stderr is not a TTY (e.g. piped) all diagnostic output is suppressed.
+_STDERR_TTY = sys.stderr.isatty()
+_DIM   = "\033[2m"   # faint — signals "not the result"
+_RESET = "\033[0m"
+# Start pessimistic: a prior write may have left the cursor mid-line.
+_at_bol = False  # is the terminal cursor currently at beginning-of-line?
+
+def _diag(text, end='\n'):
+    """Write a diagnostic line to stderr only when stderr is a TTY.
+
+    Always starts on its own line: if the cursor is mid-line a leading
+    newline is emitted first.
+    """
+    global _at_bol
+    if not _STDERR_TTY:
+        return
+    prefix = '' if _at_bol else '\n'
+    sys.stderr.write(f"{prefix}{_DIM}{text}{_RESET}{end}")
+    sys.stderr.flush()
+    _at_bol = end.endswith('\n') if end else False
+
+def _note_output(text):
+    """Update BOL state after writing *text* to any terminal stream."""
+    global _at_bol
+    if text:
+        _at_bol = text.endswith('\n')
+
 
 # ─── Data model ──────────────────────────────────────────────────────────────
 
@@ -372,23 +401,29 @@ def run_block(block, global_messages, user_prompt, base_args, available_tools):
     prefix = f"[{block.name}]"
 
     def _tool_cb(chunk, error=False):
-        sys.stderr.write(chunk)
-        sys.stderr.flush()
+        if _STDERR_TTY:
+            sys.stderr.write(_DIM + chunk + _RESET)
+            sys.stderr.flush()
+            _note_output(chunk)
 
     def _status_cb(text):
         if text:
-            sys.stderr.write(f"{prefix}[{text}]\n")
-            sys.stderr.flush()
+            _diag(f"{prefix}[{text}]")
 
     def _ctx_cb(ctx_str):
-        sys.stderr.write(f"{prefix}[{ctx_str}]\n")
-        sys.stderr.flush()
+        _diag(f"{prefix}[{ctx_str}]")
 
     # Use streaming for non-strict-format blocks so output appears live.
     # Strict-format blocks must use the non-streaming path so enforcement works.
     # All streamed output goes to stderr; only the final harness result is written to stdout.
     use_streaming = not block.strict_format
-    stream_cb = (lambda chunk: (sys.stderr.write(chunk), sys.stderr.flush())) if use_streaming else None
+
+    def _stream_cb(chunk):
+        sys.stderr.write(_DIM + chunk + _RESET)
+        sys.stderr.flush()
+        _note_output(chunk)
+
+    stream_cb = _stream_cb if (use_streaming and _STDERR_TTY) else None
 
     log.info("run_block: name=%s model=%s tools=%s max_turns=%s enrich=%s "
              "prepend_user_prompt=%s strict_format=%s prompt_len=%d global_messages=%d",
@@ -408,13 +443,13 @@ def run_block(block, global_messages, user_prompt, base_args, available_tools):
             status_callback=_status_cb,
             ctx_callback=_ctx_cb,
         )
-        if use_streaming:
+        if use_streaming and _STDERR_TTY:
             sys.stderr.write('\n')
             sys.stderr.flush()
+            _note_output('\n')
     except MaxTurnsReached as e:
         content = ""
-        sys.stderr.write(f"{prefix}[!] reached max turns ({e.max_turns})\n")
-        sys.stderr.flush()
+        _diag(f"{prefix}[!] reached max turns ({e.max_turns})")
         log.warning("run_block: name=%s reached max_turns=%d", block.name, e.max_turns)
 
     result = content.strip()
@@ -456,16 +491,14 @@ def _compact_global_if_needed(global_messages, base_args, threshold_pct):
     if estimated_tokens < context_limit * threshold:
         msg = (f"[compact-if-more-than {threshold_pct}%] skipped "
                f"(~{estimated_tokens} tokens, {estimated_tokens/context_limit:.0%} of {context_limit})")
-        sys.stderr.write(msg + '\n')
-        sys.stderr.flush()
+        _diag(msg)
         log.info("compact_global: skipped estimated_tokens=%d context_limit=%d ratio=%.2f threshold=%.0f%%",
                  estimated_tokens, context_limit, estimated_tokens / context_limit, threshold_pct)
         return
 
     msg = (f"[compact-if-more-than {threshold_pct}%] compacting "
            f"(~{estimated_tokens} tokens, {estimated_tokens/context_limit:.0%} of {context_limit})")
-    sys.stderr.write(msg + '\n')
-    sys.stderr.flush()
+    _diag(msg)
     log.info("compact_global: compacting estimated_tokens=%d context_limit=%d ratio=%.2f threshold=%.0f%% messages=%d",
              estimated_tokens, context_limit, estimated_tokens / context_limit, threshold_pct, len(global_messages))
     _compact_messages(global_messages, base_args.model)
@@ -517,8 +550,7 @@ def execute_harness(instructions, label_map, user_prompt, base_args, available_t
                     )
                 except KeyboardInterrupt:
                     interrupted = True
-                    sys.stderr.write(f"\n[harness] interrupted during block '{instr.block.name}' — stopping.\n")
-                    sys.stderr.flush()
+                    _diag(f"\n[harness] interrupted during block '{instr.block.name}' — stopping.")
                     log.warning("execute_harness: interrupted during block=%s pc=%d", instr.block.name, pc)
                     break
                 block_results[instr.block.name] = output
@@ -562,10 +594,7 @@ def execute_harness(instructions, label_map, user_prompt, base_args, available_t
                 no_more_than_counts[pc] = count
                 log.info("execute_harness: pc=%d no-more-than %d (count=%d)", pc, instr.limit, count)
                 if count > instr.limit:
-                    sys.stderr.write(
-                        f"[harness] no-more-than {instr.limit} exceeded (ran {count} times) — stopping.\n"
-                    )
-                    sys.stderr.flush()
+                    _diag(f"[harness] no-more-than {instr.limit} exceeded (ran {count} times) — stopping.")
                     break
                 pc += 1
 
@@ -577,8 +606,7 @@ def execute_harness(instructions, label_map, user_prompt, base_args, available_t
                 sub_instructions, sub_label_map = parse_harness_file(instr.harness_path)
                 results = []
                 for item in items:
-                    sys.stderr.write(f"[for-each] running: {item!r}\n")
-                    sys.stderr.flush()
+                    _diag(f"[for-each] running: {item!r}")
                     try:
                         sub_result = execute_harness(
                             sub_instructions, sub_label_map,
@@ -588,8 +616,7 @@ def execute_harness(instructions, label_map, user_prompt, base_args, available_t
                         )
                     except KeyboardInterrupt:
                         interrupted = True
-                        sys.stderr.write(f"\n[harness] interrupted during for-each item {item!r} — stopping.\n")
-                        sys.stderr.flush()
+                        _diag(f"\n[harness] interrupted during for-each item {item!r} — stopping.")
                         break
                     results.append((item, sub_result))
                 # Inject a single structured message into parent context so subsequent
@@ -611,8 +638,7 @@ def execute_harness(instructions, label_map, user_prompt, base_args, available_t
 
     except KeyboardInterrupt:
         interrupted = True
-        sys.stderr.write("\n[harness] interrupted — stopping.\n")
-        sys.stderr.flush()
+        _diag("\n[harness] interrupted — stopping.")
         log.warning("execute_harness: interrupted at pc=%d", pc)
 
     finally:
