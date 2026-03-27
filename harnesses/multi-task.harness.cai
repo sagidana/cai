@@ -1,0 +1,53 @@
+# multi-task.harness.cai
+#
+# Decomposes the user's task into independent atomic subtasks, executes each
+# through its own isolated context-and-execute cycle, then aggregates results.
+#
+# Best for: tasks that naturally split into parallel independent work items —
+# "write tests for every module in src/", "fix all TODO comments", "document
+# every public class in the API".
+#
+# The key property: each subtask runs in a clean, isolated context. Quality
+# does not degrade as the number of items grows, and each item can use the
+# full context window independently.
+#
+# Usage:
+#   cai --harness harnesses/multi-task.harness.cai -- "write tests for every module in src/cai/"
+
+---
+    --name "decompose"
+    --prepend-user-prompt
+    --dont-enrich-global-context
+    --tools list_files, read_lines
+    --max-turns 10
+    --system-prompt "Output a plain list of independent tasks — one per line, no bullets, no numbering, no extra text."
+    '''
+    Analyse the user's task and break it into a list of atomic, independent
+    subtasks that can each be completed in isolation.
+
+    Rules:
+    - Each subtask must be fully self-contained: it should be understandable
+      and executable without knowing about the other subtasks.
+    - Include all context a subtask executor would need: file paths, specific
+      goals, relevant constraints.
+    - Output one subtask per line. No bullets, numbers, or prefixes.
+    - Do not output anything other than the task list.
+    '''
+---
+
+for-each task in decompose: harness "harnesses/context-and-execute.harness.cai"
+
+---
+    --name "aggregate"
+    --dont-enrich-global-context
+    --max-turns 3
+    --system-prompt "You are a concise technical writer summarising completed work."
+    '''
+    All subtasks have been completed. The results are in your context above.
+
+    Write a brief summary for the user covering:
+    - What was accomplished overall
+    - Any notable decisions or patterns across the subtasks
+    - Anything the user should be aware of or review
+    '''
+---

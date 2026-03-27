@@ -159,7 +159,9 @@ label:               # jump target (word followed by colon)
 if x == ok: goto label       # conditional jump (exact string match)
 goto label                   # unconditional jump
 exit                         # terminate harness
-compact-if-more-than <percentage>  # compact global context if usage exceeds <percentage>% of window
+compact-if-more-than <percentage>           # compact global context if usage exceeds <percentage>% of window
+no-more-than <number>                       # exit if this point has been passed more than <number> times
+for-each <item> in <block>: harness "<path>"  # run sub-harness for each line of block output
 ```
 
 ### Context enrichment
@@ -193,3 +195,50 @@ compact-if-more-than 30   # trim context before re-running enrichment
 
 Use it in retry loops where a block may run many times and accumulate large
 amounts of tool output in the global context.
+
+### `for-each <item> in <block>: harness "<path>"`
+
+Runs a sub-harness once for each line of a named block's output. Each run is
+fully isolated — it starts with a fresh context and receives one line as its
+`user_prompt`, exactly as if the user had typed it on the command line.
+
+After all iterations complete, a single structured message is injected into
+the parent's `global_messages`:
+
+```
+[for-each results: decompose]
+─── task: src/cai/harness.py
+    → Tests written: 12 cases covering parse_harness_file and execute_harness
+─── task: src/cai/cli.py
+    → Tests written: 8 cases covering argument parsing and call_llm dispatch
+```
+
+Subsequent parent blocks (e.g. an `aggregate` block) see this message
+naturally in context — no special API needed. The sub-harness and the parent's
+later blocks are both completely unaware of the for-each mechanism.
+
+```
+---
+    --name "decompose"
+    --prepend-user-prompt
+    --dont-enrich-global-context
+    --system-prompt "Output one task per line. No bullets, no numbering."
+    '''
+    Break the user's task into independent atomic subtasks.
+    Output one per line.
+    '''
+---
+
+for-each task in decompose: harness "harnesses/context-and-execute.harness.cai"
+
+---
+    --name "aggregate"
+    --dont-enrich-global-context
+    '''
+    All subtasks are complete. Summarise the overall result for the user.
+    '''
+---
+```
+
+See `harnesses/multi-task.harness.cai` for a complete working example.
+

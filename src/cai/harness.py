@@ -30,6 +30,7 @@ harness.cai format overview:
     goto label
     no-more-than <number>              # exit if this point has been passed more than <number> times
     compact-if-more-than <percentage>  # compact global context if usage exceeds <percentage>% of window
+    for-each <item> in <block>: harness "<path>"   # run sub-harness for each line of block output
     exit
 """
 
@@ -91,6 +92,12 @@ class ExitInstruction:
 @dataclass
 class CompactInstruction:
     threshold: float   # compact when global context exceeds this % of context window (0–100)
+
+
+@dataclass
+class ForEachInstruction:
+    source_block: str   # block whose output is split into items (one per line)
+    harness_path: str   # sub-harness to run for each item
 
 
 @dataclass
@@ -247,6 +254,15 @@ def parse_harness_file(path: str):
             m = re.match(r"^no-more-than\s+(\d+)$", stripped)
             if m:
                 instructions.append(NoMoreThanInstruction(limit=int(m.group(1))))
+                continue
+
+            # for-each <item> in <block>: harness "<path>"
+            m = re.match(r'^for-each\s+\w+\s+in\s+(\w+):\s+harness\s+"([^"]+)"$', stripped)
+            if m:
+                instructions.append(ForEachInstruction(
+                    source_block=m.group(1),
+                    harness_path=m.group(2),
+                ))
                 continue
 
             raise SyntaxError(f"harness:{lineno}: unexpected token: {stripped!r}")
@@ -550,6 +566,43 @@ def execute_harness(instructions, label_map, user_prompt, base_args, available_t
                         f"[harness] no-more-than {instr.limit} exceeded (ran {count} times) — stopping.\n"
                     )
                     sys.stderr.flush()
+                    break
+                pc += 1
+
+            elif isinstance(instr, ForEachInstruction):
+                raw = block_results.get(instr.source_block, "")
+                items = [line.strip() for line in raw.splitlines() if line.strip()]
+                log.info("execute_harness: pc=%d for-each source=%s items=%d harness=%s",
+                         pc, instr.source_block, len(items), instr.harness_path)
+                sub_instructions, sub_label_map = parse_harness_file(instr.harness_path)
+                results = []
+                for item in items:
+                    sys.stderr.write(f"[for-each] running: {item!r}\n")
+                    sys.stderr.flush()
+                    try:
+                        sub_result = execute_harness(
+                            sub_instructions, sub_label_map,
+                            user_prompt=item,
+                            base_args=base_args,
+                            available_tools=available_tools,
+                        )
+                    except KeyboardInterrupt:
+                        interrupted = True
+                        sys.stderr.write(f"\n[harness] interrupted during for-each item {item!r} — stopping.\n")
+                        sys.stderr.flush()
+                        break
+                    results.append((item, sub_result))
+                # Inject a single structured message into parent context so subsequent
+                # blocks can reference all results without knowing about the for-each mechanism.
+                if results:
+                    summary = "\n".join(
+                        f"─── task: {item}\n    → {result}" for item, result in results
+                    )
+                    global_messages.append({
+                        "role": "assistant",
+                        "content": f"[for-each results: {instr.source_block}]\n{summary}",
+                    })
+                if interrupted:
                     break
                 pc += 1
 
