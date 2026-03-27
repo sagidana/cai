@@ -777,6 +777,19 @@ def action_prompt(args, available_tools, external_mcps):
 
     messages.append({"role": "user", "content": args.prompt})
 
+    def _stderr_tool(chunk, error=False):
+        sys.stderr.write(chunk)
+        sys.stderr.flush()
+
+    def _stderr_status(text):
+        if text:
+            sys.stderr.write(f"[{text}]\n")
+            sys.stderr.flush()
+
+    def _stderr_ctx(ctx_str):
+        sys.stderr.write(f"[{ctx_str}]\n")
+        sys.stderr.flush()
+
     if not args.non_streaming and not args.oneline and not args.strict_format:
         log.info("action_prompt: calling LLM (streaming)")
         try:
@@ -785,7 +798,9 @@ def action_prompt(args, available_tools, external_mcps):
                      available_tools,
                      external_mcps,
                      stream_callback=lambda chunk: (sys.stdout.write(chunk), sys.stdout.flush()),
-                     tool_callback=lambda chunk: (sys.stderr.write(chunk), sys.stderr.flush()))
+                     tool_callback=_stderr_tool,
+                     status_callback=_stderr_status,
+                     ctx_callback=_stderr_ctx)
             print()
         except LLMError as e:
             print()
@@ -793,7 +808,13 @@ def action_prompt(args, available_tools, external_mcps):
     else:
         log.info("action_prompt: calling LLM (non-streaming)")
         try:
-            content = call_llm(messages, args, available_tools, external_mcps)
+            content = call_llm(messages,
+                               args,
+                               available_tools,
+                               external_mcps,
+                               tool_callback=_stderr_tool,
+                               status_callback=_stderr_status,
+                               ctx_callback=_stderr_ctx)
             if args.oneline:
                 content = content.replace('\n', ' ')
             print(content)

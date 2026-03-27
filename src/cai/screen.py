@@ -153,7 +153,7 @@ class Screen:
         # Conversation content buffer (source of truth)
         self._segments: list[str] = []
         self._display_lines: list[str] = []
-        self._scroll_offset: int = 0    # lines hidden from bottom (0 = tail)
+        self._pinned_top_line: int = 0  # absolute first visible line when frozen
         self._follow_tail: bool = True
 
         # Input state
@@ -219,9 +219,10 @@ class Screen:
         raw = ''.join(self._segments)
         # cols-1 to avoid terminal auto-wrap at the last column
         self._display_lines = _wrap_ansi(raw, max(1, self._cols - 1))
-        max_off = max(0, len(self._display_lines) - self._main_rows())
-        if self._scroll_offset > max_off:
-            self._scroll_offset = max_off
+        if not self._follow_tail:
+            max_top = max(0, len(self._display_lines) - self._main_rows())
+            if self._pinned_top_line > max_top:
+                self._pinned_top_line = max_top
 
     # ------------------------------------------------------------------ rendering
 
@@ -232,10 +233,9 @@ class Screen:
 
         if self._follow_tail:
             start = max(0, total - h)
-            end = start + h
         else:
-            end = max(0, total - self._scroll_offset)
-            start = max(0, end - h)
+            start = self._pinned_top_line
+        end = start + h
 
         visible = self._display_lines[start:end]
 
@@ -411,32 +411,43 @@ class Screen:
             return
 
         with self._render_lock:
+            h = self._main_rows()
+            total = len(self._display_lines)
+
             if key == '\033[5~':   # Page Up
+                full = max(1, h)
+                current_start = max(0, total - h) if self._follow_tail else self._pinned_top_line
                 self._follow_tail = False
-                full = max(1, self._main_rows())
-                max_off = max(0, len(self._display_lines) - self._main_rows())
-                self._scroll_offset = min(self._scroll_offset + full, max_off)
+                self._pinned_top_line = max(0, current_start - full)
                 self._redraw_main_view()
                 sys.stdout.flush()
             elif key == '\033[6~':   # Page Down
-                full = max(1, self._main_rows())
-                self._scroll_offset = max(0, self._scroll_offset - full)
-                if self._scroll_offset == 0:
-                    self._follow_tail = True
+                full = max(1, h)
+                if not self._follow_tail:
+                    new_top = self._pinned_top_line + full
+                    if new_top >= max(0, total - h):
+                        self._follow_tail = True
+                        self._pinned_top_line = 0
+                    else:
+                        self._pinned_top_line = new_top
                 self._redraw_main_view()
                 sys.stdout.flush()
             elif key == '\x15':   # Ctrl-U — half page up
+                half = max(1, h // 2)
+                current_start = max(0, total - h) if self._follow_tail else self._pinned_top_line
                 self._follow_tail = False
-                half = max(1, self._main_rows() // 2)
-                max_off = max(0, len(self._display_lines) - self._main_rows())
-                self._scroll_offset = min(self._scroll_offset + half, max_off)
+                self._pinned_top_line = max(0, current_start - half)
                 self._redraw_main_view()
                 sys.stdout.flush()
             elif key == '\x04':   # Ctrl-D — half page down
-                half = max(1, self._main_rows() // 2)
-                self._scroll_offset = max(0, self._scroll_offset - half)
-                if self._scroll_offset == 0:
-                    self._follow_tail = True
+                half = max(1, h // 2)
+                if not self._follow_tail:
+                    new_top = self._pinned_top_line + half
+                    if new_top >= max(0, total - h):
+                        self._follow_tail = True
+                        self._pinned_top_line = 0
+                    else:
+                        self._pinned_top_line = new_top
                 self._redraw_main_view()
                 sys.stdout.flush()
 
@@ -513,36 +524,52 @@ class Screen:
 
         # ---- Scroll: Page Up / Page Down (full page) ----
         if key == '\033[5~':   # Page Up
+            h = self._main_rows()
+            total = len(self._display_lines)
+            full = max(1, h)
+            current_start = max(0, total - h) if self._follow_tail else self._pinned_top_line
             self._follow_tail = False
-            full = max(1, self._main_rows())
-            max_off = max(0, len(self._display_lines) - self._main_rows())
-            self._scroll_offset = min(self._scroll_offset + full, max_off)
+            self._pinned_top_line = max(0, current_start - full)
             self._redraw_main_view()
             self._redraw_prompt_line(msg)
             return
         if key == '\033[6~':   # Page Down
-            full = max(1, self._main_rows())
-            self._scroll_offset = max(0, self._scroll_offset - full)
-            if self._scroll_offset == 0:
-                self._follow_tail = True
+            h = self._main_rows()
+            total = len(self._display_lines)
+            full = max(1, h)
+            if not self._follow_tail:
+                new_top = self._pinned_top_line + full
+                if new_top >= max(0, total - h):
+                    self._follow_tail = True
+                    self._pinned_top_line = 0
+                else:
+                    self._pinned_top_line = new_top
             self._redraw_main_view()
             self._redraw_prompt_line(msg)
             return
 
         # ---- Scroll: Ctrl-U / Ctrl-D (half page) ----
         if key == '\x15':   # Ctrl-U — scroll half page up
+            h = self._main_rows()
+            total = len(self._display_lines)
+            half = max(1, h // 2)
+            current_start = max(0, total - h) if self._follow_tail else self._pinned_top_line
             self._follow_tail = False
-            half = max(1, self._main_rows() // 2)
-            max_off = max(0, len(self._display_lines) - self._main_rows())
-            self._scroll_offset = min(self._scroll_offset + half, max_off)
+            self._pinned_top_line = max(0, current_start - half)
             self._redraw_main_view()
             self._redraw_prompt_line(msg)
             return
         if key == '\x04':   # Ctrl-D — scroll half page down
-            half = max(1, self._main_rows() // 2)
-            self._scroll_offset = max(0, self._scroll_offset - half)
-            if self._scroll_offset == 0:
-                self._follow_tail = True
+            h = self._main_rows()
+            total = len(self._display_lines)
+            half = max(1, h // 2)
+            if not self._follow_tail:
+                new_top = self._pinned_top_line + half
+                if new_top >= max(0, total - h):
+                    self._follow_tail = True
+                    self._pinned_top_line = 0
+                else:
+                    self._pinned_top_line = new_top
             self._redraw_main_view()
             self._redraw_prompt_line(msg)
             return
@@ -564,7 +591,7 @@ class Screen:
                 )
             self._segments.append('\n')
             self._follow_tail = True
-            self._scroll_offset = 0
+            self._pinned_top_line = 0
             self._rebuild_display_lines()
             self._in_prompt = False
             self._clear_prompt_row()
