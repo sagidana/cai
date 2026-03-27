@@ -654,11 +654,8 @@ def prompt_line_by_line(args, messages, available_tools, external_mcps):
         local_messages.append({"role": "user", "content": line})
         local_messages.append({"role": "user", "content": args.prompt})
 
-        from cai.task import TaskRunner, Task
-        runner = TaskRunner.from_args(args)
-        task = Task(messages=local_messages, goal=args.prompt or line)
-        response = runner.run(task, args, available_tools, external_mcps,
-                              interrupt_event=shutdown_event)
+        response = call_llm(local_messages, args, available_tools, external_mcps,
+                            interrupt_event=shutdown_event)
 
         with lock:
             completed_count[0] += 1
@@ -780,16 +777,15 @@ def action_prompt(args, available_tools, external_mcps):
 
     messages.append({"role": "user", "content": args.prompt})
 
-    from cai.task import TaskRunner, Task
-    runner = TaskRunner.from_args(args)
-    task = Task(messages=messages, goal=args.prompt or "")
-
     if not args.non_streaming and not args.oneline and not args.strict_format:
         log.info("action_prompt: calling LLM (streaming)")
         try:
-            runner.run(task, args, available_tools, external_mcps,
-                       stream_callback=lambda chunk: (sys.stdout.write(chunk), sys.stdout.flush()),
-                       tool_callback=lambda chunk: (sys.stderr.write(chunk), sys.stderr.flush()))
+            call_llm(messages,
+                     args,
+                     available_tools,
+                     external_mcps,
+                     stream_callback=lambda chunk: (sys.stdout.write(chunk), sys.stdout.flush()),
+                     tool_callback=lambda chunk: (sys.stderr.write(chunk), sys.stderr.flush()))
             print()
         except LLMError as e:
             print()
@@ -797,7 +793,7 @@ def action_prompt(args, available_tools, external_mcps):
     else:
         log.info("action_prompt: calling LLM (non-streaming)")
         try:
-            content = runner.run(task, args, available_tools, external_mcps)
+            content = call_llm(messages, args, available_tools, external_mcps)
             if args.oneline:
                 content = content.replace('\n', ' ')
             print(content)
@@ -913,17 +909,15 @@ def action_interactive(args, available_tools, external_mcps):
             screen.show_prompt_placeholder("> ")
             screen.write(_LLM_STYLE)
             screen.start_input_listener()
-            from cai.task import TaskRunner, Task as CaiTask
             try:
-                _runner = TaskRunner.from_args(args)
-                _task = CaiTask(messages=messages, goal=args.prompt or "")
-                response = _runner.run(_task, args, available_tools, external_mcps,
-                                       task_callback=tool_cb,
-                                       stream_callback=stream_cb,
-                                       status_callback=status_callback,
-                                       tool_callback=tool_cb,
-                                       ctx_callback=ctx_cb,
-                                       interrupt_event=screen._interrupt_event)
+                response = call_llm(messages,
+                                    args,
+                                    available_tools, external_mcps,
+                                    stream_callback=stream_cb,
+                                    status_callback=status_callback,
+                                    tool_callback=tool_cb,
+                                    ctx_callback=ctx_cb,
+                                    interrupt_event=screen._interrupt_event)
                 if screen._interrupt_event.is_set():
                     screen.write(f"\n{_RESET}{_META_STYLE}[interrupted]{_RESET}\n\n")
                     status_callback("interrupted")
@@ -954,16 +948,12 @@ def action_interactive(args, available_tools, external_mcps):
             screen.write(_LLM_STYLE)
             screen.start_input_listener()
             try:
-                from cai.task import TaskRunner, Task as CaiTask
-                _runner = TaskRunner.from_args(args)
-                _task = CaiTask(messages=messages, goal=user_input)
-                response = _runner.run(_task, args, available_tools, external_mcps,
-                                       task_callback=tool_cb,
-                                       stream_callback=stream_cb,
-                                       status_callback=status_callback,
-                                       tool_callback=tool_cb,
-                                       ctx_callback=ctx_cb,
-                                       interrupt_event=screen._interrupt_event)
+                response = call_llm(messages, args, available_tools, external_mcps,
+                                    stream_callback=stream_cb,
+                                    status_callback=status_callback,
+                                    tool_callback=tool_cb,
+                                    ctx_callback=ctx_cb,
+                                    interrupt_event=screen._interrupt_event)
                 if screen._interrupt_event.is_set():
                     screen.write(f"\n{_RESET}{_META_STYLE}[interrupted]{_RESET}\n\n")
                     status_callback("interrupted")
@@ -1033,13 +1023,6 @@ def main():
                         help="number of parallel threads for the grep action (default: 4).")
     parser.add_argument('--line-by-line', action='store_true', default=False,
                         help="process stdin (or --file) one line at a time, calling LLM per line.")
-    parser.add_argument('--complexity', type=int, default=0, metavar='N',
-                        help="chain-of-thought complexity level. "
-                             "0=off (default, unchanged behavior). "
-                             "1=task decomposition. "
-                             "2=decomposition + answer verification.")
-    parser.add_argument('--max-depth', type=int, default=3, metavar='N',
-                        help="maximum task decomposition depth when using --complexity >= 1 (default: 3).")
     parser.add_argument('prompt_words', nargs='*',
                         help="prompt words after -- (alternative to -p)")
 
