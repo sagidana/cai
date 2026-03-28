@@ -1219,9 +1219,8 @@ def main():
         from cai.harness import execute_harness, parse_harness_file
         instructions, label_map = parse_harness_file(args.harness)
         user_prompt = args.prompt or ""
-        with _cai_logger.nest(1):
-            execute_harness(instructions, label_map, user_prompt, args, available_tools,
-                            harness_path=args.harness)
+        execute_harness(instructions, label_map, user_prompt, args, available_tools,
+                        harness_path=args.harness)
         return
 
     if args.interactive:

@@ -554,7 +554,7 @@ class LogViewer:
         out.append(_CLEAR_LINE)
         help_txt = (
             " Tab:fold  zA:fold-all  zz/zt/zb:align  /:search  ?:search\u2191  "
-            "n/N:next/prev  1\u20139:depth  0:all  f:follow  G:bottom  q:quit"
+            "n/N:next/prev  0:depth1  1\u20138:depth2\u20139  9:all  f:follow  G:bottom  q:quit"
         )
         out.append(_DIM + help_txt[:cols] + _RESET)
 
@@ -762,14 +762,11 @@ class LogViewer:
             self._jump_to_match(-self.search_dir)
 
         # ── Depth action (one-time fold to depth) ─────────────────────────────
-        elif key in "123456789":
+        # 0 = first (shallowest) level only, 1–8 = 2–9 levels, 9 = all
+        elif key in "0123456789":
+            digit = int(key)
             with self._lock:
-                self._apply_depth(int(key))
-            self._reanchor(anchor)
-
-        elif key == "0":
-            with self._lock:
-                self._apply_depth(0)
+                self._apply_depth((digit + 1) % 10)
             self._reanchor(anchor)
 
         return True
