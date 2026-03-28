@@ -11,7 +11,7 @@
 #   https://html.duckduckgo.com/html/?q=<url-encoded-query>
 
 search:
-no-more-than 3
+if-more-than 3 done
 compact-if-more-than 40
 
 ---
@@ -131,3 +131,5 @@ report:
     background unless it directly aids understanding.
     '''
 ---
+
+done:

@@ -15,7 +15,7 @@
 #   cai --harness harnesses/security-audit.harness.cai -- "audit the authentication and payment modules"
 
 enrichment:
-no-more-than 3
+if-more-than 3 done
 compact-if-more-than 30
 
 ---
@@ -424,3 +424,5 @@ clean-report:
     Any minor improvements worth considering, even if no vulnerabilities exist.
     '''
 ---
+
+done:

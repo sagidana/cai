@@ -9,7 +9,7 @@
 #   cai --harness harnesses/context-and-execute.harness.cai -- "your task here"
 
 enrichment:
-no-more-than 3
+if-more-than 3 done
 compact-if-more-than 30
 
 ---
@@ -102,3 +102,5 @@ execute:
     Produce the complete final result now.
     '''
 ---
+
+done:

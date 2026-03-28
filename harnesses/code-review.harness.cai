@@ -14,7 +14,7 @@
 #   cai --harness harnesses/code-review.harness.cai -- "review the changes in src/auth/"
 
 enrichment:
-no-more-than 3
+if-more-than 3 done
 compact-if-more-than 30
 
 ---
@@ -258,3 +258,5 @@ clean-report:
     let them merge.
     '''
 ---
+
+done:

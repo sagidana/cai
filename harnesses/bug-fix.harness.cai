@@ -13,7 +13,7 @@
 #   cai --harness harnesses/bug-fix.harness.cai -- "describe the bug here"
 
 enrichment:
-no-more-than 3
+if-more-than 3 done
 compact-if-more-than 30
 
 ---
@@ -84,7 +84,7 @@ if verify == retry: goto enrichment
 exit
 
 fix:
-no-more-than 3
+if-more-than 3 done
 compact-if-more-than 30
 
 ---

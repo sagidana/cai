@@ -15,7 +15,7 @@
 #   cai --harness harnesses/explain.harness.cai -- "explain how request authentication works end-to-end"
 
 enrichment:
-no-more-than 3
+if-more-than 3 done
 compact-if-more-than 30
 
 ---
@@ -189,3 +189,5 @@ explain:
     codebase. Be precise, use real names, and do not omit important details.
     '''
 ---
+
+done:

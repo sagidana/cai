@@ -190,7 +190,7 @@ if x == ok: goto label       # conditional jump (exact string match)
 goto label                   # unconditional jump
 exit                         # terminate harness
 compact-if-more-than <percentage>           # compact global context if usage exceeds <percentage>% of window
-no-more-than <number>                       # exit if this point has been passed more than <number> times
+if-more-than <number> <label>               # goto label if this point has been passed more than <number> times
 for-each <item> in <block>: harness "<path>"  # run sub-harness for each line of block output
 ```
 

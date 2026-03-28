@@ -28,7 +28,7 @@ harness.cai format overview:
 
     if x == ok: goto label
     goto label
-    no-more-than <number>              # exit if this point has been passed more than <number> times
+    if-more-than <number> <label>      # goto label if this point has been passed more than <number> times
     compact-if-more-than <percentage>  # compact global context if usage exceeds <percentage>% of window
     for-each <item> in <block>: harness "<path>"   # run sub-harness for each line of block output
     exit
@@ -234,8 +234,9 @@ class ForEachInstruction:
 
 
 @dataclass
-class NoMoreThanInstruction:
+class IfMoreThanInstruction:
     limit: int
+    label: str
 
 
 # ─── Parser ──────────────────────────────────────────────────────────────────
@@ -346,8 +347,8 @@ def _hlog_instr_summary(instr):
         return ""
     if isinstance(instr, CompactInstruction):
         return f"threshold={instr.threshold}%"
-    if isinstance(instr, NoMoreThanInstruction):
-        return f"limit={instr.limit}"
+    if isinstance(instr, IfMoreThanInstruction):
+        return f"limit={instr.limit}  goto={instr.label!r}"
     if isinstance(instr, ForEachInstruction):
         return f"source={instr.source_block!r}  harness={instr.harness_path!r}"
     return repr(instr)
@@ -419,10 +420,10 @@ def parse_harness_file(path: str):
                 instructions.append(CompactInstruction(threshold=float(m.group(1))))
                 continue
 
-            # no-more-than <number>
-            m = re.match(r"^no-more-than\s+(\d+)$", stripped)
+            # if-more-than <number> <label>
+            m = re.match(r"^if-more-than\s+(\d+)\s+(\w+)$", stripped)
             if m:
-                instructions.append(NoMoreThanInstruction(limit=int(m.group(1))))
+                instructions.append(IfMoreThanInstruction(limit=int(m.group(1)), label=m.group(2)))
                 continue
 
             # for-each <item> in <block>: harness "<path>"
@@ -795,19 +796,23 @@ def execute_harness(instructions, label_map, user_prompt, base_args, available_t
                 _hlog("")
                 pc += 1
 
-            elif isinstance(instr, NoMoreThanInstruction):
+            elif isinstance(instr, IfMoreThanInstruction):
                 count = no_more_than_counts.get(pc, 0) + 1
                 no_more_than_counts[pc] = count
-                log.info("execute_harness: pc=%d no-more-than %d (count=%d)", pc, instr.limit, count)
-                _hlog(f"  NO-MORE-THAN  pc={pc}  limit={instr.limit}  count={count}")
+                log.info("execute_harness: pc=%d if-more-than %d %s (count=%d)", pc, instr.limit, instr.label, count)
+                _hlog(f"  IF-MORE-THAN  pc={pc}  limit={instr.limit}  label={instr.label!r}  count={count}")
                 if count > instr.limit:
-                    _diag(f"[harness] no-more-than {instr.limit} exceeded (ran {count} times) — stopping.")
-                    _hlog(f"  !! LIMIT EXCEEDED: count={count} > limit={instr.limit} — halting")
+                    target = label_map.get(instr.label)
+                    if target is None:
+                        raise RuntimeError(f"harness: undefined label '{instr.label}'")
+                    _diag(f"[harness] if-more-than {instr.limit} exceeded (ran {count} times) — jumping to '{instr.label}'.")
+                    _hlog(f"  !! LIMIT EXCEEDED: count={count} > limit={instr.limit} — goto {instr.label!r} pc={target}")
                     _hlog("")
-                    break
-                _hlog(f"  >> within limit  pc -> {pc + 1}")
-                _hlog("")
-                pc += 1
+                    pc = target
+                else:
+                    _hlog(f"  >> within limit  pc -> {pc + 1}")
+                    _hlog("")
+                    pc += 1
 
             elif isinstance(instr, ForEachInstruction):
                 raw = block_results.get(instr.source_block, "")

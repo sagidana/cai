@@ -116,7 +116,7 @@ bfs_start:
 for-each descriptor in classify: harness "harnesses/smali-xref-expand.harness.cai"
 
 bfs_loop:
-no-more-than 5
+if-more-than 5 synthesize
 compact-if-more-than 40
 
 ---
