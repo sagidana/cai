@@ -1,6 +1,6 @@
 # cai — Command-line AI
 
-`cai` is a lightweight CLI tool that brings LLM intelligence into your terminal and editor workflow. It supports plain prompts, cursor-aware code generation, line-by-line batch processing, MCP tool integration, and a full interactive TUI — all powered by any OpenAI-compatible API (defaults to [OpenRouter](https://openrouter.ai)).
+`cai` is a lightweight CLI tool that brings LLM intelligence into your terminal and editor workflow. It supports plain prompts, cursor-aware code generation, line-by-line batch processing, MCP tool integration, harness orchestration, and a full interactive TUI — all powered by any OpenAI-compatible API (defaults to [OpenRouter](https://openrouter.ai)).
 
 ---
 
@@ -8,6 +8,8 @@
 
 - **`prompt`** — Send a prompt with optional file, stdin, cursor location, and tool context.
 - **`--interactive`** — Full-screen TUI chat session with persistent history, streaming output, and vim-style commands.
+- **`--harness`** — Run a `.harness.cai` orchestration file: multi-block agentic pipelines with control flow (labels, gotos, conditionals, loops, for-each sub-harnesses).
+- **`--logger`** — Launch the interactive hierarchical log viewer TUI (tails `/tmp/cai/cai.log`).
 - **`--force-tools`** — Require the LLM to use a tool at least once (sets `tool_choice=required`).
 - **MCP tool support** — Pass external MCP server scripts via `-t`; the LLM can call their tools automatically.
 - **Model profiles** — Built-in capability map (context window, tier, tool-calling) for 20+ models; user-overridable.
@@ -127,6 +129,27 @@ cai --strict-format "regex:^\d{4}-\d{2}-\d{2}$" -p "What is today's date?"
 cai --strict-format "regex:^(yes|no)$" -p "Is this code thread-safe?" --file ./worker.py
 ```
 
+**Regex-each-line** — every line of the response must match a pattern:
+
+```bash
+cai --strict-format "regex-each-line:^\w+" -p "List the function names" --file ./api.py
+```
+
+### Run a harness orchestration file
+
+```bash
+cai --harness harnesses/bug-fix.harness.cai -- "fix the crash in auth.py"
+cai --harness harnesses/code-review.harness.cai -- "review src/payments/"
+```
+
+### Launch the log viewer
+
+```bash
+cai --logger
+```
+
+Opens the interactive hierarchical log viewer, tailing `/tmp/cai/cai.log` in real time.
+
 ### Custom model + system prompt
 
 ```bash
@@ -147,6 +170,8 @@ cai --oneline -p "Summarize this function in one sentence" --file ./cli.py
 |------|---------|
 | `-p` / `--` | The prompt |
 | `--interactive` / `-i` | Full-screen TUI chat session |
+| `--harness` | Path to a `.harness.cai` orchestration file |
+| `--logger` | Launch the interactive hierarchical log viewer |
 | `--force-tools` | Require the LLM to call a tool at least once |
 | `--max-turns N` | Max tool-call turns (default: tier-based 5/10/20) |
 | `--file` | Include a file in context |
@@ -154,7 +179,7 @@ cai --oneline -p "Summarize this function in one sentence" --file ./cli.py
 | `-t` | MCP tool server path or internal tool name |
 | `--line-by-line` | Process each line independently |
 | `--cores N` | Parallel threads for batch processing |
-| `--strict-format json\|regex:<pattern>` | Force output format (JSON or regex match) |
+| `--strict-format json\|regex:<pattern>\|regex-each-line:<pattern>` | Force output format |
 | `--oneline` | Collapse response to single line |
 | `--model` | Override model |
 | `--system-prompt` | Set system prompt |
@@ -229,6 +254,144 @@ In interactive mode (and when tools are enabled in prompt mode), `cai` runs a mu
 5. **Context compaction:** when prompt token usage exceeds the configured threshold (default 75%), older conversation turns are summarized into a compact memory message to free up context space.
 
 Use `--force-tools` to require a tool call at least once (`tool_choice=required`).
+
+---
+
+## Harness Orchestration
+
+`.harness.cai` files are multi-block agentic programs — each block calls the LLM with its own prompt, tools, model, and format, and the blocks are connected by control flow instructions.
+
+```bash
+cai --harness harnesses/bug-fix.harness.cai -- "fix the NoneType crash in auth.py"
+```
+
+### Harness format
+
+```
+# Comments start with #
+
+label:               # jump target (bare word followed by colon)
+
+---                  # opens a block
+    --name "x"                          # required: block identifier for branching
+    --enrich-global-context             # or --dont-enrich-global-context (required)
+    --prepend-user-prompt               # prepend the user's task to this block's prompt
+    --tools read, list_files            # internal tool names (comma or space separated)
+    --model gpt-4o                      # override model for this block
+    --max-turns 100                     # override max tool-call turns
+    --strict-format "regex:^(ok|retry)$"  # enforce output format
+    --system-prompt "..."               # block-specific system prompt
+    --force-tools                       # require at least one tool call
+    '''
+    Prompt text goes here.
+    Multiple lines are fine.
+    '''
+---
+
+if x == ok: goto label       # conditional jump (exact string match)
+goto label                   # unconditional jump
+exit                         # terminate harness
+compact-if-more-than 30      # compact global context if usage exceeds 30% of window
+if-more-than 5 done          # jump to 'done' if this point has been passed more than 5 times
+for-each item in block: harness "path/to/sub.harness.cai"
+```
+
+### Context enrichment
+
+- `--enrich-global-context`: after the block runs, its full message history (user prompt, tool calls, tool results, all assistant turns) is added to the global context for subsequent blocks.
+- `--dont-enrich-global-context`: the block's messages are discarded after it runs. Use for quality-gate or classification blocks whose deliberation isn't needed downstream.
+
+### `compact-if-more-than <percentage>`
+
+Checks whether the accumulated `global_messages` exceed `<percentage>%` of the model's context window. If so, summarises the middle turns into a single `[memory]` entry. No-op if under the threshold. Useful in retry loops.
+
+### `for-each <item> in <block>: harness "<path>"`
+
+Runs a sub-harness once for each line of a named block's output. Each run starts with a fresh context and receives one line as its `user_prompt`. After all iterations complete, a structured summary is injected into the parent's global context so subsequent parent blocks can reference all results.
+
+### Built-in harnesses
+
+A collection of ready-to-use harnesses is included in `harnesses/`:
+
+| Harness | Purpose |
+|---------|---------|
+| `context-and-execute` | Gather context → verify → execute. The canonical pattern for any code task. |
+| `bug-fix` | Gather → verify → fix → self-review → summary |
+| `code-review` | Gather → verify → deep analysis → severity → report |
+| `test-writer` | Gather source → gather patterns → plan → validate → write |
+| `refactor` | Gather → verify → plan → validate → execute → sanity check → summary |
+| `feature` | Gather → verify → design → validate → implement → write tests |
+| `security-audit` | Gather → verify → threat model → deep audit → severity → report |
+| `migrate` | Gather → audit callsites → validate → plan → execute → verify → summary |
+| `explain` | Gather → verify → trace execution/data flow → layered explanation |
+| `document` | Gather code → gather doc conventions → outline → validate → write |
+| `web-search` | Decompose into sub-questions → search each → synthesize |
+| `multi-task` | Decompose task → run sub-harness for each part → aggregate |
+
+```bash
+cai --harness harnesses/refactor.harness.cai -- "extract retry logic in api.py into a reusable decorator"
+cai --harness harnesses/web-search.harness.cai -- "trade-offs between PostgreSQL and MongoDB"
+```
+
+---
+
+## Log Viewer
+
+`--logger` opens a full-screen interactive TUI that tails `/tmp/cai/cai.log` in real time. The log is written automatically by every `cai` invocation in structured JSONL format.
+
+```bash
+cai --logger
+```
+
+Entries are displayed with **hierarchical nesting** — tool calls and their results nest under the turn that invoked them, harness blocks nest under the harness, etc. Each nesting level is color-coded.
+
+**Navigation:**
+
+| Key | Action |
+|-----|--------|
+| `j` / `↓` | Move cursor down one entry |
+| `k` / `↑` | Move cursor up one entry |
+| `g` | Jump to top |
+| `G` | Jump to bottom |
+| `Ctrl-d` | Half-page down |
+| `Ctrl-u` | Half-page up |
+| `F` | Toggle follow mode (auto-scroll to new entries) |
+
+**Folding:**
+
+| Key | Action |
+|-----|--------|
+| `Tab` | Toggle fold on current entry (non-recursive) |
+| `zA` | Toggle fold on current entry and all descendants |
+| `0` | Show only the shallowest (root) level |
+| `1`–`8` | Show 2–9 nesting levels from the root |
+| `9` | Unfold everything |
+
+**Viewport alignment:**
+
+| Key | Action |
+|-----|--------|
+| `zz` | Centre current entry in viewport |
+| `zt` | Align current entry to top of viewport |
+| `zb` | Align current entry to bottom of viewport |
+
+**Search:**
+
+| Key | Action |
+|-----|--------|
+| `/pattern` | Search forward (regex, case-insensitive) |
+| `?pattern` | Search backward |
+| `n` | Jump to next match |
+| `N` | Jump to previous match |
+
+Search jumps work across the entire log (including folded entries); ancestors are automatically unfolded to reveal the match.
+
+**Other:**
+
+| Key | Action |
+|-----|--------|
+| `y` | Yank current entry text to clipboard (`wl-copy`, `xclip`, `xsel`, or `pbcopy`) |
+| `q` / Ctrl-C | Quit |
 
 ---
 
@@ -320,10 +483,13 @@ register-python-argcomplete --shell fish cai | source
 ```
 cai/
 ├── src/cai/
-│   ├── cli.py      # CLI entry point, action handlers, agentic loop, model profiles
+│   ├── cli.py      # CLI entry point, argument parsing, agentic loop, model profiles
 │   ├── api.py      # OpenAI-compatible API clients (OpenAiApi, OpenRouterApi)
 │   ├── screen.py   # Terminal TUI for --interactive (raw ANSI, no dependencies)
+│   ├── harness.py  # .harness.cai parser and executor (blocks, labels, gotos, for-each)
+│   ├── logger.py   # Hierarchical JSONL logger + interactive log viewer TUI
 │   └── tools.py    # MCP tool server + tool dispatch logic (tree-sitter codebase parsing)
+├── harnesses/      # Ready-to-use .harness.cai orchestration files
 └── pyproject.toml  # Build config; entry point: cai = "cai.cli:main"
 ```
 
