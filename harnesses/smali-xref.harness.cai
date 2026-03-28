@@ -19,12 +19,11 @@
 #     uses read_lines not read; --dont-enrich-global-context on transient blocks
 #
 # Architecture:
-#   1. classify      — resolve the target to a smali descriptor, classify query type
-#   2. verify        — quality gate (ok / retry / error)
-#   3. frontier_seed — emit one JSON envelope line for the first BFS expansion
-#   4. for-each      → smali-xref-expand.harness.cai  (BFS layer 0)
-#   5. [bfs_loop]    bfs_continue → done or → next_frontier → for-each (layers 1–4)
-#   6. synthesize    — assemble graph and answer the user's question
+#   1. classify  — resolve descriptor + classify query → emit JSON envelope directly
+#   2. verify    — quality gate: ok / error (no retry — strict-format enforces JSON shape)
+#   3. for-each  → smali-xref-expand.harness.cai  (BFS layer 0)
+#   4. [bfs_loop] bfs_continue → done or → next_frontier → for-each (layers 1–4)
+#   5. synthesize — assemble graph and answer the user's question
 #
 # Usage:
 #   cai --harness harnesses/smali-xref.harness.cai -- "what calls the encrypt method?"
@@ -35,10 +34,11 @@
     --name "classify"
     --prepend-user-prompt
     --enrich-global-context
-    --tools smali_resolve_descriptor, list_files, file_code_outline
-    --max-turns 25
+    --tools smali_resolve_descriptor, list_files, pattern_search
+    --max-turns 35
     --force-tools
-    --system-prompt "You are a smali reverse-engineering specialist. Your job is to understand the user's question, locate the relevant smali code, and resolve it to precise descriptors. Use file_code_outline to inspect a specific smali file's structure — do not use read for full files. Use list_files to orient in the project."
+    --strict-format "regex:^(\{\"descriptor\":\"L.+\}|ERROR:.+)$"
+    --system-prompt "You are a smali reverse-engineering specialist. Locate the relevant smali code and resolve it to a precise descriptor. Use file_code_outline to inspect a smali file's structure — never read full files. Use pattern_search to scan for identifiers when smali_resolve_descriptor is insufficient. Use list_files to orient in the project. Output ONLY a single JSON envelope line or an ERROR: line — no prose, no explanation."
     '''
     The user has a question about a smali codebase (decompiled from an APK via apktool).
 
@@ -46,131 +46,74 @@
 
     STEP 1 — Orient in the project
     Call list_files(".", r"\.smali$") to understand the project layout and
-    identify the package structure. Note the top-level packages.
+    identify the package structure. There is a real chance the codebase is
+    obfuscated which means the listed files will not give clear view, or there
+    are too many files to list. Do not try too much here.
 
     STEP 2 — Resolve the target descriptor
     Extract the class, method, or component the user is asking about.
-    Call smali_resolve_descriptor with the name or partial name to get the full
-    smali descriptor. Smali descriptors look like: Lcom/example/Class;->method(Args)Ret
+    Call smali_resolve_descriptor with the name or partial name. If no match,
+    use pattern_search to scan for identifiers by name fragment, method signature
+    shape, or string literals in the smali. Use file_code_outline on candidates
+    to confirm.
 
-    If multiple candidates are returned, use context from the user's question
+    If multiple candidates remain, use context from the user's question
     (package name, surrounding class names, role description) to pick the most
-    likely one. If still ambiguous, list all candidates in your output.
+    likely one.
 
-    If the name looks obfuscated (single-letter class like "La;" or "Lb;"), note
-    this and search by method signature shape or package location instead.
-
-    For reachability/path queries: also resolve the SOURCE descriptor (the component
-    the user says the path starts from).
+    If the name looks obfuscated (single-letter class like "La;"), search by
+    method signature shape or package location instead.
 
     STEP 3 — Classify the query type
-    Determine which XRef question type this is:
     - CALLERS:      "what calls X", "who invokes X", "callers of X", "what uses X"
     - CALLEES:      "what does X call", "callees of X", "what X invokes"
     - REACHABILITY: "can A reach B", "is B reachable from A"
     - PATH:         "call path from A to B", "how does A reach B", "trace from A to B"
     - FULL-XREF:    "all callers and callees", "full cross-reference"
 
-    STEP 4 — Output your classification (EXACTLY this format, nothing else after it)
-    DESCRIPTOR: <full smali descriptor of the primary target>
-    MODE: <CALLERS|CALLEES|REACHABILITY|PATH|FULL-XREF>
-    SOURCE: <full smali descriptor of the source for REACHABILITY/PATH, else "none">
-    QUESTION: <the user's original question verbatim>
+    For REACHABILITY/PATH queries: also resolve the SOURCE descriptor.
 
-    If you cannot resolve the descriptor, output instead:
-    ERROR: <reason — class not found, name too ambiguous, not a smali project, etc.>
+    Mode mapping (for the "mode" field in the output JSON):
+    - CALLERS      → "callers"
+    - CALLEES      → "callees"
+    - REACHABILITY → "callers"  (trace callers backward from target)
+    - PATH         → "callers"  (same — synthesize will find path to source)
+    - FULL-XREF    → "callers"  (synthesize will request callees too)
+
+    STEP 4 — Output EXACTLY ONE LINE, nothing else:
+
+    On success:
+    {"descriptor":"<full smali descriptor>","mode":"<callers|callees>","depth":0,"visited":"","hop_type":"direct","source":"<source smali descriptor for REACHABILITY/PATH, else none>"}
+
+    On failure (cannot resolve — class not found, too ambiguous, not a smali project):
+    ERROR: <concise reason>
     '''
 ---
-
-verify_step:
 
 ---
     --name "verify"
     --dont-enrich-global-context
-    --strict-format "regex:^(ok|retry|error)$"
-    --max-turns 3
-    --system-prompt "You are a strict quality gate. Answer only 'ok', 'retry', or 'error'."
+    --strict-format "regex:^(ok|error)$"
+    --max-turns 2
+    --system-prompt "You are a strict quality gate. Answer only 'ok' or 'error'."
     '''
     Review the classify block's output above.
 
-    Answer 'ok' if ALL of these are true:
-    - A DESCRIPTOR line is present and looks like a valid smali descriptor:
-      starts with "L", contains "->", contains "(", ends with a return type character.
-    - A MODE line is present with a valid value (CALLERS, CALLEES, REACHABILITY, PATH, or FULL-XREF).
-    - For REACHABILITY or PATH mode: a SOURCE line with a valid smali descriptor is present.
-    - A QUESTION line is present.
+    Answer 'ok' if the output is a JSON line beginning with {"descriptor":"L
+    Answer 'error' if the output is an ERROR: line.
 
-    Answer 'retry' if:
-    - The descriptor was found but looks incomplete or ambiguous
-      (multiple unresolved candidates listed without a clear choice, or no "->" part).
-
-    Answer 'error' if:
-    - An ERROR: line was output, meaning the target could not be resolved at all.
-
-    Respond with exactly one lowercase word: ok, retry, or error
+    Respond with exactly one lowercase word: ok or error
     '''
 ---
 
-if verify == ok: goto frontier_seed
-if verify == retry: goto classify_retry
+if verify == ok: goto bfs_start
 if verify == error: goto error_report
 
 exit
 
-classify_retry:
-no-more-than 2
+bfs_start:
 
----
-    --name "classify"
-    --prepend-user-prompt
-    --enrich-global-context
-    --tools smali_resolve_descriptor, list_files, file_code_outline, pattern_search
-    --max-turns 35
-    --force-tools
-    --system-prompt "You are a smali reverse-engineering specialist on a retry pass. Use pattern_search to scan for identifiers and file_code_outline to inspect candidates. Produce a single definitive DESCRIPTOR line."
-    '''
-    The previous classification attempt could not produce a definitive descriptor.
-
-    Use pattern_search and file_code_outline more aggressively to narrow down
-    the correct class or method. Look for:
-    - The class file by package path segment
-    - The method by signature shape (parameter types, return type)
-    - String literals or constants in the smali that match context from the question
-
-    Then produce the same DESCRIPTOR/MODE/SOURCE/QUESTION output format
-    with a single definitive choice, or ERROR if it genuinely cannot be found.
-    '''
----
-
-goto verify_step
-
-frontier_seed:
-
----
-    --name "frontier_seed"
-    --dont-enrich-global-context
-    --max-turns 1
-    --system-prompt "You are a formatter. Extract DESCRIPTOR and MODE from the classify block output above and emit exactly one JSON line. No other output whatsoever."
-    '''
-    The classify block above produced output containing lines like:
-      DESCRIPTOR: Lcom/example/Target;->method(Args)Ret
-      MODE: CALLERS
-
-    Emit exactly one JSON line in this format:
-    {"descriptor":"<DESCRIPTOR value>","mode":"<mode>","depth":0,"visited":"","hop_type":"direct"}
-
-    Mode mapping:
-    - CALLERS      → "callers"
-    - CALLEES      → "callees"
-    - REACHABILITY → "callers"  (trace callers backward from target)
-    - PATH         → "callers"  (same — synthesize will find path to SOURCE)
-    - FULL-XREF    → "callers"  (synthesize will request callees too)
-
-    Output ONLY the single JSON line. Nothing else.
-    '''
----
-
-for-each descriptor in frontier_seed: harness "harnesses/smali-xref-expand.harness.cai"
+for-each descriptor in classify: harness "harnesses/smali-xref-expand.harness.cai"
 
 bfs_loop:
 no-more-than 5
@@ -189,13 +132,13 @@ compact-if-more-than 40
     - The most recent for-each expansion produced at least one new descriptor
       (non-empty results that are not just "FRONTIER_EMPTY").
     - BFS depth has not yet reached 5 (check depth values in JSON envelopes in context).
-    - For REACHABILITY or PATH queries: the SOURCE descriptor has not yet
-      appeared in the caller results (path not yet found).
+    - For REACHABILITY or PATH queries: the source descriptor (found in the classify
+      block's JSON in context) has not yet appeared in the caller results.
 
     Answer 'done' if ANY of these are true:
     - The last expansion produced no new descriptors (FRONTIER_EMPTY or empty).
     - BFS depth has reached or exceeded 5.
-    - For REACHABILITY/PATH: the SOURCE appeared in the caller graph.
+    - For REACHABILITY/PATH: the source appeared in the caller graph.
     - All frontier nodes exhausted.
 
     Respond with exactly one lowercase word: expand or done
@@ -251,8 +194,10 @@ synthesize:
     --system-prompt "You are a reverse-engineering analyst specialising in Android smali bytecode. Produce a precise, structured cross-reference analysis. Use read_lines to spot-read specific method bodies when needed — do not read full files."
     '''
     You now have the results of a smali cross-reference BFS traversal in your context.
-    Synthesize all gathered data into a complete, precise answer to the user's question.
+    The classify block's JSON output (earlier in context) contains the query descriptor,
+    mode, source (for REACHABILITY/PATH), and the user's original question.
 
+    Synthesize all gathered data into a complete, precise answer to the user's question.
     If you need to verify or supplement any data point, use the available tools —
     but use read_lines to read only specific line ranges, not full files.
 
