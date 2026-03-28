@@ -459,6 +459,8 @@ if __name__ == '__main__':
             except PermissionError:
                 continue
             for name in children:
+                if name in (".git", "__pycache__"):
+                    continue
                 full = os.path.join(current, name)
                 rel = os.path.relpath(full, root)
                 kind = "dir" if os.path.isdir(full) else "file"

@@ -1,5 +1,6 @@
 import argparse
 import argcomplete
+import datetime
 import json
 import sys
 import os
@@ -24,6 +25,95 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",
 )
 log = logging.getLogger("cai")
+
+# ─── Agent log (realtime file at /tmp/cai/agent_<datetime>.log) ──────────────
+# One file per process invocation; shared across all call_llm calls in a session.
+_AGENT_LOG_PATH = None
+_AGENT_LOG_LOCK = threading.Lock()
+
+def _get_agent_log_path():
+    global _AGENT_LOG_PATH
+    if _AGENT_LOG_PATH is None:
+        os.makedirs("/tmp/cai", exist_ok=True)
+        _AGENT_LOG_PATH = "/tmp/cai/agent.log"
+    return _AGENT_LOG_PATH
+
+def _alog(text):
+    """Append a line to the realtime agent log file."""
+    with _AGENT_LOG_LOCK:
+        with open(_get_agent_log_path(), 'a', encoding='utf-8') as f:
+            f.write(text + '\n')
+            f.flush()
+
+def _alog_messages_state(messages, label):
+    """Dump the complete messages[] array to the agent log so the exact context is visible."""
+    _CONTENT_LIMIT = 2000   # chars shown per message before truncation notice
+
+    def _render_content(text):
+        """Return lines for a content block, indented under the message header."""
+        if not text:
+            return ["│     (empty)"]
+        lines = []
+        if len(text) > _CONTENT_LIMIT:
+            shown = text[:_CONTENT_LIMIT]
+            omitted = len(text) - _CONTENT_LIMIT
+            for line in shown.splitlines():
+                lines.append("│     " + line)
+            lines.append("│     ... [{:,} more chars truncated]".format(omitted))
+        else:
+            for line in text.splitlines():
+                lines.append("│     " + line)
+        return lines
+
+    header = "┌─ MESSAGES[{}]  {} ".format(len(messages), label)
+    header = header + "─" * max(0, 76 - len(header)) + "┐"
+    _alog(header)
+
+    for idx, msg in enumerate(messages):
+        role = msg.get('role', 'unknown').upper()
+        content = msg.get('content') or ''
+        tool_calls = msg.get('tool_calls')
+        tool_call_id = msg.get('tool_call_id')
+
+        if tool_calls:
+            parts = []
+            for c in tool_calls:
+                fn = c.get('function', {})
+                name = fn.get('name', '?')
+                raw_args = fn.get('arguments', '')
+                call_id = c.get('id', '?')
+                try:
+                    parsed = json.loads(raw_args) if raw_args else {}
+                    args_fmt = ', '.join(
+                        "{}={}".format(k, json.dumps(v))
+                        for k, v in parsed.items()
+                    )
+                except Exception:
+                    args_fmt = raw_args
+                parts.append("{}({})  id={}".format(name, args_fmt, call_id))
+            _alog("│ [{:>2}] {}  [TOOL_CALL]".format(idx, role))
+            for p in parts:
+                _alog("│       call: {}".format(p))
+            if content:
+                _alog("│       content:")
+                for line in _render_content(str(content)):
+                    _alog(line)
+        elif role == 'TOOL':
+            text_content = str(content)
+            _alog("│ [{:>2}] TOOL RESULT  call_id={}  ({:,} chars)".format(
+                idx, tool_call_id, len(text_content)))
+            for line in _render_content(text_content):
+                _alog(line)
+        else:
+            text_content = str(content)
+            _alog("│ [{:>2}] {}  ({:,} chars)".format(idx, role, len(text_content)))
+            for line in _render_content(text_content):
+                _alog(line)
+
+        _alog("│")
+
+    _alog("└" + "─" * 77 + "┘")
+    _alog("")
 
 # ─── Diagnostic output (stderr, TTY-only) ────────────────────────────────────
 # Diagnostics are dim/faint so the final result is easy to spot.
@@ -283,7 +373,7 @@ def read_stdin_if_available():
         return sys.stdin.read()
     return None
 
-def _execute_tool(call_name, arguments, allowed_tool_names):
+def _execute_tool(call_name, arguments, allowed_tool_names, usage=None, profile=None):
     """Validate and run a single tool call. Always returns a result string.
 
     allowed_tool_names is the set of tool names actually sent to the LLM for
@@ -309,7 +399,7 @@ def _execute_tool(call_name, arguments, allowed_tool_names):
                     if result is None:
                         return f"Error: tool '{call_name}' returned no result"
                     log.info("tool call: %s -> result length=%d", call_name, len(result))
-                    return trim_tool_result(result)
+                    return trim_tool_result(result, usage=usage, profile=profile)
         log.info("tool call: %s (internal) args=%s", call_name, call_args)
         result = call_tool(call_name, call_args)
     except Exception as e:
@@ -320,9 +410,9 @@ def _execute_tool(call_name, arguments, allowed_tool_names):
         log.warning("tool call: %s returned None", call_name)
         return f"Error: tool '{call_name}' returned no result"
     log.info("tool call: %s -> result length=%d", call_name, len(result))
-    return trim_tool_result(result)
+    return trim_tool_result(result, usage=usage, profile=profile)
 
-def handle_tool_calls(tool_calls, messages, call_content, allowed_tool_names, tool_callback=None):
+def handle_tool_calls(tool_calls, messages, call_content, allowed_tool_names, tool_callback=None, usage=None, profile=None):
     log.info("handle_tool_calls: dispatching %d tool call(s)", len(tool_calls))
     for call in tool_calls:
         if call.get('type') != 'function':
@@ -332,19 +422,43 @@ def handle_tool_calls(tool_calls, messages, call_content, allowed_tool_names, to
         call_function = call.get('function', {})
         call_name = call_function.get('name')
         arguments = call_function.get('arguments') or ''
-        result = _execute_tool(call_name, arguments, allowed_tool_names)
+
+        # Log the dispatch before execution so failures are visible in order
+        try:
+            parsed_args = json.loads(arguments) if arguments else {}
+            args_preview = ', '.join(
+                "{}={}{}".format(k, json.dumps(v)[:80], '...' if len(json.dumps(v)) > 80 else '')
+                for k, v in parsed_args.items()
+            )
+        except Exception:
+            args_preview = arguments[:160]
+        _alog("  >>> TOOL CALL: {}({})".format(call_name, args_preview))
+
+        result = _execute_tool(call_name, arguments, allowed_tool_names, usage=usage, profile=profile)
+
+        if result.startswith("Error:"):
+            _alog("  <<< TOOL ERROR: {} — {}".format(call_name, result[:200]))
+        else:
+            preview = result[:200]
+            ellipsis = '...' if len(result) > 200 else ''
+            _alog("  <<< TOOL RESULT: {} — {:,} chars | {}{}".format(
+                call_name, len(result), preview, ellipsis))
+
         if tool_callback:
             if result.startswith("Error:"):
                 tool_callback(f"  \u2717 {call_name}: {result}\n", error=True)
             else:
                 tool_callback(f"  <- {call_name}: {len(result)} chars\n")
-        messages.append({
+
+        assistant_msg = {
             'role': 'assistant',
             'content': call_content or '',
             'tool_calls': [{'id': call_id, 'type': 'function',
                             'function': {'name': call_name, 'arguments': arguments}}],
-        })
-        messages.append({'role': 'tool', 'tool_call_id': call_id, 'content': result})
+        }
+        tool_msg = {'role': 'tool', 'tool_call_id': call_id, 'content': result}
+        messages.append(assistant_msg)
+        messages.append(tool_msg)
 
 def _retry_until_format(call_fn, system_prompt, check_fn, fail_msg_fn, format_label, messages, max_attempts):
     """Shared retry loop for format enforcement.
@@ -481,7 +595,11 @@ def _compact_messages(messages, model):
     compactable = messages[start_idx:end_idx]
     if len(compactable) < 2:
         log.info("compaction: not enough messages to compact (%d)", len(compactable))
+        _alog("  [TRIM] skipped — only {} messages in compactable slice (need ≥2)".format(len(compactable)))
         return
+
+    _alog("  [TRIM] compacting {} messages (indices {}–{}) into a single memory entry...".format(
+        len(compactable), start_idx, end_idx - 1))
 
     compaction_msgs = [{"role": "user", "content": (
         "Summarize the following conversation turns into a concise memory entry. "
@@ -493,12 +611,18 @@ def _compact_messages(messages, model):
     result = openai_api.chat(compaction_msgs, model=model)
     if not result:
         log.warning("compaction: LLM call failed, skipping")
+        _alog("  [TRIM] compaction LLM call failed — messages unchanged")
         return
 
     summary, _, _, _ = result
     memory = {"role": "system", "content": f"[memory from compacted turns]: {summary}"}
     log.info("compaction: replaced %d messages with memory (%d chars)", len(compactable), len(summary))
     messages[start_idx:end_idx] = [memory]
+    _alog("  [TRIM] done — replaced {} messages with 1 [memory] entry ({} chars)".format(
+        len(compactable), len(summary)))
+    preview = summary[:200]
+    ellipsis = '...' if len(summary) > 200 else ''
+    _alog("  [TRIM]   memory preview: {}{}".format(preview, ellipsis))
 
 def _check_context_budget(messages, usage, profile, args, status_callback=None):
     """Compact messages if prompt token usage exceeds the tier threshold."""
@@ -512,10 +636,14 @@ def _check_context_budget(messages, usage, profile, args, status_callback=None):
     threshold = config.get('context_budget_pct', default_threshold) \
         if 'config' in globals() and config else default_threshold
 
+    _alog("  [CONTEXT] {:.0%} used — {:,} / {:,} tokens  (threshold {:.0%})".format(
+        budget_pct, prompt_tokens, context_limit, threshold))
+
     if budget_pct >= threshold:
         log.warning("context budget: %.0f%% used (%d/%d tokens), compacting",
                     budget_pct * 100, prompt_tokens, context_limit)
         msg = f"[context {budget_pct:.0%} >= {threshold:.0%}] compacting..."
+        _alog("  [CONTEXT] budget exceeded — triggering trim/compaction")
         if status_callback:
             status_callback(msg)
         else:
@@ -534,6 +662,8 @@ def _warn_if_stuck(tool_calls, call_history, messages):
                        f"{call_history[key]} times and received the same result. "
                        f"Try a different approach or tool to make progress.")
             log.warning("stuck detection: '%s' called %d times with same args", name, call_history[key])
+            _alog("  [STUCK] '{}' called {} times with identical args — injecting warning into context".format(
+                name, call_history[key]))
             messages.append({"role": "user", "content": warning})
 
 def _emit_status(text, status_callback):
@@ -578,6 +708,23 @@ def call_llm(messages,
              args.strict_format or "none",
              max_turns)
 
+    # ── Agent log: session header ─────────────────────────────────────────────
+    _alog("=" * 80)
+    _alog("CALL_LLM START  {}".format(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    _alog("  model:      {}".format(args.model))
+    _alog("  tier/ctx:   {} / {:,} tokens".format(profile['tier'], profile['context']))
+    _alog("  tools:      {}  ({} total)".format(
+        ', '.join(sorted(allowed_tool_names)) if allowed_tool_names else '(none)',
+        len(included_tools)))
+    _alog("  max_turns:  {}".format(max_turns))
+    _alog("  streaming:  {}".format('yes' if stream_callback else 'no'))
+    _alog("  strict_fmt: {}".format(getattr(args, 'strict_format', None) or 'none'))
+    _alog("  force_tools:{}".format(getattr(args, 'force_tools', False)))
+    _alog("  messages:   {} (initial)".format(len(messages)))
+    _alog("")
+    _alog_messages_state(messages, "initial context")
+    # ─────────────────────────────────────────────────────────────────────────
+
     call_history = {}  # (tool_name, args_str) -> call count, for stuck detection
 
     if stream_callback:
@@ -593,6 +740,15 @@ def call_llm(messages,
         else:
             tool_choice = "auto"
 
+        _alog("=== TURN {}/{} ===  [{}]{}".format(
+            turn, max_turns,
+            datetime.datetime.now().strftime("%H:%M:%S"),
+            "  tool_choice=required (force_tools)" if tool_choice == "required" else ""))
+        _alog("")
+
+        # Show exact context the LLM is about to receive
+        _alog_messages_state(messages, "turn {} — LLM input".format(turn))
+
         content, tool_calls, usage = run_turn(messages,
                                               args,
                                               included_tools,
@@ -606,13 +762,27 @@ def call_llm(messages,
                  usage.get('total_tokens'))
 
         prompt_tokens = usage.get('prompt_tokens', 0)
+        completion_tokens = usage.get('completion_tokens', 0)
         pct = f"{prompt_tokens / profile['context']:.0%}" if profile['context'] else "?"
         ctx_str = f"ctx {pct} ({prompt_tokens}/{profile['context']})"
         if ctx_callback:
             ctx_callback(ctx_str)
 
+        _alog("  tokens: prompt={:,}  completion={:,}  ({} of context window)".format(
+            prompt_tokens, completion_tokens, pct))
+        _alog("")
+
         if not tool_calls:
             log.info("call_llm: done turn=%d length=%d", turn, len(content))
+
+            # Show the final state: existing messages + the assistant's response
+            final_state = messages + [{"role": "assistant", "content": content}]
+            _alog_messages_state(final_state, "turn {} — FINAL STATE (response appended)".format(turn))
+
+            _alog("CALL_LLM DONE  turns={}  response_len={:,}  {}".format(
+                turn, len(content), datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+            _alog("=" * 80)
+            _alog("")
 
             _emit_status("ready", status_callback)
             return content
@@ -638,15 +808,32 @@ def call_llm(messages,
                 for fmt in tool_calls_fmt:
                     tool_callback(f"-> {fmt}\n")
 
-        handle_tool_calls(tool_calls, messages, content, allowed_tool_names, tool_callback=tool_callback)
+        # handle_tool_calls appends assistant + tool messages; it logs each
+        # dispatch/result event.  We snapshot the array after.
+        handle_tool_calls(tool_calls, messages, content, allowed_tool_names, tool_callback=tool_callback, usage=usage, profile=profile)
         if tool_callback:
             tool_callback("\n")
+        _alog_messages_state(messages, "turn {} — after tool execution".format(turn))
 
+        # _warn_if_stuck may append a [USER] warning into messages
+        n_before_stuck = len(messages)
         _warn_if_stuck(tool_calls, call_history, messages)
+        if len(messages) > n_before_stuck:
+            _alog_messages_state(messages, "turn {} — after stuck-warning injection".format(turn))
 
+        # _check_context_budget may compact (replace) messages
+        n_before_compact = len(messages)
         _check_context_budget(messages, usage, profile, args, status_callback)
+        if len(messages) != n_before_compact:
+            _alog_messages_state(messages, "turn {} — after compaction".format(turn))
+
+        _alog("")
 
     log.warning("call_llm: reached max_turns=%d", max_turns)
+    _alog("MAX TURNS REACHED ({})  {}".format(max_turns, datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    _alog_messages_state(messages, "max-turns final state")
+    _alog("=" * 80)
+    _alog("")
     _emit_status(f"[!] reached max turns ({max_turns})", status_callback)
     raise MaxTurnsReached(max_turns)
 
@@ -754,10 +941,45 @@ def prompt_line_by_line(args, messages, available_tools, external_mcps):
             _diag("\n[!] interrupted — all pending tasks cancelled.")
 
 TOOL_RESULT_MAX_CHARS = 8000
+_CHARS_PER_TOKEN = 4  # approximate for mixed code/text content
 
-def trim_tool_result(result, max_chars=None):
+def _dynamic_max_chars(usage, profile):
+    """Return a max_chars limit based on remaining context window, or None if no trimming needed.
+
+    Strategy: when more than 50% of the context window remains, don't trim at all.
+    As the window fills, progressively reserve a smaller fraction for each result so
+    we don't blow the budget in a single call.
+    """
+    if not usage or not profile:
+        return None
+    prompt_tokens = usage.get('prompt_tokens', 0)
+    context_limit = profile.get('context', 0)
+    if not prompt_tokens or not context_limit:
+        return None
+    tokens_remaining = max(0, context_limit - prompt_tokens)
+    remaining_fraction = tokens_remaining / context_limit
+    if remaining_fraction > 0.5:
+        return None  # plenty of headroom — skip trimming entirely
+    # Shrink the per-result budget as context tightens:
+    #   50% remaining → allocate 25% of remaining  (≈ large result still allowed)
+    #   25% remaining → allocate 12.5% of remaining
+    #   10% remaining → allocate 10% (floor)  — gets aggressive
+    budget_fraction = max(0.10, remaining_fraction * 0.5)
+    max_chars = int(tokens_remaining * budget_fraction * _CHARS_PER_TOKEN)
+    return max(max_chars, 2000)  # always allow at least 2000 chars
+
+def trim_tool_result(result, usage=None, profile=None, max_chars=None):
     if max_chars is None:
-        max_chars = config.get('tool_result_max_chars', TOOL_RESULT_MAX_CHARS)
+        dynamic = _dynamic_max_chars(usage, profile)
+        if dynamic is not None:
+            max_chars = dynamic
+            log.info("trim_tool_result: dynamic limit=%d (prompt_tokens=%s, context=%s)",
+                     max_chars,
+                     usage.get('prompt_tokens') if usage else None,
+                     profile.get('context') if profile else None)
+        else:
+            max_chars = config.get('tool_result_max_chars', TOOL_RESULT_MAX_CHARS) \
+                if 'config' in globals() and config else TOOL_RESULT_MAX_CHARS
     if max_chars and len(result) > max_chars:
         omitted = len(result) - max_chars
         log.info("trim_tool_result: trimmed %d chars (limit=%d)", omitted, max_chars)
