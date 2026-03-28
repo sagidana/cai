@@ -554,7 +554,7 @@ class LogViewer:
         out.append(_CLEAR_LINE)
         help_txt = (
             " Tab:fold  zA:fold-all  zz/zt/zb:align  /:search  ?:search\u2191  "
-            "n/N:next/prev  0:depth1  1\u20138:depth2\u20139  9:all  f:follow  G:bottom  q:quit"
+            "n/N:next/prev  0:depth1  1\u20138:depth2\u20139  9:all  F:follow  G:bottom  q:quit"
         )
         out.append(_DIM + help_txt[:cols] + _RESET)
 
@@ -706,16 +706,13 @@ class LogViewer:
             self.scroll_row = 0
             self.follow     = False
 
-        elif key == "G":                      # bottom + enable follow
-            # Clear folds that were auto-added while browsing so the tail is
-            # fully visible again; manually-folded nodes are left alone.
-            with self._lock:
-                self.fold_set -= self._auto_fold_set
-                self._auto_fold_set.clear()
-            self.follow = True
-            # render() will position cursor + scroll_row via follow logic
+        elif key == "G":                      # bottom
+            if n > 0:
+                self.cursor     = n - 1
+                self.scroll_row = max(0, self._total_rows - content_rows)
+            self.follow = False
 
-        elif key == "f":                      # toggle follow
+        elif key == "F":                      # toggle follow
             self.follow = not self.follow
 
         # ── Fold / unfold ─────────────────────────────────────────────────────
