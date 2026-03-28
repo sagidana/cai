@@ -48,6 +48,22 @@ _REV        = "\033[7m"
 _YELLOW_BOLD= "\033[1;33m"
 _RESET      = "\033[0m"
 
+# ── Level-based color palette (structural — one color per nesting depth) ──
+_LEVEL_COLORS: tuple[str, ...] = (
+    "\033[97m",   # lvl 1  — bright white   (root, most prominent)
+    "\033[96m",   # lvl 2  — bright cyan
+    "\033[92m",   # lvl 3  — bright green
+    "\033[93m",   # lvl 4  — bright yellow
+    "\033[95m",   # lvl 5  — bright magenta
+    "\033[94m",   # lvl 6  — bright blue
+    "\033[91m",   # lvl 7  — bright red
+    "\033[37m",   # lvl 8  — normal white (fallback for deep nesting)
+)
+
+
+def _level_color(lvl: int) -> str:
+    return _LEVEL_COLORS[(lvl - 1) % len(_LEVEL_COLORS)]
+
 
 def _goto(row: int, col: int = 1) -> str:
     return f"\033[{row};{col}H"
@@ -518,11 +534,12 @@ class LogViewer:
 
             vis_i, main_text, suffix = cell
             is_cursor = (vis_i == self.cursor)
+            lc = _level_color(entries_snap[self.visible[vis_i]].lvl)
 
-            # Search highlight on main_text
+            # Search highlight on main_text; restore level color after each match
             if self.search_pat:
                 highlighted = self.search_pat.sub(
-                    lambda m: f"{_YELLOW_BOLD}{m.group()}{_RESET}", main_text
+                    lambda m: f"{_YELLOW_BOLD}{m.group()}{_RESET}{lc}", main_text
                 )
             else:
                 highlighted = main_text
@@ -532,7 +549,7 @@ class LogViewer:
                 pad     = max(0, cols - len(main_text))
                 out.append(f"{_REV}{highlighted}{' ' * pad}{_RESET}{suffix}")
             else:
-                out.append(highlighted + suffix)
+                out.append(f"{lc}{highlighted}{_RESET}{suffix}")
 
         # ── Status bar ────────────────────────────────────────────────────────
         out.append(_goto(rows - 1, 1))
@@ -540,10 +557,10 @@ class LogViewer:
 
         pos_str    = f"{self.cursor + 1}/{n}" if n else "0/0"
         total_str  = f"[{len(entries_snap)} total]"
-        follow_str = " \033[32mFOLLOW\033[0m" if self.follow    else ""
+        follow_str = " \033[1;32mFOLLOW\033[0m" if self.follow else ""
         srch_str   = (f" /{self.search_pat.pattern}" if self.search_pat else "")
         status     = (
-            f"{_BOLD}cai log{_RESET}  {self.path}"
+            f"\033[1;36mcai log\033[0m  {_DIM}{self.path}{_RESET}"
             f"  {pos_str} {total_str}"
             f"{follow_str}{srch_str}"
         )
