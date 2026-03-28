@@ -1293,6 +1293,8 @@ def main():
                         help="prompt words after -- (alternative to -p)")
     parser.add_argument('--harness', default=None,
                         help="path to a .harness.cai orchestration file.")
+    parser.add_argument('--logger', action='store_true',
+                        help="launch the interactive hierarchical log viewer (reads /tmp/cai/cai.log).")
 
     # Must be called before init() so tab completion exits immediately without
     # running any heavy initialization (API clients, tree-sitter, etc.).
@@ -1329,6 +1331,11 @@ def main():
     log.info("main: action=%s model=%s selected_tools=%s external_mcps=%s interactive=%s",
              args.action, args.model, sorted(args.selected_tools), list(external_mcps.keys()),
              args.interactive)
+
+    if args.logger:
+        from cai.logger import launch_tui
+        launch_tui()
+        return
 
     if args.harness:
         from cai.harness import execute_harness, parse_harness_file
