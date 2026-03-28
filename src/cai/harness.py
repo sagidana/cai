@@ -333,7 +333,6 @@ def parse_harness_file(path: str):
     log.info("parse_harness_file: path=%s instructions=%d blocks=%d labels=%s",
              path, len(instructions), block_count, list(label_map.keys()))
 
-    _cai_logger.log(1, f"HARNESS PARSED  {path}  instructions={len(instructions)}  blocks={block_count}  labels={list(label_map.keys())}")
     return instructions, label_map
 
 
@@ -439,10 +438,11 @@ def run_block(block, global_messages, user_prompt, base_args, available_tools):
              block.strict_format, len(prompt), len(global_messages))
 
     with _cai_logger.nest(1):
-        _cai_logger.log(1, f"BLOCK ENTER  name={block.name!r}  model={block_args.model}  "
-                        f"max_turns={block_args.max_turns}  enrich={block.enrich_global_context}")
-        _cai_logger.log(2, f"prompt={prompt!r}  tools={block.tools}")
-        _cai_logger.log(2, f"[user→local]\n{prompt}")
+        _cai_logger.log(1, (
+            f"BLOCK  name={block.name!r}  model={block_args.model}  "
+            f"max_turns={block_args.max_turns}  enrich={block.enrich_global_context}  "
+            f"tools={block.tools}\n{prompt}"
+        ))
 
         _status_cb(f"running")
         try:
@@ -477,17 +477,9 @@ def run_block(block, global_messages, user_prompt, base_args, available_tools):
         # (user prompt, tool calls, tool results, assistant turns, final response).
         if block.enrich_global_context:
             new_msgs = len(local_messages) - global_end
-            for msg in local_messages[global_end:]:
-                role = msg.get('role', '?')
-                content_str = str(msg.get('content') or '')
-                _cai_logger.log(1, f"[→global]  role={role}\n{content_str}")
             global_messages.extend(local_messages[global_end:])
             log.info("run_block: name=%s enriched global_messages with %d new messages (total=%d)",
                      block.name, new_msgs, len(global_messages))
-        else:
-            _cai_logger.log(2, "enrich=False — local context discarded")
-
-        _cai_logger.log(1, f"BLOCK EXIT  name={block.name!r}")
 
     return result
 
@@ -519,8 +511,6 @@ def _compact_global_if_needed(global_messages, base_args, threshold_pct):
         _diag(msg)
         log.info("compact_global: skipped estimated_tokens=%d context_limit=%d ratio=%.2f threshold=%.0f%%",
                  estimated_tokens, context_limit, estimated_tokens / context_limit, threshold_pct)
-        _cai_logger.log(2, f"COMPACT SKIPPED  ~{estimated_tokens} tokens = "
-                        f"{estimated_tokens/context_limit:.0%} of {context_limit}  threshold={threshold_pct}%")
         return
 
     msg = (f"[compact-if-more-than {threshold_pct}%] compacting "
@@ -557,7 +547,6 @@ def execute_harness(instructions, label_map, user_prompt, base_args, available_t
              len(instructions), len(user_prompt or ""), base_args.model)
 
     _cai_logger.log(1, f"=== HARNESS START  instructions={len(instructions)}  model={base_args.model} ===")
-    _cai_logger.log(2, f"user_prompt={(user_prompt or '')!r}  labels={list(label_map.keys())}")
 
     original_sigint = signal.getsignal(signal.SIGINT)
 
@@ -574,9 +563,6 @@ def execute_harness(instructions, label_map, user_prompt, base_args, available_t
 
             if isinstance(instr, BlockInstruction):
                 log.info("execute_harness: pc=%d block=%s", pc, instr.block.name)
-                _cai_logger.log(1, f"BLOCK  pc={pc}  name={instr.block.name!r}  "
-                                f"model={instr.block.model or '(base)'}  enrich={instr.block.enrich_global_context}")
-                _cai_logger.log(2, f"global_ctx={len(global_messages)} messages before block")
                 try:
                     output = run_block(
                         instr.block,
@@ -589,27 +575,23 @@ def execute_harness(instructions, label_map, user_prompt, base_args, available_t
                     interrupted = True
                     _diag(f"\n[harness] interrupted during block '{instr.block.name}' — stopping.")
                     log.warning("execute_harness: interrupted during block=%s pc=%d", instr.block.name, pc)
-                    _cai_logger.log(1, f"INTERRUPTED during block {instr.block.name!r} at pc={pc}")
                     break
                 block_results[instr.block.name] = output
-                _cai_logger.log(2, f"global_ctx after: {len(global_messages)} messages")
                 pc += 1
 
             elif isinstance(instr, IfGotoInstruction):
                 actual = block_results.get(instr.block_name, "")
-                _cai_logger.log(1, f"IF  pc={pc}  {instr.block_name}=={instr.expected_value!r}  actual={actual!r}")
                 if actual == instr.expected_value:
                     target = label_map.get(instr.label)
                     if target is None:
                         raise RuntimeError(f"harness: undefined label '{instr.label}'")
                     log.info("execute_harness: pc=%d if %s==%r -> goto %s (pc=%d)",
                              pc, instr.block_name, instr.expected_value, instr.label, target)
-                    _cai_logger.log(2, f"JUMP TAKEN: goto {instr.label!r} -> pc={target}")
+                    _cai_logger.log(1, f"GOTO {instr.label!r}  (if {instr.block_name}=={instr.expected_value!r})")
                     pc = target
                 else:
                     log.info("execute_harness: pc=%d if %s==%r -> no jump (actual=%r)",
                              pc, instr.block_name, instr.expected_value, actual)
-                    _cai_logger.log(2, f"no jump (condition false)  pc -> {pc + 1}")
                     pc += 1
 
             elif isinstance(instr, GotoInstruction):
@@ -617,22 +599,19 @@ def execute_harness(instructions, label_map, user_prompt, base_args, available_t
                 if target is None:
                     raise RuntimeError(f"harness: undefined label '{instr.label}'")
                 log.info("execute_harness: pc=%d goto %s (pc=%d)", pc, instr.label, target)
-                _cai_logger.log(1, f"GOTO  pc={pc}  label={instr.label!r}  -> pc={target}")
+                _cai_logger.log(1, f"GOTO {instr.label!r}")
                 pc = target
 
             elif isinstance(instr, LabelInstruction):
-                _cai_logger.log(1, f"LABEL  pc={pc}  name={instr.name!r}")
                 pc += 1  # no-op; just a jump target
 
             elif isinstance(instr, ExitInstruction):
                 log.info("execute_harness: pc=%d exit", pc)
-                _cai_logger.log(1, f"EXIT  pc={pc}")
+                _cai_logger.log(1, "EXIT")
                 break
 
             elif isinstance(instr, CompactInstruction):
                 log.info("execute_harness: pc=%d compact-if-more-than %.0f%%", pc, instr.threshold)
-                _cai_logger.log(1, f"COMPACT  pc={pc}  threshold={instr.threshold}%  "
-                                f"global_ctx={len(global_messages)} messages")
                 _compact_global_if_needed(global_messages, base_args, instr.threshold)
                 pc += 1
 
@@ -640,16 +619,14 @@ def execute_harness(instructions, label_map, user_prompt, base_args, available_t
                 count = no_more_than_counts.get(pc, 0) + 1
                 no_more_than_counts[pc] = count
                 log.info("execute_harness: pc=%d if-more-than %d %s (count=%d)", pc, instr.limit, instr.label, count)
-                _cai_logger.log(1, f"IF-MORE-THAN  pc={pc}  limit={instr.limit}  label={instr.label!r}  count={count}")
                 if count > instr.limit:
                     target = label_map.get(instr.label)
                     if target is None:
                         raise RuntimeError(f"harness: undefined label '{instr.label}'")
                     _diag(f"[harness] if-more-than {instr.limit} exceeded (ran {count} times) — jumping to '{instr.label}'.")
-                    _cai_logger.log(2, f"LIMIT EXCEEDED: count={count} > limit={instr.limit} — goto {instr.label!r} pc={target}")
+                    _cai_logger.log(1, f"GOTO {instr.label!r}  (if-more-than {instr.limit}, count={count})")
                     pc = target
                 else:
-                    _cai_logger.log(2, f"within limit  pc -> {pc + 1}")
                     pc += 1
 
             elif isinstance(instr, ForEachInstruction):
@@ -657,13 +634,13 @@ def execute_harness(instructions, label_map, user_prompt, base_args, available_t
                 items = [line.strip() for line in raw.splitlines() if line.strip()]
                 log.info("execute_harness: pc=%d for-each source=%s items=%d harness=%s",
                          pc, instr.source_block, len(items), instr.harness_path)
-                _cai_logger.log(1, f"FOR-EACH  pc={pc}  source={instr.source_block!r}  "
-                                f"items={len(items)}  harness={instr.harness_path!r}")
+                _cai_logger.log(1, f"FOR-EACH  source={instr.source_block!r}  harness={instr.harness_path!r}  "
+                                f"items={items!r}")
                 sub_instructions, sub_label_map = parse_harness_file(instr.harness_path)
                 results = []
                 for item_idx, item in enumerate(items):
                     _diag(f"[for-each] running: {item!r}")
-                    _cai_logger.log(2, f"FOR-EACH item[{item_idx}/{len(items)}]: {item!r}")
+                    _cai_logger.log(1, f"FOR-EACH [{item_idx + 1}/{len(items)}]  {item!r}")
                     try:
                         with _cai_logger.nest(1):
                             sub_result = execute_harness(
@@ -675,9 +652,7 @@ def execute_harness(instructions, label_map, user_prompt, base_args, available_t
                     except KeyboardInterrupt:
                         interrupted = True
                         _diag(f"\n[harness] interrupted during for-each item {item!r} — stopping.")
-                        _cai_logger.log(2, f"INTERRUPTED during for-each item[{item_idx}] {item!r}")
                         break
-                    _cai_logger.log(2, f"FOR-EACH item[{item_idx}] done  result={sub_result!r}")
                     results.append((item, sub_result))
                 # Inject a single structured message into parent context so subsequent
                 # blocks can reference all results without knowing about the for-each mechanism.
@@ -689,10 +664,9 @@ def execute_harness(instructions, label_map, user_prompt, base_args, available_t
                         "role": "assistant",
                         "content": f"[for-each results: {instr.source_block}]\n{summary}",
                     })
-                    _cai_logger.log(2, f"[for-each→global]  {len(results)} results injected")
+                    _cai_logger.log(1, f"FOR-EACH RESULT  {len(results)} items\n{summary}")
                 if interrupted:
                     break
-                _cai_logger.log(2, f"FOR-EACH complete  pc -> {pc + 1}")
                 pc += 1
 
             else:
@@ -702,7 +676,6 @@ def execute_harness(instructions, label_map, user_prompt, base_args, available_t
         interrupted = True
         _diag("\n[harness] interrupted — stopping.")
         log.warning("execute_harness: interrupted at pc=%d", pc)
-        _cai_logger.log(1, f"TOP-LEVEL INTERRUPT at pc={pc}")
 
     finally:
         signal.signal(signal.SIGINT, original_sigint)

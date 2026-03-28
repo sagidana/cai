@@ -528,7 +528,6 @@ def _compact_messages(messages, model):
     compactable = messages[start_idx:end_idx]
     if len(compactable) < 2:
         log.info("compaction: not enough messages to compact (%d)", len(compactable))
-        _cai_logger.log(2, "TRIM skipped — only {} messages in compactable slice (need ≥2)".format(len(compactable)))
         return
 
     _cai_logger.log(2, "TRIM compacting {} messages (indices {}–{}) into a memory entry".format(
@@ -566,14 +565,10 @@ def _check_context_budget(messages, usage, profile, args, status_callback=None):
     threshold = config.get('context_budget_pct', default_threshold) \
         if 'config' in globals() and config else default_threshold
 
-    _cai_logger.log(3, "CONTEXT {:.0%} used — {:,}/{:,} tokens  (threshold {:.0%})".format(
-        budget_pct, prompt_tokens, context_limit, threshold))
-
     if budget_pct >= threshold:
         log.warning("context budget: %.0f%% used (%d/%d tokens), compacting",
                     budget_pct * 100, prompt_tokens, context_limit)
         msg = f"[context {budget_pct:.0%} >= {threshold:.0%}] compacting..."
-        _cai_logger.log(2, "CONTEXT budget exceeded — triggering compaction")
         if status_callback:
             status_callback(msg)
         else:
@@ -592,8 +587,6 @@ def _warn_if_stuck(tool_calls, call_history, messages):
                        f"{call_history[key]} times and received the same result. "
                        f"Try a different approach or tool to make progress.")
             log.warning("stuck detection: '%s' called %d times with same args", name, call_history[key])
-            _cai_logger.log(2, "[stuck-warning] '{}' called {} times with identical args — injecting warning".format(
-                name, call_history[key]))
             messages.append({"role": "user", "content": warning})
 
 def _emit_status(text, status_callback):
@@ -638,20 +631,6 @@ def call_llm(messages,
              args.strict_format or "none",
              max_turns)
 
-    _cai_logger.log(1, "CALL_LLM START  model={}  tier={}  ctx={:,}  tools={}  max_turns={}  strict_fmt={}".format(
-        args.model,
-        profile['tier'],
-        profile['context'],
-        ', '.join(sorted(allowed_tool_names)) if allowed_tool_names else '(none)',
-        max_turns,
-        getattr(args, 'strict_format', None) or 'none',
-    ))
-    _cai_logger.log(2, "streaming={}  force_tools={}  messages={}".format(
-        'yes' if stream_callback else 'no',
-        getattr(args, 'force_tools', False),
-        len(messages),
-    ))
-
     call_history = {}  # (tool_name, args_str) -> call count, for stuck detection
 
     if stream_callback:
@@ -692,14 +671,9 @@ def call_llm(messages,
             if ctx_callback:
                 ctx_callback(ctx_str)
 
-            _cai_logger.log(2, "tokens: prompt={:,}  completion={:,}  ({} of context window)".format(
-                prompt_tokens, completion_tokens, pct))
-
             if not tool_calls:
                 log.info("call_llm: done turn=%d length=%d", turn, len(content))
                 _cai_logger.log(2, "[assistant]\n{}".format(content))
-                _cai_logger.log(1, "CALL_LLM DONE  turns={}  response_len={:,}".format(
-                    turn, len(content)))
                 _emit_status("ready", status_callback)
                 return content
 
@@ -731,17 +705,10 @@ def call_llm(messages,
                 tool_callback("\n")
 
             # _warn_if_stuck may append a [USER] warning into messages
-            n_before_stuck = len(messages)
             _warn_if_stuck(tool_calls, call_history, messages)
-            if len(messages) > n_before_stuck:
-                _cai_logger.log(2, "[stuck-warning injected]")
 
             # _check_context_budget may compact (replace) messages
-            n_before_compact = len(messages)
             _check_context_budget(messages, usage, profile, args, status_callback)
-            if len(messages) != n_before_compact:
-                _cai_logger.log(2, "COMPACT: {} → {} messages".format(
-                    n_before_compact, len(messages)))
 
     log.warning("call_llm: reached max_turns=%d", max_turns)
     _cai_logger.log(1, "MAX TURNS REACHED ({})".format(max_turns))
