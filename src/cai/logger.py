@@ -603,7 +603,6 @@ class LogViewer:
             try:
                 self.search_pat = re.compile(buf, re.IGNORECASE)
                 self.search_dir = direction
-                self._update_search_matches()
                 self._jump_to_match(direction)
             except re.error:
                 pass
@@ -612,27 +611,40 @@ class LogViewer:
         if not self.search_pat:
             self.search_matches = []
             return
+        with self._lock:
+            entries_snap = list(self.entries)
         self.search_matches = [
-            e.idx for e in self.entries if self.search_pat.search(e.msg)
+            e.idx for e in entries_snap if self.search_pat.search(e.msg)
         ]
 
     def _jump_to_match(self, direction: int) -> None:
-        if not self.search_matches or not self.visible:
+        if not self.search_pat:
             return
-        vis_set = set(self.visible)
-        current = self.visible[self.cursor] if self.cursor < len(self.visible) else -1
-        candidates = [m for m in self.search_matches if m in vis_set]
+        # Always recompute from current state so stale caches don't block jumps.
+        with self._lock:
+            entries_snap    = list(self.entries)
+            current_visible = self._compute_visible()
+        matches = [
+            e.idx for e in entries_snap if self.search_pat.search(e.msg)
+        ]
+        self.search_matches = matches
+        if not matches or not current_visible:
+            return
+        vis_set    = set(current_visible)
+        current    = current_visible[self.cursor] if self.cursor < len(current_visible) else -1
+        candidates = [m for m in matches if m in vis_set]
         if not candidates:
             return
         if direction == 1:
-            ahead = [m for m in candidates if m > current]
+            ahead  = [m for m in candidates if m > current]
             target = ahead[0] if ahead else candidates[0]
         else:
             behind = [m for m in candidates if m < current]
             target = behind[-1] if behind else candidates[-1]
         try:
-            self.cursor = self.visible.index(target)
-            self.follow = False
+            self.cursor  = current_visible.index(target)
+            self.visible = current_visible
+            self.follow  = False
         except ValueError:
             pass
 
