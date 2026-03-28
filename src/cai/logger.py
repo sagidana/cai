@@ -20,6 +20,8 @@ import termios
 import threading
 import time
 import tty
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -89,6 +91,28 @@ class Logger:
 # Module-level singleton
 _instance: Logger | None = None
 
+# Nesting level context variable — incremented by nest() context manager.
+# log() adds this to the caller-supplied level so the same code produces
+# deeper indentation when called from inside a harness block.
+_base: ContextVar[int] = ContextVar('cai_log_base', default=0)
+
+
+@contextmanager
+def nest(delta: int = 1):
+    """Context manager: increase the log nesting level by *delta* for all
+    log() calls made within this block (including transitively called code).
+
+    Usage::
+
+        with nest(1):
+            log(1, "this appears one level deeper than the caller's base")
+    """
+    tok = _base.set(_base.get() + delta)
+    try:
+        yield
+    finally:
+        _base.reset(tok)
+
 
 def init(path: str = LOG_PATH) -> None:
     """Initialise the module-level logger (call once at program start)."""
@@ -97,9 +121,9 @@ def init(path: str = LOG_PATH) -> None:
 
 
 def log(level: int, msg: str) -> None:
-    """Write one log entry.  No-op if init() has not been called."""
+    """Write one log entry at *base_level + level*.  No-op if init() has not been called."""
     if _instance is not None:
-        _instance.log(level, msg)
+        _instance.log(_base.get() + level, msg)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
