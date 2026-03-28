@@ -196,9 +196,13 @@ class LogViewer:
             parent_idx = self._stack[-1]
             parent = self.entries[parent_idx]
             if parent.state == LEAF:
-                # First child arriving → promote to OPEN_PARENT and auto-fold.
+                # First child arriving → promote to OPEN_PARENT.
+                # Auto-fold only when the user is not actively following the
+                # live tail; in follow mode keep everything expanded so new
+                # output streams in fully visible.
                 parent.state = OPEN_PARENT
-                self.fold_set.add(parent_idx)
+                if not self.follow:
+                    self.fold_set.add(parent_idx)
 
         self.entries.append(entry)
         self._stack.append(i)
