@@ -437,26 +437,25 @@ def run_block(block, global_messages, user_prompt, base_args, available_tools):
              block.enrich_global_context, block.prepend_user_prompt,
              block.strict_format, len(prompt), len(global_messages))
 
-    with _cai_logger.nest(1):
-        _cai_logger.log(1, (
-            f"BLOCK  name={block.name!r}  model={block_args.model}  "
-            f"max_turns={block_args.max_turns}  enrich={block.enrich_global_context}  "
-            f"tools={block.tools}\n{prompt}"
-        ))
+    _cai_logger.log(1, (
+        f"BLOCK  name={block.name!r}  model={block_args.model}  "
+        f"max_turns={block_args.max_turns}  enrich={block.enrich_global_context}  "
+        f"tools={block.tools}\n{prompt}"
+    ))
 
-        _status_cb(f"running")
+    _status_cb(f"running")
+    with _cai_logger.nest(1):
         try:
-            with _cai_logger.nest(1):
-                content = call_llm(
-                    local_messages,
-                    block_args,
-                    available_tools,
-                    block_external_mcps,
-                    stream_callback=stream_cb,
-                    tool_callback=_tool_cb,
-                    status_callback=_status_cb,
-                    ctx_callback=_ctx_cb,
-                )
+            content = call_llm(
+                local_messages,
+                block_args,
+                available_tools,
+                block_external_mcps,
+                stream_callback=stream_cb,
+                tool_callback=_tool_cb,
+                status_callback=_status_cb,
+                ctx_callback=_ctx_cb,
+            )
             if use_streaming and _STDERR_TTY:
                 sys.stderr.write('\n')
                 sys.stderr.flush()
@@ -473,13 +472,13 @@ def run_block(block, global_messages, user_prompt, base_args, available_tools):
 
         _cai_logger.log(1, f"BLOCK RESULT  name={block.name!r}  len={len(result)}\n{result}")
 
-        # Enrich: extend global context with ALL messages added during this block
-        # (user prompt, tool calls, tool results, assistant turns, final response).
-        if block.enrich_global_context:
-            new_msgs = len(local_messages) - global_end
-            global_messages.extend(local_messages[global_end:])
-            log.info("run_block: name=%s enriched global_messages with %d new messages (total=%d)",
-                     block.name, new_msgs, len(global_messages))
+    # Enrich: extend global context with ALL messages added during this block
+    # (user prompt, tool calls, tool results, assistant turns, final response).
+    if block.enrich_global_context:
+        new_msgs = len(local_messages) - global_end
+        global_messages.extend(local_messages[global_end:])
+        log.info("run_block: name=%s enriched global_messages with %d new messages (total=%d)",
+                 block.name, new_msgs, len(global_messages))
 
     return result
 
@@ -526,7 +525,8 @@ def _compact_global_if_needed(global_messages, base_args, threshold_pct):
     _cai_logger.log(2, f"COMPACT DONE  {n_before} → {len(global_messages)} messages")
 
 
-def execute_harness(instructions, label_map, user_prompt, base_args, available_tools):
+def execute_harness(instructions, label_map, user_prompt, base_args, available_tools,
+                    harness_path=None):
     """
     Execute a parsed harness program.
 
@@ -535,6 +535,7 @@ def execute_harness(instructions, label_map, user_prompt, base_args, available_t
     :param user_prompt:    the user's task string (from cai -- <prompt>)
     :param base_args:      argparse Namespace from cli.py main()
     :param available_tools: internal MCP tool definitions (module-level global from cli.py)
+    :param harness_path:   path to the .harness.cai file (for display in logs)
     :returns:              the last executed block's output, or ""
     """
     global_messages = []
@@ -543,10 +544,15 @@ def execute_harness(instructions, label_map, user_prompt, base_args, available_t
     interrupted = False
     no_more_than_counts = {}   # pc → execution count
 
+    harness_name = (
+        os.path.basename(harness_path).replace('.harness.cai', '')
+        if harness_path else "?"
+    )
+
     log.info("execute_harness: start instructions=%d user_prompt_len=%d model=%s",
              len(instructions), len(user_prompt or ""), base_args.model)
 
-    _cai_logger.log(1, f"HARNESS  instructions={len(instructions)}  model={base_args.model}")
+    _cai_logger.log(1, f"HARNESS {harness_name}  instructions={len(instructions)}  model={base_args.model}")
 
     original_sigint = signal.getsignal(signal.SIGINT)
 
@@ -651,6 +657,7 @@ def execute_harness(instructions, label_map, user_prompt, base_args, available_t
                                         user_prompt=item,
                                         base_args=base_args,
                                         available_tools=available_tools,
+                                        harness_path=instr.harness_path,
                                     )
                             except KeyboardInterrupt:
                                 interrupted = True

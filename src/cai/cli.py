@@ -936,6 +936,21 @@ def action_prompt(args, available_tools, external_mcps):
     def _stderr_ctx(ctx_str):
         _diag(f"[{ctx_str}]")
 
+    _tools_str = ", ".join(sorted(getattr(args, 'selected_tools', set()) or [])) or "none"
+    _flags = []
+    if getattr(args, 'force_tools', False):
+        _flags.append("force_tools")
+    if getattr(args, 'strict_format', None):
+        _flags.append(f"strict_format={args.strict_format}")
+    if getattr(args, 'non_streaming', False):
+        _flags.append("non_streaming")
+    if getattr(args, 'oneline', False):
+        _flags.append("oneline")
+    _cai_logger.log(1, (
+        f"PROMPT  model={args.model}  max_turns={getattr(args, 'max_turns', None)}  "
+        f"tools=[{_tools_str}]  flags={_flags}\n{args.prompt}"
+    ))
+
     if not args.non_streaming and not args.oneline and not args.strict_format:
         log.info("action_prompt: calling LLM (streaming)")
         try:
@@ -944,14 +959,15 @@ def action_prompt(args, available_tools, external_mcps):
                 sys.stdout.flush()
                 _note_output(chunk)
 
-            call_llm(messages,
-                     args,
-                     available_tools,
-                     external_mcps,
-                     stream_callback=_stream_to_stdout,
-                     tool_callback=_stderr_tool,
-                     status_callback=_stderr_status,
-                     ctx_callback=_stderr_ctx)
+            with _cai_logger.nest(1):
+                call_llm(messages,
+                         args,
+                         available_tools,
+                         external_mcps,
+                         stream_callback=_stream_to_stdout,
+                         tool_callback=_stderr_tool,
+                         status_callback=_stderr_status,
+                         ctx_callback=_stderr_ctx)
             print()
         except LLMError as e:
             print()
@@ -959,13 +975,14 @@ def action_prompt(args, available_tools, external_mcps):
     else:
         log.info("action_prompt: calling LLM (non-streaming)")
         try:
-            content = call_llm(messages,
-                               args,
-                               available_tools,
-                               external_mcps,
-                               tool_callback=_stderr_tool,
-                               status_callback=_stderr_status,
-                               ctx_callback=_stderr_ctx)
+            with _cai_logger.nest(1):
+                content = call_llm(messages,
+                                   args,
+                                   available_tools,
+                                   external_mcps,
+                                   tool_callback=_stderr_tool,
+                                   status_callback=_stderr_status,
+                                   ctx_callback=_stderr_ctx)
             if args.oneline:
                 content = content.replace('\n', ' ')
             print(content)
@@ -1067,13 +1084,19 @@ def action_interactive(args, available_tools, external_mcps):
             screen.show_prompt_placeholder("> ")
             screen.write(_LLM_STYLE)
             screen.start_input_listener()
+            _tools_str = ", ".join(sorted(getattr(args, 'selected_tools', set()) or [])) or "none"
+            _cai_logger.log(1, (
+                f"USER  model={args.model}  max_turns={getattr(args, 'max_turns', None)}  "
+                f"tools=[{_tools_str}]\n{user_input}"
+            ))
             try:
-                response = call_llm(messages, args, available_tools, external_mcps,
-                                    stream_callback=stream_cb,
-                                    status_callback=status_callback,
-                                    tool_callback=tool_cb,
-                                    ctx_callback=ctx_cb,
-                                    interrupt_event=screen._interrupt_event)
+                with _cai_logger.nest(1):
+                    response = call_llm(messages, args, available_tools, external_mcps,
+                                        stream_callback=stream_cb,
+                                        status_callback=status_callback,
+                                        tool_callback=tool_cb,
+                                        ctx_callback=ctx_cb,
+                                        interrupt_event=screen._interrupt_event)
                 if screen._interrupt_event.is_set():
                     screen.write(f"\n{_RESET}{_META_STYLE}[interrupted]{_RESET}\n\n")
                     status_callback("interrupted")
@@ -1197,7 +1220,8 @@ def main():
         instructions, label_map = parse_harness_file(args.harness)
         user_prompt = args.prompt or ""
         with _cai_logger.nest(1):
-            execute_harness(instructions, label_map, user_prompt, args, available_tools)
+            execute_harness(instructions, label_map, user_prompt, args, available_tools,
+                            harness_path=args.harness)
         return
 
     if args.interactive:
