@@ -506,14 +506,23 @@ def _check_regex(pattern, content):
     import re
     return (True, content) if re.search(pattern, content) else (False, content)
 
+def _check_regex_each_line(pattern, content):
+    import re
+
+    for line in content.splitlines():
+        if not re.search(pattern, line):
+            return (False, content)
+    return (True, content)
+
 def enforce_strict_format(call_fn, strict_format, messages=None, max_attempts=4):
     """Retry call_fn() until its content matches strict_format.
     call_fn must return (content, reasoning, tool_calls, usage) or None/falsy.
     messages, if provided, is mutated between retries to inject feedback.
 
     Supported values for strict_format:
-      'json'           -- response must be a valid JSON object
-      'regex:<pattern>'-- response must match the given regex pattern
+      'json'                    -- response must be a valid JSON object
+      'regex:<pattern>'         -- response must match the given regex pattern
+      'regex-each-line:<pattern>' -- apply regex to each line; succeeds if any line matches
     """
     if strict_format == 'json':
         return _retry_until_format(
@@ -526,6 +535,21 @@ def enforce_strict_format(call_fn, strict_format, messages=None, max_attempts=4)
                 "Do not include markdown fences, explanations, or any text outside the JSON."
             ),
             format_label='json',
+            messages=messages,
+            max_attempts=max_attempts,
+        )
+
+    if strict_format and strict_format.startswith('regex-each-line:'):
+        pattern = strict_format[len('regex-each-line:'):]
+        return _retry_until_format(
+            call_fn,
+            system_prompt=f'At least one line of your response must match the regular expression pattern: {pattern}',
+            check_fn=lambda content: _check_regex_each_line(pattern, content),
+            fail_msg_fn=lambda attempt, max_attempts, content: (
+                f"Your previous response did not have any line matching the required pattern (attempt {attempt}/{max_attempts}). "
+                f"Please ensure at least one line matches the regular expression: {pattern}"
+            ),
+            format_label=f'regex-each-line:{pattern}',
             messages=messages,
             max_attempts=max_attempts,
         )
@@ -1246,7 +1270,7 @@ def main():
     parser.add_argument("--oneline", action="store_true",
                         help="print results in a oneline all data.")
     parser.add_argument("--strict-format", default=None,
-                        help="the expected format provided from the LLM response.")
+                        help="the expected format from the LLM response: 'json', 'regex:<pattern>', or 'regex-each-line:<pattern>'.")
     parser.add_argument("--include-reasoning", action="store_true",
                         help="let the action know whether or not to include reasoning in the output.")
     parser.add_argument("--non-streaming", action="store_true",
