@@ -674,7 +674,8 @@ def execute_harness(instructions, label_map, user_prompt, base_args, available_t
                             "role": "assistant",
                             "content": f"[for-each results: {instr.source_block}]\n{summary}",
                         })
-                        _cai_logger.log(1, f"FOR-EACH RESULT  {len(results)} items\n{summary}")
+                        with _cai_logger.nest(1):
+                            _cai_logger.log(1, f"FOR-EACH RESULT  {len(results)} items\n{summary}")
                     if interrupted:
                         break
                     pc += 1
