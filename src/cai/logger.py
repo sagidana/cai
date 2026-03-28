@@ -172,6 +172,8 @@ class LogViewer:
         self.entries: list[Entry] = []
         self._stack:  list[int]  = []       # monotone stack of open ancestor indices
         self.fold_set: set[int]  = set()
+        self.force_open_set: set[int] = set()   # explicitly unfolded; overrides depth_max
+        self._auto_fold_set: set[int] = set()   # auto-folded while follow was off
         self._lock   = threading.Lock()
         self._dirty  = threading.Event()
         self._running = True
@@ -227,6 +229,7 @@ class LogViewer:
                 parent.state = OPEN_PARENT
                 if not self.follow:
                     self.fold_set.add(parent_idx)
+                    self._auto_fold_set.add(parent_idx)
 
         self.entries.append(entry)
         self._stack.append(i)
@@ -237,15 +240,26 @@ class LogViewer:
         """
         Return the list of entry indices that should be shown, respecting
         depth_max and the current fold_set.  Called with self._lock held.
+
+        force_open_set entries bypass depth_max for their subtree: Tab-unfolding
+        an entry that is at or beyond depth_max makes its children visible
+        regardless of depth_max (latest-action wins).
         """
         result: list[int] = []
         skip_until_lvl: int | None = None
+        # Stack of levels of ancestors that are explicitly unfolded (force_open_set).
+        # While this stack is non-empty we bypass depth_max.
+        force_open_stack: list[int] = []
 
         for e in self.entries:
-            # Depth filter (skip silently — does not affect fold-skip state
-            # because any entry that could "close" a fold has lvl <= fold_lvl
-            # <= depth_max and therefore passes this check).
-            if self.depth_max > 0 and e.lvl > self.depth_max:
+            # Pop ancestors whose subtree we have now left.
+            while force_open_stack and e.lvl <= force_open_stack[-1]:
+                force_open_stack.pop()
+
+            in_force_open = bool(force_open_stack)
+
+            # Depth filter — bypassed when inside an explicitly-unfolded subtree.
+            if self.depth_max > 0 and e.lvl > self.depth_max and not in_force_open:
                 continue
 
             # Fold skip
@@ -259,6 +273,8 @@ class LogViewer:
 
             if e.idx in self.fold_set and e.state != LEAF:
                 skip_until_lvl = e.lvl     # hide everything deeper
+            elif e.state != LEAF and e.idx in self.force_open_set:
+                force_open_stack.append(e.lvl)
 
         return result
 
@@ -292,26 +308,41 @@ class LogViewer:
         if e.state == LEAF:
             return
         if entry_idx in self.fold_set:
+            # Unfolding — mark as explicitly opened so depth_max is bypassed.
             self.fold_set.discard(entry_idx)
+            self._auto_fold_set.discard(entry_idx)
+            self.force_open_set.add(entry_idx)
         else:
+            # Folding — remove from force_open so depth override is dropped.
             self.fold_set.add(entry_idx)
+            self._auto_fold_set.discard(entry_idx)
+            self.force_open_set.discard(entry_idx)
 
     def _toggle_fold_recursive(self, entry_idx: int) -> None:
         """zA: toggle fold on this entry and all its descendants."""
         e = self.entries[entry_idx]
         descs = self._descendants(entry_idx)
         if entry_idx in self.fold_set:
-            # Unfold: clear cursor + all descendants
+            # Unfold: clear cursor + all descendants; mark as force-opened.
             self.fold_set.discard(entry_idx)
+            self._auto_fold_set.discard(entry_idx)
+            self.force_open_set.add(entry_idx)
             for j in descs:
                 self.fold_set.discard(j)
+                self._auto_fold_set.discard(j)
+                if self.entries[j].state != LEAF:
+                    self.force_open_set.add(j)
         else:
-            # Fold: set cursor (if not LEAF) + all non-LEAF descendants
+            # Fold: set cursor (if not LEAF) + all non-LEAF descendants.
             if e.state != LEAF:
                 self.fold_set.add(entry_idx)
+                self._auto_fold_set.discard(entry_idx)
+                self.force_open_set.discard(entry_idx)
             for j in descs:
                 if self.entries[j].state != LEAF:
                     self.fold_set.add(j)
+                    self._auto_fold_set.discard(j)
+                self.force_open_set.discard(j)
 
     # ── Display-line helpers ──────────────────────────────────────────────────
 
@@ -654,6 +685,11 @@ class LogViewer:
             self.follow     = False
 
         elif key == "G":                      # bottom + enable follow
+            # Clear folds that were auto-added while browsing so the tail is
+            # fully visible again; manually-folded nodes are left alone.
+            with self._lock:
+                self.fold_set -= self._auto_fold_set
+                self._auto_fold_set.clear()
             self.follow = True
             # render() will position cursor + scroll_row via follow logic
 
@@ -706,10 +742,13 @@ class LogViewer:
         # ── Depth filter ──────────────────────────────────────────────────────
         elif key in "123456789":
             self.depth_max = int(key)
+            # New depth setting overrides any previous explicit unfolds.
+            self.force_open_set.clear()
             self._reanchor(anchor)
 
         elif key == "0":
             self.depth_max = 0
+            self.force_open_set.clear()
             self._reanchor(anchor)
 
         return True
