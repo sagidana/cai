@@ -617,6 +617,26 @@ class LogViewer:
             e.idx for e in entries_snap if self.search_pat.search(e.msg)
         ]
 
+    def _ancestors(self, i: int) -> list[int]:
+        """Return indices of all ancestor entries of entry i.
+        Must be called with self._lock held."""
+        min_lvl_seen = self.entries[i].lvl
+        result = []
+        for j in range(i - 1, -1, -1):
+            if self.entries[j].lvl < min_lvl_seen:
+                result.append(j)
+                min_lvl_seen = self.entries[j].lvl
+        return result
+
+    def _unfold_to(self, entry_idx: int) -> None:
+        """Unfold all folded ancestors of entry_idx so it becomes visible.
+        Must be called with self._lock held."""
+        for anc in self._ancestors(entry_idx):
+            if anc in self.fold_set:
+                self.fold_set.discard(anc)
+                self._auto_fold_set.discard(anc)
+                self.force_open_set.add(anc)
+
     def _jump_to_match(self, direction: int) -> None:
         if not self.search_pat:
             return
@@ -624,26 +644,31 @@ class LogViewer:
         with self._lock:
             entries_snap    = list(self.entries)
             current_visible = self._compute_visible()
+        # Search ALL entries, not just visible ones.
         matches = [
             e.idx for e in entries_snap if self.search_pat.search(e.msg)
         ]
         self.search_matches = matches
-        if not matches or not current_visible:
+        if not matches:
             return
-        vis_set    = set(current_visible)
-        current    = current_visible[self.cursor] if self.cursor < len(current_visible) else -1
-        candidates = [m for m in matches if m in vis_set]
-        if not candidates:
-            return
+        current = current_visible[self.cursor] if self.cursor < len(current_visible) else -1
         if direction == 1:
-            ahead  = [m for m in candidates if m > current]
-            target = ahead[0] if ahead else candidates[0]
+            ahead  = [m for m in matches if m > current]
+            target = ahead[0] if ahead else matches[0]
         else:
-            behind = [m for m in candidates if m < current]
-            target = behind[-1] if behind else candidates[-1]
+            behind = [m for m in matches if m < current]
+            target = behind[-1] if behind else matches[-1]
+        # If target is hidden inside a folded node, unfold its ancestors.
+        vis_set = set(current_visible)
+        if target not in vis_set:
+            with self._lock:
+                self._unfold_to(target)
+                new_visible = self._compute_visible()
+        else:
+            new_visible = current_visible
         try:
-            self.cursor  = current_visible.index(target)
-            self.visible = current_visible
+            self.cursor  = new_visible.index(target)
+            self.visible = new_visible
             self.follow  = False
         except ValueError:
             pass
