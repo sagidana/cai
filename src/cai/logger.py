@@ -183,7 +183,6 @@ class LogViewer:
         self.cursor     = 0         # index into self.visible  (entry-level)
         self.scroll_row = 0         # absolute screen-row at top of viewport
         self.follow     = True
-        self.depth_max  = 0         # 0 = show all levels
         self.search_pat:     re.Pattern | None = None
         self.search_matches: list[int]         = []   # entry indices
         self.search_dir = 1         # 1 = forward, -1 = backward
@@ -239,29 +238,12 @@ class LogViewer:
     def _compute_visible(self) -> list[int]:
         """
         Return the list of entry indices that should be shown, respecting
-        depth_max and the current fold_set.  Called with self._lock held.
-
-        force_open_set entries bypass depth_max for their subtree: Tab-unfolding
-        an entry that is at or beyond depth_max makes its children visible
-        regardless of depth_max (latest-action wins).
+        the current fold_set.  Called with self._lock held.
         """
         result: list[int] = []
         skip_until_lvl: int | None = None
-        # Stack of levels of ancestors that are explicitly unfolded (force_open_set).
-        # While this stack is non-empty we bypass depth_max.
-        force_open_stack: list[int] = []
 
         for e in self.entries:
-            # Pop ancestors whose subtree we have now left.
-            while force_open_stack and e.lvl <= force_open_stack[-1]:
-                force_open_stack.pop()
-
-            in_force_open = bool(force_open_stack)
-
-            # Depth filter — bypassed when inside an explicitly-unfolded subtree.
-            if self.depth_max > 0 and e.lvl > self.depth_max and not in_force_open:
-                continue
-
             # Fold skip
             if skip_until_lvl is not None:
                 if e.lvl <= skip_until_lvl:
@@ -273,8 +255,6 @@ class LogViewer:
 
             if e.idx in self.fold_set and e.state != LEAF:
                 skip_until_lvl = e.lvl     # hide everything deeper
-            elif e.state != LEAF and e.idx in self.force_open_set:
-                force_open_stack.append(e.lvl)
 
         return result
 
@@ -343,6 +323,37 @@ class LogViewer:
                     self.fold_set.add(j)
                     self._auto_fold_set.discard(j)
                 self.force_open_set.discard(j)
+
+    def _apply_depth(self, depth: int) -> None:
+        """
+        One-time action: fold/unfold entries relative to the minimum level
+        present in the log.  depth=1 shows only the shallowest level,
+        depth=2 shows 2 levels deep from the minimum, etc.
+        depth=0 unfolds everything.
+        Must be called with self._lock held.
+        """
+        if depth == 0:
+            self.fold_set.clear()
+            self._auto_fold_set.clear()
+            self.force_open_set.clear()
+            return
+        if not self.entries:
+            return
+        min_lvl = min(e.lvl for e in self.entries)
+        # Absolute level cutoff: entries at this level and deeper get folded.
+        cutoff = min_lvl + depth - 1
+        for e in self.entries:
+            if e.state == LEAF:
+                continue
+            if e.lvl < cutoff:
+                # Unfold: let children be visible
+                self.fold_set.discard(e.idx)
+                self._auto_fold_set.discard(e.idx)
+            else:
+                # Fold: hide children (level >= cutoff)
+                self.fold_set.add(e.idx)
+                self._auto_fold_set.discard(e.idx)
+                self.force_open_set.discard(e.idx)
 
     # ── Display-line helpers ──────────────────────────────────────────────────
 
@@ -530,12 +541,11 @@ class LogViewer:
         pos_str    = f"{self.cursor + 1}/{n}" if n else "0/0"
         total_str  = f"[{len(entries_snap)} total]"
         follow_str = " \033[32mFOLLOW\033[0m" if self.follow    else ""
-        depth_str  = f" depth:{self.depth_max}" if self.depth_max else ""
         srch_str   = (f" /{self.search_pat.pattern}" if self.search_pat else "")
         status     = (
             f"{_BOLD}cai log{_RESET}  {self.path}"
             f"  {pos_str} {total_str}"
-            f"{follow_str}{depth_str}{srch_str}"
+            f"{follow_str}{srch_str}"
         )
         out.append(status[:cols])
 
@@ -739,16 +749,15 @@ class LogViewer:
         elif key == "N":
             self._jump_to_match(-self.search_dir)
 
-        # ── Depth filter ──────────────────────────────────────────────────────
+        # ── Depth action (one-time fold to depth) ─────────────────────────────
         elif key in "123456789":
-            self.depth_max = int(key)
-            # New depth setting overrides any previous explicit unfolds.
-            self.force_open_set.clear()
+            with self._lock:
+                self._apply_depth(int(key))
             self._reanchor(anchor)
 
         elif key == "0":
-            self.depth_max = 0
-            self.force_open_set.clear()
+            with self._lock:
+                self._apply_depth(0)
             self._reanchor(anchor)
 
         return True
