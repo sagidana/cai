@@ -130,8 +130,17 @@ class LogViewer:
       Main thread    – render + input event loop.
 
     Shared state protected by self._lock: entries, _stack, fold_set.
-    Main-thread-only state (no lock needed): visible, cursor, scroll, follow,
-      depth_max, search_pat, search_matches.
+    Main-thread-only state (no lock needed): visible, cursor, scroll_row,
+      follow, depth_max, search_pat, search_matches.
+
+    Scroll model
+    ────────────
+      scroll_row  — absolute screen-row offset of the top of the viewport.
+                    One "screen row" = one terminal line.  Multi-line entries
+                    occupy as many screen rows as they need.
+      cursor      — index into self.visible (entry-level, not row-level).
+                    j/k navigate entries; Ctrl-u/d scroll rows and then move
+                    the cursor to the first entry in the new viewport.
     """
 
     def __init__(self, path: str) -> None:
@@ -144,14 +153,19 @@ class LogViewer:
         self._running = True
 
         # View state (main thread only)
-        self.visible:  list[int] = []
-        self.cursor    = 0          # index into self.visible
-        self.scroll    = 0          # top-of-screen index into self.visible
-        self.follow    = True
-        self.depth_max = 0          # 0 = show all levels
+        self.visible:   list[int] = []
+        self.cursor     = 0         # index into self.visible  (entry-level)
+        self.scroll_row = 0         # absolute screen-row at top of viewport
+        self.follow     = True
+        self.depth_max  = 0         # 0 = show all levels
         self.search_pat:     re.Pattern | None = None
         self.search_matches: list[int]         = []   # entry indices
         self.search_dir = 1         # 1 = forward, -1 = backward
+
+        # Cached layout (updated at start of every _render call, main thread only)
+        self._entry_row_start: list[int] = []   # abs row of first line of visible[i]
+        self._row_spans:       list[int] = []   # number of screen rows for visible[i]
+        self._total_rows       = 0              # sum of all _row_spans
 
         self._rows = 24
         self._cols = 80
@@ -271,85 +285,184 @@ class LogViewer:
                 if self.entries[j].state != LEAF:
                     self.fold_set.add(j)
 
+    # ── Display-line helpers ──────────────────────────────────────────────────
+
+    def _entry_display_lines(
+        self,
+        e: Entry,
+        cols: int,
+        fold_snap: set[int],
+        entries_snap: list[Entry],
+    ) -> list[tuple[str, str]]:
+        """
+        Return the screen lines for one entry as a list of (main_text, suffix).
+
+          main_text — plain text (no ANSI); search highlight is applied by caller.
+          suffix    — ready-to-print ANSI string appended after main_text
+                      (used for the fold indicator; empty for normal lines).
+
+        Folded entries always produce exactly 1 tuple.
+        Unfolded entries expand \\n and wrap long lines; all display lines
+        beyond the first are prefixed with  indent + "│ "  so boundaries
+        between entries are always visible.
+        """
+        indent     = "  " * (e.lvl - 1)
+        indent_len = len(indent)
+
+        # ── Folded: one line ──────────────────────────────────────────────────
+        if e.idx in fold_snap and e.state != LEAF:
+            hidden        = self._hidden_count(entries_snap, e.idx)
+            live          = " live\u2026" if e.state == OPEN_PARENT else ""
+            ind_plain     = f"  \u25b6 [{hidden} hidden{live}]"
+            ind_ansi      = f"  {_DIM}\u25b6 [{hidden} hidden{live}]{_RESET}"
+            avail         = max(0, cols - indent_len - len(ind_plain))
+            first_line    = e.msg.split("\n")[0]
+            return [(indent + first_line[:avail], ind_ansi)]
+
+        # ── Unfolded: full multi-line expansion ───────────────────────────────
+        raw_lines = e.msg.split("\n")
+        result: list[tuple[str, str]] = []
+
+        for line_num, raw_line in enumerate(raw_lines):
+            pfx        = indent if line_num == 0 else indent + "\u2502 "
+            text_avail = max(1, cols - len(pfx))
+
+            if not raw_line:
+                result.append((pfx, ""))
+                continue
+
+            pos            = 0
+            first_segment  = True
+            while pos < len(raw_line):
+                chunk = raw_line[pos : pos + text_avail]
+                result.append((pfx + chunk, ""))
+                pos += text_avail
+                if first_segment and pos < len(raw_line):
+                    # Wrapping within one raw line: use continuation prefix
+                    pfx        = indent + "\u2502 "
+                    text_avail = max(1, cols - len(pfx))
+                first_segment = False
+
+        return result if result else [(indent, "")]
+
     # ── Rendering ─────────────────────────────────────────────────────────────
 
     def _render(self) -> None:
-        rows, cols = self._rows, self._cols
-        content_rows = rows - 2     # bottom 2 rows: status bar + help bar
+        rows, cols    = self._rows, self._cols
+        content_rows  = rows - 2          # bottom 2 rows: status bar + help bar
 
-        # Snapshot shared state
+        # ── Snapshot shared state ─────────────────────────────────────────────
         with self._lock:
-            self.visible   = self._compute_visible()
-            entries_snap   = list(self.entries)
-            fold_snap      = set(self.fold_set)
+            self.visible  = self._compute_visible()
+            entries_snap  = list(self.entries)
+            fold_snap     = set(self.fold_set)
 
         n = len(self.visible)
 
-        # ── Scroll / cursor management ────────────────────────────────────────
-        if self.follow and n > 0:
-            self.cursor = n - 1
-            self.scroll = max(0, n - content_rows)
+        # ── Build row-layout index ────────────────────────────────────────────
+        # entry_row_start[i]  — absolute screen-row where visible[i] begins
+        # row_spans[i]        — how many screen rows visible[i] occupies
+        entry_row_start: list[int] = []
+        row_spans:       list[int] = []
+        # Also build a flat map: abs_row → (vis_i, line_idx, main_text, suffix)
+        # We build it lazily during rendering to avoid two passes.
+        total_rows = 0
+        for i, entry_idx in enumerate(self.visible):
+            e       = entries_snap[entry_idx]
+            lines   = self._entry_display_lines(e, cols, fold_snap, entries_snap)
+            span    = len(lines)
+            entry_row_start.append(total_rows)
+            row_spans.append(span)
+            total_rows += span
 
+        # Cache for _handle_key (zz/zt/zb, Ctrl-d/u need these)
+        self._entry_row_start = entry_row_start
+        self._row_spans       = row_spans
+        self._total_rows      = total_rows
+
+        # ── Follow mode ───────────────────────────────────────────────────────
+        if self.follow and n > 0:
+            self.cursor     = n - 1
+            self.scroll_row = max(0, total_rows - content_rows)
+
+        # ── Clamp cursor ──────────────────────────────────────────────────────
         if n == 0:
-            self.cursor = 0
-            self.scroll = 0
+            self.cursor     = 0
+            self.scroll_row = 0
         else:
             self.cursor = max(0, min(self.cursor, n - 1))
-            if self.cursor < self.scroll:
-                self.scroll = self.cursor
-            if self.cursor >= self.scroll + content_rows:
-                self.scroll = self.cursor - content_rows + 1
+            cur_start   = entry_row_start[self.cursor]
+            cur_end     = cur_start + row_spans[self.cursor]
 
+            # Cursor entry scrolled above viewport → snap scroll to its first line
+            if cur_start < self.scroll_row:
+                self.scroll_row = cur_start
+            # Cursor entry's first line scrolled below viewport → scroll down
+            elif cur_start >= self.scroll_row + content_rows:
+                entry_h = row_spans[self.cursor]
+                if entry_h <= content_rows:
+                    self.scroll_row = cur_end - content_rows
+                else:
+                    self.scroll_row = cur_start
+
+        self.scroll_row = max(0, self.scroll_row)
+
+        # ── Build screen_row_map ──────────────────────────────────────────────
+        # screen_row_map[sr] = (vis_i, main_text, suffix) or None
+        screen_row_map: list[tuple[int, str, str] | None] = [None] * content_rows
+
+        for i, entry_idx in enumerate(self.visible):
+            e           = entries_snap[entry_idx]
+            lines       = self._entry_display_lines(e, cols, fold_snap, entries_snap)
+            abs_start   = entry_row_start[i]
+            abs_end     = abs_start + len(lines)
+
+            # Skip entries entirely above or below viewport
+            if abs_end <= self.scroll_row:
+                continue
+            if abs_start >= self.scroll_row + content_rows:
+                break
+
+            for li, (main_text, suffix) in enumerate(lines):
+                abs_row = abs_start + li
+                sr      = abs_row - self.scroll_row
+                if 0 <= sr < content_rows:
+                    screen_row_map[sr] = (i, main_text, suffix)
+
+        # ── Draw content rows ─────────────────────────────────────────────────
         out: list[str] = [_HIDE_CUR]
 
-        # ── Content rows ──────────────────────────────────────────────────────
-        for row in range(content_rows):
-            vis_i = self.scroll + row
-            out.append(_goto(row + 1, 1))
+        for sr in range(content_rows):
+            out.append(_goto(sr + 1, 1))
             out.append(_CLEAR_LINE)
 
-            if n == 0 and row == content_rows // 2:
-                waiting = f"Waiting for entries in {self.path} …"
-                pad = max(0, (cols - len(waiting)) // 2)
-                out.append(_DIM + " " * pad + waiting + _RESET)
+            cell = screen_row_map[sr]
+
+            if cell is None:
+                # Empty row — show "waiting" message centred when log is empty
+                if n == 0 and sr == content_rows // 2:
+                    waiting = f"Waiting for entries in {self.path} \u2026"
+                    pad     = max(0, (cols - len(waiting)) // 2)
+                    out.append(_DIM + " " * pad + waiting + _RESET)
                 continue
 
-            if vis_i >= n:
-                continue
-
-            entry_idx = self.visible[vis_i]
-            e         = entries_snap[entry_idx]
+            vis_i, main_text, suffix = cell
             is_cursor = (vis_i == self.cursor)
 
-            indent    = "  " * (e.lvl - 1)
-            flat_msg  = e.msg.replace("\n", " ").replace("\r", "")
-
-            # Fold indicator
-            fold_suffix = ""
-            if entry_idx in fold_snap and e.state != LEAF:
-                hidden = self._hidden_count(entries_snap, entry_idx)
-                live   = " live\u2026" if e.state == OPEN_PARENT else ""
-                fold_suffix = f"  {_DIM}\u25b6 [{hidden} hidden{live}]{_RESET}"
-
-            # Max usable width for text
-            avail = cols - len(indent) - 2
-            if avail < 1:
-                avail = 1
-
-            # Search highlight
+            # Search highlight on main_text
             if self.search_pat:
-                def _hl(m: re.Match) -> str:
-                    return f"{_YELLOW_BOLD}{m.group()}{_RESET}"
-                display_msg = self.search_pat.sub(_hl, flat_msg[:avail])
+                highlighted = self.search_pat.sub(
+                    lambda m: f"{_YELLOW_BOLD}{m.group()}{_RESET}", main_text
+                )
             else:
-                display_msg = flat_msg[:avail]
-
-            line_body = indent + display_msg + fold_suffix
+                highlighted = main_text
 
             if is_cursor:
-                out.append(f"{_REV}{indent}{display_msg}{_RESET}{fold_suffix}")
+                # Pad to full width so reverse-video fills the whole line
+                pad     = max(0, cols - len(main_text))
+                out.append(f"{_REV}{highlighted}{' ' * pad}{_RESET}{suffix}")
             else:
-                out.append(line_body)
+                out.append(highlighted + suffix)
 
         # ── Status bar ────────────────────────────────────────────────────────
         out.append(_goto(rows - 1, 1))
@@ -357,7 +470,7 @@ class LogViewer:
 
         pos_str    = f"{self.cursor + 1}/{n}" if n else "0/0"
         total_str  = f"[{len(entries_snap)} total]"
-        follow_str = " \033[32mFOLLOW\033[0m"  if self.follow    else ""
+        follow_str = " \033[32mFOLLOW\033[0m" if self.follow    else ""
         depth_str  = f" depth:{self.depth_max}" if self.depth_max else ""
         srch_str   = (f" /{self.search_pat.pattern}" if self.search_pat else "")
         status     = (
@@ -470,40 +583,51 @@ class LogViewer:
             return False
 
         # ── Vertical navigation ───────────────────────────────────────────────
-        elif key in ("j", "\033[B"):          # down
+        elif key in ("j", "\033[B"):          # down one entry
             if self.cursor < n - 1:
                 self.cursor += 1
             self.follow = False
-            if self.cursor >= self.scroll + content_rows:
-                self.scroll = self.cursor - content_rows + 1
+            # Scroll so the new cursor entry's first line is visible;
+            # render() enforces this but we nudge scroll_row here too so
+            # the screen doesn't jump to the entry start unnecessarily.
+            if n > 0 and self.cursor < len(self._entry_row_start):
+                cur_start = self._entry_row_start[self.cursor]
+                if cur_start >= self.scroll_row + content_rows:
+                    self.scroll_row = cur_start - content_rows + 1
 
-        elif key in ("k", "\033[A"):          # up
+        elif key in ("k", "\033[A"):          # up one entry
             if self.cursor > 0:
                 self.cursor -= 1
-            if self.cursor < self.scroll:
-                self.scroll = self.cursor
+            self.follow = False
+            if n > 0 and self.cursor < len(self._entry_row_start):
+                cur_start = self._entry_row_start[self.cursor]
+                if cur_start < self.scroll_row:
+                    self.scroll_row = cur_start
+
+        elif key == "\x04":                   # Ctrl-d  half-page down (rows)
+            step            = max(1, content_rows // 2)
+            self.scroll_row = min(
+                max(0, self._total_rows - content_rows),
+                self.scroll_row + step,
+            )
+            # Move cursor to first entry that starts at or after new scroll_row
+            self.cursor = self._first_entry_at_or_after(self.scroll_row)
             self.follow = False
 
-        elif key == "\x04":                   # Ctrl-d  half-page down
-            step = max(1, content_rows // 2)
-            self.cursor = min(n - 1, self.cursor + step) if n else 0
-            self.scroll = min(max(0, n - content_rows), self.scroll + step)
-            self.follow = False
-
-        elif key == "\x15":                   # Ctrl-u  half-page up
-            step = max(1, content_rows // 2)
-            self.cursor = max(0, self.cursor - step)
-            self.scroll = max(0, self.scroll - step)
-            self.follow = False
+        elif key == "\x15":                   # Ctrl-u  half-page up (rows)
+            step            = max(1, content_rows // 2)
+            self.scroll_row = max(0, self.scroll_row - step)
+            self.cursor     = self._first_entry_at_or_after(self.scroll_row)
+            self.follow     = False
 
         elif key == "g":                      # top
-            self.cursor = 0
-            self.scroll = 0
-            self.follow = False
+            self.cursor     = 0
+            self.scroll_row = 0
+            self.follow     = False
 
         elif key == "G":                      # bottom + enable follow
             self.follow = True
-            # render() will set cursor + scroll via follow logic
+            # render() will position cursor + scroll_row via follow logic
 
         elif key == "f":                      # toggle follow
             self.follow = not self.follow
@@ -521,15 +645,22 @@ class LogViewer:
                 with self._lock:
                     self._toggle_fold_recursive(self.visible[self.cursor])
                 self._reanchor(anchor)
-            elif next_key == "z":             # zz — cursor to centre
-                self.scroll = max(0, self.cursor - content_rows // 2)
+            elif next_key == "z" and self.cursor < len(self._entry_row_start):
+                # zz — cursor entry centred in viewport
+                cur_start   = self._entry_row_start[self.cursor]
+                span        = self._row_spans[self.cursor] if self.cursor < len(self._row_spans) else 1
+                self.scroll_row = max(0, cur_start - (content_rows - span) // 2)
                 self.follow = False
-            elif next_key == "t":             # zt — cursor to top
-                self.scroll = self.cursor
-                self.follow = False
-            elif next_key == "b":             # zb — cursor to bottom
-                self.scroll = max(0, self.cursor - content_rows + 1)
-                self.follow = False
+            elif next_key == "t" and self.cursor < len(self._entry_row_start):
+                # zt — cursor entry at top of viewport
+                self.scroll_row = self._entry_row_start[self.cursor]
+                self.follow     = False
+            elif next_key == "b" and self.cursor < len(self._entry_row_start):
+                # zb — cursor entry at bottom of viewport
+                cur_start   = self._entry_row_start[self.cursor]
+                span        = self._row_spans[self.cursor] if self.cursor < len(self._row_spans) else 1
+                self.scroll_row = max(0, cur_start + span - content_rows)
+                self.follow     = False
 
         # ── Search ────────────────────────────────────────────────────────────
         elif key == "/":
@@ -554,6 +685,16 @@ class LogViewer:
             self._reanchor(anchor)
 
         return True
+
+    def _first_entry_at_or_after(self, abs_row: int) -> int:
+        """
+        Return the index into self.visible of the first entry whose first line
+        is at or after abs_row.  Falls back to the last entry if none qualifies.
+        """
+        for i, start in enumerate(self._entry_row_start):
+            if start >= abs_row:
+                return i
+        return max(0, len(self._entry_row_start) - 1)
 
     def _reanchor(self, anchor: int | None) -> None:
         """
