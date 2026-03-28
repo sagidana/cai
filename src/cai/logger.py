@@ -15,6 +15,7 @@ import os
 import re
 import select
 import signal
+import subprocess
 import sys
 import termios
 import threading
@@ -210,6 +211,10 @@ class LogViewer:
 
         self._rows = 24
         self._cols = 80
+
+        # Yank flash state (main thread only)
+        self._yank_flash_until = 0.0
+        self._yank_flash_msg   = ""
 
         # /dev/tty for keyboard input even when stdin is piped
         self._tty_file = open("/dev/tty", "rb+", buffering=0)
@@ -559,10 +564,14 @@ class LogViewer:
         total_str  = f"[{len(entries_snap)} total]"
         follow_str = " \033[1;32mFOLLOW\033[0m" if self.follow else ""
         srch_str   = (f" /{self.search_pat.pattern}" if self.search_pat else "")
+        if self._yank_flash_until > time.monotonic():
+            yank_str = f"  \033[1;33m{self._yank_flash_msg}\033[0m"
+        else:
+            yank_str = ""
         status     = (
             f"\033[1;36mcai log\033[0m  {_DIM}{self.path}{_RESET}"
             f"  {pos_str} {total_str}"
-            f"{follow_str}{srch_str}"
+            f"{follow_str}{srch_str}{yank_str}"
         )
         out.append(status[:cols])
 
@@ -571,7 +580,7 @@ class LogViewer:
         out.append(_CLEAR_LINE)
         help_txt = (
             " Tab:fold  zA:fold-all  zz/zt/zb:align  /:search  ?:search\u2191  "
-            "n/N:next/prev  0:depth1  1\u20138:depth2\u20139  9:all  F:follow  G:bottom  q:quit"
+            "n/N:next/prev  0:depth1  1\u20138:depth2\u20139  9:all  F:follow  G:bottom  y:yank  q:quit"
         )
         out.append(_DIM + help_txt[:cols] + _RESET)
 
@@ -690,6 +699,30 @@ class LogViewer:
         except ValueError:
             pass
 
+    # ── Yank ──────────────────────────────────────────────────────────────────
+
+    def _yank(self, text: str) -> bool:
+        """Copy *text* to the system clipboard. Returns True on success."""
+        candidates = [
+            ["wl-copy"],
+            ["xclip", "-selection", "clipboard"],
+            ["xsel", "--clipboard", "--input"],
+            ["pbcopy"],
+        ]
+        for cmd in candidates:
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    input=text.encode(),
+                    capture_output=True,
+                    timeout=2,
+                )
+                if proc.returncode == 0:
+                    return True
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                continue
+        return False
+
     # ── Input dispatch ────────────────────────────────────────────────────────
 
     def _handle_key(self, key: str) -> bool:
@@ -807,6 +840,13 @@ class LogViewer:
             with self._lock:
                 self._apply_depth((digit + 1) % 10)
             self._reanchor(anchor)
+
+        # ── Yank current entry text to clipboard ──────────────────────────────
+        elif key == "y" and n > 0:
+            msg = self.entries[self.visible[self.cursor]].msg
+            ok  = self._yank(msg)
+            self._yank_flash_msg   = "yanked!" if ok else "yank failed (no clipboard tool)"
+            self._yank_flash_until = time.monotonic() + 1.5
 
         return True
 
