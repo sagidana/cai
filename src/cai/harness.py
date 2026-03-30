@@ -36,6 +36,7 @@ harness.cai format overview:
 
 import copy
 import logging
+import json
 import os
 import re
 import signal
@@ -472,13 +473,20 @@ def run_block(block, global_messages, user_prompt, base_args, available_tools):
 
         _cai_logger.log(1, f"BLOCK RESULT  name={block.name!r}  len={len(result)}\n{result}")
 
-    # Enrich: extend global context with ALL messages added during this block
-    # (user prompt, tool calls, tool results, assistant turns, final response).
-    if block.enrich_global_context:
-        new_msgs = len(local_messages) - global_end
-        global_messages.extend(local_messages[global_end:])
-        log.info("run_block: name=%s enriched global_messages with %d new messages (total=%d)",
-                 block.name, new_msgs, len(global_messages))
+        # Enrich: extend global context with ALL messages added during this block
+        # (user prompt, tool calls, tool results, assistant turns, final response).
+        if block.enrich_global_context:
+            new_msgs = len(local_messages) - global_end
+            log.info("run_block: name=%s enriched global_messages with %d new messages (total=%d)",
+                     block.name,
+                     new_msgs,
+                     len(global_messages))
+
+            messages_to_enrich = local_messages[global_end:]
+            messages_to_enrich.append({"role": "assistant", "content": result})
+
+            global_messages.extend(messages_to_enrich)
+            _cai_logger.log(2, f"BLOCK ENRICHMENT: {json.dumps(messages_to_enrich, indent=2)}")
 
     return result
 

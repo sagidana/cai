@@ -380,11 +380,11 @@ def _retry_until_format(call_fn, system_prompt, check_fn, fail_msg_fn, format_la
     messages     -- conversation list mutated between retries; may be None
     max_attempts -- maximum number of LLM calls
     """
-    if messages is not None:
-        messages.insert(0, {'role': 'system', 'content': system_prompt})
 
     for attempt in range(1, max_attempts + 1):
+        if messages: messages.insert(0, {'role': 'system', 'content': system_prompt})
         result = call_fn()
+        if messages: messages.pop(0) # cleanup
         if not result:
             return result
         orig_content, reasoning, tool_calls, usage = result
