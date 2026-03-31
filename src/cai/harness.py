@@ -451,8 +451,10 @@ def run_block(block, global_messages, user_prompt, base_args, available_tools):
     _cai_logger.log(1, (
         f"BLOCK  name={block.name!r}  model={block_args.model}  "
         f"max_turns={block_args.max_turns}  enrich={block.enrich_mode.value}  "
-        f"tools={block.tools}\n{prompt}"
+        f"tools={block.tools}"
     ))
+
+    _cai_logger.log(2, f"BLOCK PROMPT  {prompt}")
 
     _status_cb(f"running")
     _cai_logger.push_nest(1)
