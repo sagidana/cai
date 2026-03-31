@@ -481,11 +481,8 @@ def run_block(block, global_messages, user_prompt, base_args, available_tools):
         log.info("run_block: name=%s done result_len=%d result_preview=%r",
                  block.name, len(result), result[:120])
 
-        _cai_logger.log(1, f"BLOCK RESULT  name={block.name!r}  len={len(result)}\n{result}")
-
-        _cai_logger.log(1, f"BLOCK ENRICHMENT  ({block.enrich_mode})")
-
         # Enrich global_messages according to the block's enrich_mode.
+        _cai_logger.log(1, f"BLOCK ENRICHMENT  ({block.enrich_mode})")
         if block.enrich_mode == EnrichMode.FULL:
             # All messages added during this block: user prompt + tool turns + final response.
             # strict_format retry feedback has already been stripped from local_messages by cli.py.
@@ -508,6 +505,9 @@ def run_block(block, global_messages, user_prompt, base_args, available_tools):
 
         elif block.enrich_mode == EnrichMode.NONE:
             log.info("run_block: name=%s enrich=none", block.name)
+
+        # add the actual block response to the log
+        _cai_logger.log(1, f"BLOCK RESULT  name={block.name!r}  len={len(result)}\n{result}")
 
     return result
 
@@ -699,11 +699,13 @@ def execute_harness(instructions, label_map, user_prompt, base_args, available_t
                         summary = "\n".join(
                             f"─── task: {item}\n    → {result}" for item, result in results
                         )
-                        global_messages.append({
-                            "role": "system",
-                            "content": f"[for-each results: {instr.source_block}]\n{summary}",
-                        })
+                        message_to_enrich = { "role": "system",
+                                              "content": f"[for-each results: {instr.source_block}]\n{summary}" }
+                        global_messages.append(message_to_enrich)
+
                         with _cai_logger.nest(1):
+                            _cai_logger.log(1, f"FOR-EACH ENRICHMENT")
+                            _cai_logger.log(2, json.dumps(message_to_enrich, indent=2))
                             _cai_logger.log(1, f"FOR-EACH RESULT  {len(results)} items\n{summary}")
                     if interrupted:
                         break
