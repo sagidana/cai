@@ -16,7 +16,7 @@
 #     detected and traced as distinct "deferred" hops
 #   - Obfuscation: works with short names (La;->b()V), warns when names look obfuscated
 #   - Context efficiency: BFS expands one layer per sub-harness (isolated context);
-#     uses read_lines not read; --dont-enrich-global-context on transient blocks
+#     uses read_lines not read; --enrich none on transient blocks
 #
 # Architecture:
 #   1. classify  — resolve descriptor + classify query → emit JSON envelope directly
@@ -33,7 +33,7 @@
 ---
     --name "classify"
     --prepend-user-prompt
-    --enrich-global-context
+    --enrich full
     --tools smali_resolve_descriptor, list_files, pattern_search
     --max-turns 35
     --force-tools
@@ -92,7 +92,7 @@
 
 ---
     --name "verify"
-    --dont-enrich-global-context
+    --enrich none
     --strict-format "regex:^(ok|error)$"
     --max-turns 2
     --system-prompt "You are a strict quality gate. Answer only 'ok' or 'error'."
@@ -121,7 +121,7 @@ compact-if-more-than 40
 
 ---
     --name "bfs_continue"
-    --dont-enrich-global-context
+    --enrich none
     --strict-format "regex:^(expand|done)$"
     --max-turns 2
     --system-prompt "You are a BFS controller. Answer only 'expand' or 'done'."
@@ -154,7 +154,7 @@ bfs_next_layer:
 
 ---
     --name "next_frontier"
-    --dont-enrich-global-context
+    --enrich none
     --max-turns 5
     --system-prompt "You are a BFS frontier manager. Emit JSON envelope lines for the next expansion round — one per non-visited descriptor. No explanations."
     '''
@@ -188,7 +188,7 @@ synthesize:
 ---
     --name "synthesize"
     --prepend-user-prompt
-    --enrich-global-context
+    --enrich full
     --tools smali_find_callers, smali_find_callees, smali_find_implementations, read_lines
     --max-turns 30
     --system-prompt "You are a reverse-engineering analyst specialising in Android smali bytecode. Produce a precise, structured cross-reference analysis. Use read_lines to spot-read specific method bodies when needed — do not read full files."
@@ -264,7 +264,7 @@ error_report:
 
 ---
     --name "error_report"
-    --dont-enrich-global-context
+    --enrich none
     --max-turns 3
     --system-prompt "You are a helpful assistant explaining why a smali XRef query could not be completed."
     '''

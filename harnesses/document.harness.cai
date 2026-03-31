@@ -18,7 +18,7 @@ gather-code:
 ---
     --name "gather-code"
     --prepend-user-prompt
-    --enrich-global-context
+    --enrich full
     --tools read, read_lines, list_files, pattern_search, symbol_search, file_code_outline
     --max-turns 100
     --force-tools
@@ -59,7 +59,7 @@ gather-conventions:
 
 ---
     --name "gather-conventions"
-    --enrich-global-context
+    --enrich full
     --tools read, read_lines, list_files, pattern_search
     --max-turns 50
     --force-tools
@@ -98,7 +98,7 @@ compact-if-more-than 30
 
 ---
     --name "outline"
-    --enrich-global-context
+    --enrich full
     --max-turns 20
     --system-prompt "You are a technical writer planning a documentation structure. A good outline ensures every public interface is covered and nothing important is omitted."
     '''
@@ -144,7 +144,7 @@ compact-if-more-than 30
 
 ---
     --name "validate-outline"
-    --dont-enrich-global-context
+    --enrich none
     --strict-format "regex:^(ok|incomplete)$"
     --max-turns 5
     --system-prompt "You are a senior technical writer reviewing a documentation outline. Answer only 'ok' or 'incomplete'. No punctuation, no explanation."
@@ -177,7 +177,7 @@ write:
 
 ---
     --name "write"
-    --enrich-global-context
+    --enrich full
     --tools read, read_lines, list_files, edit_file, create_file
     --max-turns 100
     --system-prompt "You are a technical writer producing final documentation. You write with precision, clarity, and consistency. Every statement must be accurate — never approximate. Follow the project's conventions exactly."

@@ -18,7 +18,7 @@ gather-source:
 ---
     --name "gather-source"
     --prepend-user-prompt
-    --enrich-global-context
+    --enrich full
     --tools read, read_lines, list_files, pattern_search, symbol_search, file_code_outline
     --max-turns 100
     --force-tools
@@ -52,7 +52,7 @@ gather-tests:
 
 ---
     --name "gather-tests"
-    --enrich-global-context
+    --enrich full
     --tools read, read_lines, list_files, pattern_search
     --max-turns 50
     --force-tools
@@ -89,7 +89,7 @@ compact-if-more-than 30
 
 ---
     --name "plan"
-    --enrich-global-context
+    --enrich full
     --max-turns 20
     --system-prompt "You are a senior test engineer planning a comprehensive test suite. Think methodically. A test plan is only good if it covers every meaningful case — not just the happy path."
     '''
@@ -121,7 +121,7 @@ compact-if-more-than 30
 
 ---
     --name "validate-plan"
-    --dont-enrich-global-context
+    --enrich none
     --strict-format "regex:^(ok|insufficient)$"
     --max-turns 5
     --system-prompt "You are a senior test engineer reviewing a test plan for completeness. Answer only 'ok' or 'insufficient'. No punctuation, no explanation."
@@ -156,7 +156,7 @@ write:
 
 ---
     --name "write"
-    --enrich-global-context
+    --enrich full
     --tools read, read_lines, list_files, pattern_search, create_file, edit_file
     --max-turns 100
     --system-prompt "You are a test engineer implementing a pre-approved test plan. Write every test case in the plan. No shortcuts, no skipping cases. Each test should be self-contained, readable, and follow the project's exact conventions."

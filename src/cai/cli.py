@@ -482,12 +482,17 @@ def enforce_strict_format(call_fn, strict_format, messages=None, max_attempts=4)
 
 def _run_nonstreaming_turn(messages, args, included_tools, stream_callback=None, tool_choice="auto", interrupt_event=None):
     """Single non-streaming LLM call. Returns (content, tool_calls, usage)."""
+    _pre_format_len = len(messages)
     result = enforce_strict_format(lambda: openai_api.chat( messages,
                                                             model=args.model,
                                                             tools=included_tools,
                                                             tool_choice=tool_choice),
                                     args.strict_format,
                                     messages=messages)
+    # Strip format-retry feedback messages so they never leak into global context via enrichment.
+    # Safe: strict_format only retries on text-only turns (tool_calls bypass the retry loop).
+    if args.strict_format and len(messages) > _pre_format_len:
+        del messages[_pre_format_len:]
 
     if not result: return "", None, {}
 

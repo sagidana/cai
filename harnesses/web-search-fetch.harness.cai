@@ -17,7 +17,7 @@ compact-if-more-than 40
 ---
     --name "search"
     --prepend-user-prompt
-    --enrich-global-context
+    --enrich full
     --tools fetch_url
     --max-turns 30
     --force-tools
@@ -67,7 +67,7 @@ compact-if-more-than 40
 
 ---
     --name "verify"
-    --dont-enrich-global-context
+    --enrich none
     --strict-format "regex:^(ok|retry)$"
     --max-turns 3
     --system-prompt "You are a strict quality gate. Answer only 'ok' or 'retry'. No punctuation, no explanation."
@@ -103,7 +103,7 @@ report:
 
 ---
     --name "report"
-    --dont-enrich-global-context
+    --enrich none
     --max-turns 5
     --system-prompt "You are a research analyst distilling web findings into a precise, well-sourced summary. Be specific and factual. Every key claim must have a source URL."
     '''

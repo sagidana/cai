@@ -13,7 +13,7 @@ harness.cai format overview:
 
     ---                 # opens a block
         --name "x"          # required
-        --enrich-global-context   # or --dont-enrich-global-context (required)
+        --enrich full       # required: none | result-only | full
         --prepend-user-prompt
         --tools read, list_files
         --model gpt-4o
@@ -35,6 +35,7 @@ harness.cai format overview:
 """
 
 import copy
+import enum
 import logging
 import json
 import os
@@ -82,11 +83,17 @@ def _note_output(text):
 
 # ─── Data model ──────────────────────────────────────────────────────────────
 
+class EnrichMode(enum.Enum):
+    NONE        = "none"          # nothing → global_messages
+    RESULT_ONLY = "result-only"   # only final assistant text → global_messages
+    FULL        = "full"          # user prompt + tool turns + final text → global_messages
+
+
 @dataclass
 class CaiBlock:
     name: str
     prompt: str
-    enrich_global_context: bool      # True = enrich, False = dont-enrich
+    enrich_mode: EnrichMode
     prepend_user_prompt: bool = False
     tools: list = field(default_factory=list)
     model: Optional[str] = None
@@ -172,17 +179,19 @@ def _build_block(flags, prompt_lines, lineno):
         raise SyntaxError(f"harness:{lineno}: block missing --name")
     name = _strip_quotes(str(name))
 
-    has_enrich = 'enrich_global_context' in flags
-    has_dont = 'dont_enrich_global_context' in flags
-    if not has_enrich and not has_dont:
+    enrich_value = flags.get('enrich')
+    if enrich_value and enrich_value is not True:
+        try:
+            enrich_mode = EnrichMode(enrich_value)
+        except ValueError:
+            raise SyntaxError(
+                f"harness:{lineno}: block '{name}': invalid --enrich value {enrich_value!r}. "
+                "Must be one of: none, result-only, full"
+            )
+    else:
         raise SyntaxError(
-            f"harness:{lineno}: block '{name}' requires either "
-            "--enrich-global-context or --dont-enrich-global-context"
-        )
-    if has_enrich and has_dont:
-        raise SyntaxError(
-            f"harness:{lineno}: block '{name}' cannot have both "
-            "--enrich-global-context and --dont-enrich-global-context"
+            f"harness:{lineno}: block '{name}' requires --enrich <mode> "
+            "(none, result-only, or full)"
         )
 
     # Parse tools: "read, list_files" or "read list_files"
@@ -208,7 +217,7 @@ def _build_block(flags, prompt_lines, lineno):
     return CaiBlock(
         name=name,
         prompt='\n'.join(prompt_lines).strip(),
-        enrich_global_context=has_enrich,
+        enrich_mode=enrich_mode,
         prepend_user_prompt=bool(flags.get('prepend_user_prompt', False)),
         tools=tools,
         model=_opt_str('model'),
@@ -374,9 +383,10 @@ def run_block(block, global_messages, user_prompt, base_args, available_tools):
     Execute a single harness block.
 
     Calls call_llm directly with a local copy of global_messages extended by
-    the block's prompt. Mutates global_messages in-place if enrich_global_context
-    is True (appending ALL new messages: user prompt, tool calls, results,
-    intermediate turns, and final assistant response).
+    the block's prompt. Mutates global_messages in-place according to enrich_mode:
+      full        — appends user prompt + tool turns + final assistant response
+      result-only — appends only the final assistant response text
+      none        — leaves global_messages unchanged
 
     Returns the block's final text output (stripped).
     """
@@ -435,12 +445,12 @@ def run_block(block, global_messages, user_prompt, base_args, available_tools):
     log.info("run_block: name=%s model=%s tools=%s max_turns=%s enrich=%s "
              "prepend_user_prompt=%s strict_format=%s prompt_len=%d global_messages=%d",
              block.name, block_args.model, block.tools, block_args.max_turns,
-             block.enrich_global_context, block.prepend_user_prompt,
+             block.enrich_mode.value, block.prepend_user_prompt,
              block.strict_format, len(prompt), len(global_messages))
 
     _cai_logger.log(1, (
         f"BLOCK  name={block.name!r}  model={block_args.model}  "
-        f"max_turns={block_args.max_turns}  enrich={block.enrich_global_context}  "
+        f"max_turns={block_args.max_turns}  enrich={block.enrich_mode.value}  "
         f"tools={block.tools}\n{prompt}"
     ))
 
@@ -473,20 +483,31 @@ def run_block(block, global_messages, user_prompt, base_args, available_tools):
 
         _cai_logger.log(1, f"BLOCK RESULT  name={block.name!r}  len={len(result)}\n{result}")
 
-        # Enrich: extend global context with ALL messages added during this block
-        # (user prompt, tool calls, tool results, assistant turns, final response).
-        if block.enrich_global_context:
-            new_msgs = len(local_messages) - global_end
-            log.info("run_block: name=%s enriched global_messages with %d new messages (total=%d)",
-                     block.name,
-                     new_msgs,
-                     len(global_messages))
+        _cai_logger.log(1, f"BLOCK ENRICHMENT  ({block.enrich_mode})")
 
-            messages_to_enrich = local_messages[global_end:]
-            messages_to_enrich.append({"role": "assistant", "content": result})
+        # Enrich global_messages according to the block's enrich_mode.
+        if block.enrich_mode == EnrichMode.FULL:
+            # All messages added during this block: user prompt + tool turns + final response.
+            # strict_format retry feedback has already been stripped from local_messages by cli.py.
+            tool_msgs = local_messages[global_end:]
+            final_msg = {"role": "assistant", "content": result}
+            enrichment = tool_msgs + [final_msg]
+            log.info("run_block: name=%s enrich=full enriching %d messages (total=%d)",
+                     block.name, len(enrichment), len(global_messages))
+            global_messages.extend(enrichment)
 
-            global_messages.extend(messages_to_enrich)
-            _cai_logger.log(2, f"BLOCK ENRICHMENT: {json.dumps(messages_to_enrich, indent=2)}")
+            for m in enrichment: _cai_logger.log(2, f"{m}")
+
+        elif block.enrich_mode == EnrichMode.RESULT_ONLY:
+            if result:
+                final_msg = {"role": "assistant", "content": result}
+                log.info("run_block: name=%s enrich=result-only (total=%d)",
+                         block.name, len(global_messages))
+                global_messages.append(final_msg)
+                _cai_logger.log(2, f"{json.dumps(final_msg, indent=2)}")
+
+        elif block.enrich_mode == EnrichMode.NONE:
+            log.info("run_block: name=%s enrich=none", block.name)
 
     return result
 
@@ -679,7 +700,7 @@ def execute_harness(instructions, label_map, user_prompt, base_args, available_t
                             f"─── task: {item}\n    → {result}" for item, result in results
                         )
                         global_messages.append({
-                            "role": "assistant",
+                            "role": "system",
                             "content": f"[for-each results: {instr.source_block}]\n{summary}",
                         })
                         with _cai_logger.nest(1):

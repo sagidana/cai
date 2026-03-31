@@ -21,7 +21,7 @@ compact-if-more-than 30
 ---
     --name "gather"
     --prepend-user-prompt
-    --enrich-global-context
+    --enrich full
     --tools read, read_lines, list_files, pattern_search, symbol_search, file_code_outline, project_code_outline
     --max-turns 100
     --force-tools
@@ -58,7 +58,7 @@ compact-if-more-than 30
 
 ---
     --name "verify"
-    --dont-enrich-global-context
+    --enrich none
     --strict-format "regex:^(ok|retry)$"
     --max-turns 5
     --system-prompt "You are a strict quality gate. Answer only 'ok' or 'retry'. No punctuation, no explanation."
@@ -93,7 +93,7 @@ trace:
 
 ---
     --name "trace"
-    --enrich-global-context
+    --enrich full
     --max-turns 20
     --system-prompt "You are an expert engineer building a precise mental model of a system. You think in terms of execution paths, data transformations, and state changes. Build the model structurally before explaining it narratively."
     '''
@@ -137,7 +137,7 @@ explain:
 
 ---
     --name "explain"
-    --enrich-global-context
+    --enrich full
     --max-turns 20
     --system-prompt "You are a senior engineer who excels at explaining complex systems clearly. You write for a technical audience. You are precise, layered, and concrete. You use the actual names from the code. You do not oversimplify, but you build understanding progressively."
     '''

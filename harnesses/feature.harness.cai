@@ -22,7 +22,7 @@ compact-if-more-than 30
 ---
     --name "gather"
     --prepend-user-prompt
-    --enrich-global-context
+    --enrich full
     --tools read, read_lines, list_files, pattern_search, symbol_search, file_code_outline, project_code_outline
     --max-turns 100
     --force-tools
@@ -60,7 +60,7 @@ compact-if-more-than 30
 
 ---
     --name "verify"
-    --dont-enrich-global-context
+    --enrich none
     --strict-format "regex:^(ok|retry)$"
     --max-turns 5
     --system-prompt "You are a strict quality gate. Answer only 'ok' or 'retry'. No punctuation, no explanation."
@@ -97,7 +97,7 @@ compact-if-more-than 30
 
 ---
     --name "design"
-    --enrich-global-context
+    --enrich full
     --max-turns 30
     --system-prompt "You are a senior engineer designing a new feature. Design for the codebase as it is, not as you wish it were. Reuse what exists. Follow established patterns. Keep the design minimal — implement only what the feature requires."
     '''
@@ -146,7 +146,7 @@ compact-if-more-than 30
 
 ---
     --name "validate-design"
-    --dont-enrich-global-context
+    --enrich none
     --strict-format "regex:^(ok|revise)$"
     --max-turns 5
     --system-prompt "You are a principal engineer reviewing a feature design before implementation. You are thorough and skeptical. Answer only 'ok' or 'revise'."
@@ -183,7 +183,7 @@ implement:
 
 ---
     --name "implement"
-    --enrich-global-context
+    --enrich full
     --tools read, read_lines, list_files, pattern_search, symbol_search, create_file, edit_file
     --max-turns 100
     --system-prompt "You are a senior engineer implementing an approved feature design. Follow the design precisely. Do not add anything not in the design. Do not improve or refactor adjacent code. A minimal, correct implementation is the goal."
@@ -212,7 +212,7 @@ write-tests:
 
 ---
     --name "write-tests"
-    --enrich-global-context
+    --enrich full
     --tools read, read_lines, list_files, pattern_search, create_file, edit_file
     --max-turns 100
     --system-prompt "You are a test engineer writing tests for a newly implemented feature. Your tests must be thorough, match project conventions exactly, and cover the full testing surface defined in the design."

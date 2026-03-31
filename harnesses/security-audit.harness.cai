@@ -21,7 +21,7 @@ compact-if-more-than 30
 ---
     --name "gather"
     --prepend-user-prompt
-    --enrich-global-context
+    --enrich full
     --tools read, read_lines, list_files, pattern_search, symbol_search, file_code_outline
     --max-turns 100
     --force-tools
@@ -71,7 +71,7 @@ compact-if-more-than 30
 
 ---
     --name "verify"
-    --dont-enrich-global-context
+    --enrich none
     --strict-format "regex:^(ok|retry)$"
     --max-turns 5
     --system-prompt "You are a strict quality gate. Answer only 'ok' or 'retry'. No punctuation, no explanation."
@@ -106,7 +106,7 @@ threat-model:
 
 ---
     --name "threat-model"
-    --enrich-global-context
+    --enrich full
     --max-turns 20
     --system-prompt "You are a senior application security engineer building a threat model. Think like an attacker. Map every attack surface systematically before diving into individual vulnerabilities."
     '''
@@ -153,7 +153,7 @@ audit:
 
 ---
     --name "audit"
-    --enrich-global-context
+    --enrich full
     --tools read, read_lines, list_files, pattern_search, symbol_search
     --max-turns 100
     --system-prompt "You are an expert application security engineer performing a detailed vulnerability audit. You think like an attacker. You are methodical. You cite specific code locations. You do not report hypothetical issues — every finding is grounded in actual code you have read."
@@ -221,7 +221,7 @@ audit:
 
 ---
     --name "severity"
-    --enrich-global-context
+    --enrich full
     --strict-format "regex:^(critical|high|medium|low|clean)$"
     --max-turns 5
     --system-prompt "You are a senior security engineer assigning an overall severity rating. Answer with exactly one word. Base your rating on the worst finding — severity is determined by the most serious issue present."
@@ -260,7 +260,7 @@ critical-report:
 
 ---
     --name "report"
-    --enrich-global-context
+    --enrich full
     --max-turns 20
     --system-prompt "You are a senior security engineer writing a critical security advisory. Be precise, direct, and urgent. Do not soften findings. Provide concrete reproduction steps and remediation guidance."
     '''
@@ -301,7 +301,7 @@ high-report:
 
 ---
     --name "report"
-    --enrich-global-context
+    --enrich full
     --max-turns 20
     --system-prompt "You are a senior security engineer writing a high-severity security report. Be precise and direct. Provide actionable remediation guidance."
     '''
@@ -341,7 +341,7 @@ medium-report:
 
 ---
     --name "report"
-    --enrich-global-context
+    --enrich full
     --max-turns 20
     --system-prompt "You are a senior security engineer writing a medium-severity security report. Be constructive and specific. Provide clear remediation steps."
     '''
@@ -374,7 +374,7 @@ low-report:
 
 ---
     --name "report"
-    --enrich-global-context
+    --enrich full
     --max-turns 10
     --system-prompt "You are a senior security engineer writing a low-severity security report. Be constructive. The code is mostly secure but has room for improvement."
     '''
@@ -403,7 +403,7 @@ clean-report:
 
 ---
     --name "report"
-    --enrich-global-context
+    --enrich full
     --max-turns 10
     --system-prompt "You are a senior security engineer writing a clean security audit sign-off. Be specific about what makes the code secure."
     '''

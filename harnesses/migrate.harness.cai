@@ -22,7 +22,7 @@ compact-if-more-than 30
 ---
     --name "gather"
     --prepend-user-prompt
-    --enrich-global-context
+    --enrich full
     --tools read, read_lines, list_files, pattern_search, symbol_search, fetch_url
     --max-turns 100
     --force-tools
@@ -57,7 +57,7 @@ audit:
 
 ---
     --name "audit"
-    --enrich-global-context
+    --enrich full
     --max-turns 30
     --system-prompt "You are a migration engineer cataloguing every usage that needs to change. Be exhaustive. Every usage you miss becomes a production bug. List file by file, usage by usage."
     '''
@@ -99,7 +99,7 @@ audit:
 
 ---
     --name "validate-audit"
-    --dont-enrich-global-context
+    --enrich none
     --strict-format "regex:^(ok|incomplete)$"
     --max-turns 5
     --system-prompt "You are a strict quality gate reviewing a migration audit. Answer only 'ok' or 'incomplete'. No punctuation, no explanation."
@@ -133,7 +133,7 @@ plan:
 
 ---
     --name "plan"
-    --enrich-global-context
+    --enrich full
     --max-turns 20
     --system-prompt "You are a migration engineer sequencing a safe migration. Order matters: migrate in a sequence that keeps the codebase working at every step. Shared utilities should change before their callers."
     '''
@@ -176,7 +176,7 @@ compact-if-more-than 30
 
 ---
     --name "execute"
-    --enrich-global-context
+    --enrich full
     --tools read, read_lines, list_files, pattern_search, edit_file, create_file, rename_file
     --max-turns 100
     --system-prompt "You are a migration engineer executing an approved migration plan. Follow the plan precisely, file by file. Every usage in the audit must be migrated — do not skip any. Do not make changes not required by the migration."
@@ -203,7 +203,7 @@ compact-if-more-than 30
 
 ---
     --name "verify"
-    --dont-enrich-global-context
+    --enrich none
     --strict-format "regex:^(clean|missed)$"
     --max-turns 5
     --system-prompt "You are a senior engineer verifying a migration is complete. Answer only 'clean' or 'missed'."
@@ -239,7 +239,7 @@ done:
 
 ---
     --name "done"
-    --enrich-global-context
+    --enrich full
     --max-turns 10
     --system-prompt "You are a clear technical communicator writing a migration completion report."
     '''

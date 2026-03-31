@@ -20,7 +20,7 @@ compact-if-more-than 30
 ---
     --name "gather"
     --prepend-user-prompt
-    --enrich-global-context
+    --enrich full
     --tools read, read_lines, list_files, pattern_search, symbol_search, file_code_outline, git_diff, git_log, git_blame
     --max-turns 100
     --force-tools
@@ -52,7 +52,7 @@ compact-if-more-than 30
 
 ---
     --name "verify"
-    --dont-enrich-global-context
+    --enrich none
     --strict-format "regex:^(ok|retry)$"
     --max-turns 5
     --system-prompt "You are a strict quality gate. Answer only 'ok' or 'retry'. No punctuation, no explanation."
@@ -88,7 +88,7 @@ analyze:
 
 ---
     --name "analyze"
-    --enrich-global-context
+    --enrich full
     --max-turns 20
     --system-prompt "You are a senior engineer performing a thorough code review. You are thorough, fair, and constructive. You distinguish clearly between blocking issues (must fix before merge) and non-blocking suggestions (nice to have). You are particularly attentive to correctness, security, and maintainability."
     '''
@@ -140,7 +140,7 @@ analyze:
 
 ---
     --name "classify"
-    --enrich-global-context
+    --enrich full
     --strict-format "regex:^(blocking|non-blocking|clean)$"
     --max-turns 5
     --system-prompt "You are a senior engineer making a merge decision. Answer with exactly one word."
@@ -169,7 +169,7 @@ blocking-report:
 
 ---
     --name "report"
-    --enrich-global-context
+    --enrich full
     --max-turns 20
     --system-prompt "You are a senior engineer writing a code review report. Be clear, direct, and constructive. Structure the report so blocking issues are impossible to miss."
     '''
@@ -204,7 +204,7 @@ suggestions-report:
 
 ---
     --name "report"
-    --enrich-global-context
+    --enrich full
     --max-turns 20
     --system-prompt "You are a senior engineer writing a code review report. Be constructive, specific, and encouraging. The code is mergeable but can be improved."
     '''
@@ -237,7 +237,7 @@ clean-report:
 
 ---
     --name "report"
-    --enrich-global-context
+    --enrich full
     --max-turns 10
     --system-prompt "You are a senior engineer writing a clean code review sign-off. Be concise and specific about what makes the code good."
     '''

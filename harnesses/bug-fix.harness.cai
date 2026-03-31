@@ -19,7 +19,7 @@ compact-if-more-than 30
 ---
     --name "gather"
     --prepend-user-prompt
-    --enrich-global-context
+    --enrich full
     --tools read, read_lines, list_files, pattern_search, symbol_search, file_code_outline, git_log, git_blame
     --max-turns 100
     --force-tools
@@ -53,7 +53,7 @@ compact-if-more-than 30
 
 ---
     --name "verify"
-    --dont-enrich-global-context
+    --enrich none
     --strict-format "regex:^(ok|retry)$"
     --max-turns 5
     --system-prompt "You are a strict quality gate. Answer only with the single word 'ok' or 'retry'. No punctuation, no explanation."
@@ -89,7 +89,7 @@ compact-if-more-than 30
 
 ---
     --name "fix"
-    --enrich-global-context
+    --enrich full
     --tools read, read_lines, list_files, pattern_search, symbol_search, edit_file, create_file
     --max-turns 100
     --system-prompt "You are an expert software engineer applying a surgical bug fix. You have full context. Fix only what is broken — do not refactor, do not clean up unrelated code, do not add features. A minimal, correct fix is always better than a large one."
@@ -115,7 +115,7 @@ compact-if-more-than 30
 
 ---
     --name "review"
-    --dont-enrich-global-context
+    --enrich none
     --strict-format "regex:^(ok|needs-revision)$"
     --max-turns 5
     --system-prompt "You are a senior engineer performing a critical code review of a bug fix. You are skeptical. Your job is to find problems before they reach production. Answer only 'ok' or 'needs-revision'."
@@ -150,7 +150,7 @@ done:
 
 ---
     --name "done"
-    --enrich-global-context
+    --enrich full
     --max-turns 5
     --system-prompt "You are a clear technical communicator. Write a concise, accurate summary."
     '''

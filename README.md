@@ -274,7 +274,7 @@ label:               # jump target (bare word followed by colon)
 
 ---                  # opens a block
     --name "x"                          # required: block identifier for branching
-    --enrich-global-context             # or --dont-enrich-global-context (required)
+    --enrich full                       # required: none | result-only | full
     --prepend-user-prompt               # prepend the user's task to this block's prompt
     --tools read, list_files            # internal tool names (comma or space separated)
     --model gpt-4o                      # override model for this block
@@ -298,8 +298,11 @@ for-each item in block: harness "path/to/sub.harness.cai"
 
 ### Context enrichment
 
-- `--enrich-global-context`: after the block runs, its full message history (user prompt, tool calls, tool results, all assistant turns) is added to the global context for subsequent blocks.
-- `--dont-enrich-global-context`: the block's messages are discarded after it runs. Use for quality-gate or classification blocks whose deliberation isn't needed downstream.
+`--enrich <mode>` is required on every block and controls what it contributes to `global_messages`:
+
+- `--enrich full`: adds the user prompt, all tool calls/results, and the final assistant response. Use for context-gathering blocks.
+- `--enrich result-only`: adds only the final assistant response. Use for classify/gate blocks with `--strict-format` where only the verdict matters downstream.
+- `--enrich none`: nothing is added. Use for transient blocks whose deliberation is not needed downstream.
 
 ### `compact-if-more-than <percentage>`
 

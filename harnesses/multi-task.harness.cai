@@ -17,7 +17,7 @@
 ---
     --name "decompose"
     --prepend-user-prompt
-    --dont-enrich-global-context
+    --enrich none
     --tools list_files, read_lines
     --max-turns 10
     --system-prompt "Output a plain list of independent tasks — one per line, no bullets, no numbering, no extra text."
@@ -39,7 +39,7 @@ for-each task in decompose: harness "harnesses/context-and-execute.harness.cai"
 
 ---
     --name "aggregate"
-    --dont-enrich-global-context
+    --enrich none
     --max-turns 3
     --system-prompt "You are a concise technical writer summarising completed work."
     '''

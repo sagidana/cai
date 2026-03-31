@@ -22,7 +22,7 @@ compact-if-more-than 30
 ---
     --name "gather"
     --prepend-user-prompt
-    --enrich-global-context
+    --enrich full
     --tools read, read_lines, list_files, pattern_search, symbol_search, file_code_outline, project_code_outline
     --max-turns 100
     --force-tools
@@ -57,7 +57,7 @@ compact-if-more-than 30
 
 ---
     --name "verify"
-    --dont-enrich-global-context
+    --enrich none
     --strict-format "regex:^(ok|retry)$"
     --max-turns 5
     --system-prompt "You are a strict quality gate. Answer only 'ok' or 'retry'. No punctuation, no explanation."
@@ -94,7 +94,7 @@ compact-if-more-than 30
 
 ---
     --name "plan"
-    --enrich-global-context
+    --enrich full
     --max-turns 20
     --system-prompt "You are a senior engineer designing a refactor plan. A good refactor plan is a sequence of small, safe, independently-verifiable steps — not one big rewrite. Think carefully about order: each step should leave the code in a working state."
     '''
@@ -130,7 +130,7 @@ compact-if-more-than 30
 
 ---
     --name "validate-plan"
-    --dont-enrich-global-context
+    --enrich none
     --strict-format "regex:^(ok|revise)$"
     --max-turns 5
     --system-prompt "You are a principal engineer reviewing a refactor plan before execution. You are skeptical. Your job is to find flaws in the plan before any code is changed. Answer only 'ok' or 'revise'."
@@ -171,7 +171,7 @@ compact-if-more-than 30
 
 ---
     --name "execute"
-    --enrich-global-context
+    --enrich full
     --tools read, read_lines, list_files, pattern_search, symbol_search, edit_file, create_file, rename_file, remove_file
     --max-turns 100
     --system-prompt "You are an expert engineer executing an approved refactor plan. Follow the plan precisely. Do not improvise. Do not add unrequested changes. If you discover something unexpected, handle the minimal case that preserves the plan's goals — do not expand the scope."
@@ -197,7 +197,7 @@ compact-if-more-than 30
 
 ---
     --name "sanity"
-    --dont-enrich-global-context
+    --enrich none
     --strict-format "regex:^(clean|issues)$"
     --max-turns 5
     --system-prompt "You are a senior engineer performing a final regression check after a refactor. Answer only 'clean' or 'issues'."
@@ -234,7 +234,7 @@ done:
 
 ---
     --name "done"
-    --enrich-global-context
+    --enrich full
     --max-turns 10
     --system-prompt "You are a clear technical communicator. Write a concise, accurate refactor summary."
     '''

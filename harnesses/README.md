@@ -172,7 +172,7 @@ label:               # jump target (word followed by colon)
 
 ---                  # opens a block
     --name "x"               # required: block name for branching
-    --enrich-global-context  # or --dont-enrich-global-context (required)
+    --enrich full            # required: none | result-only | full
     --prepend-user-prompt    # prepend user task to this block's prompt
     --tools read, list_files # internal tool names (comma or space separated)
     --model gpt-4o           # override model for this block
@@ -196,14 +196,13 @@ for-each <item> in <block>: harness "<path>"  # run sub-harness for each line of
 
 ### Context enrichment
 
-- `--enrich-global-context`: after the block runs, its **full message history**
-  (user prompt, all tool calls, tool results, assistant turns) is added to the
-  global context that subsequent blocks receive. Use for blocks that gather
-  information others need.
+`--enrich <mode>` controls what this block contributes to `global_messages` (the shared context all subsequent blocks receive). Required on every block.
 
-- `--dont-enrich-global-context`: the block's messages are discarded after it
-  runs. Use for quality-gate blocks (verify, classify) whose deliberation is
-  not useful to subsequent blocks.
+- `--enrich full`: adds the user prompt, all tool calls/results, and the final assistant response. Use for blocks that gather information others need.
+
+- `--enrich result-only`: adds only the final assistant response text. Use for classify/gate blocks with `--strict-format` where tool noise is irrelevant downstream — just the verdict matters.
+
+- `--enrich none`: nothing is added to `global_messages`. Use for transient blocks whose deliberation is not useful to subsequent blocks.
 
 ### `compact-if-more-than <percentage>`
 
@@ -251,7 +250,7 @@ later blocks are both completely unaware of the for-each mechanism.
 ---
     --name "decompose"
     --prepend-user-prompt
-    --dont-enrich-global-context
+    --enrich none
     --system-prompt "Output one task per line. No bullets, no numbering."
     '''
     Break the user's task into independent atomic subtasks.
@@ -263,7 +262,7 @@ for-each task in decompose: harness "harnesses/context-and-execute.harness.cai"
 
 ---
     --name "aggregate"
-    --dont-enrich-global-context
+    --enrich none
     '''
     All subtasks are complete. Summarise the overall result for the user.
     '''

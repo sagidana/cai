@@ -28,7 +28,7 @@
 ---
     --name "expand"
     --prepend-user-prompt
-    --enrich-global-context
+    --enrich full
     --tools smali_find_callers, smali_find_callees, smali_find_implementations, read_lines
     --max-turns 20
     --force-tools

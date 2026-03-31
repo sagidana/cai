@@ -15,7 +15,7 @@ compact-if-more-than 30
 ---
     --name "enrichment"
     --prepend-user-prompt
-    --enrich-global-context
+    --enrich full
     --tools read, read_lines, list_files, pattern_search, symbol_search, file_code_outline, project_code_outline
     --max-turns 100
     --force-tools
@@ -45,7 +45,7 @@ compact-if-more-than 30
 
 ---
     --name "verify"
-    --dont-enrich-global-context
+    --enrich none
     --strict-format "regex:^(ok|retry)$"
     --max-turns 5
     --system-prompt "You are a strict quality gate. Your only output is 'ok' or 'retry'. No punctuation. No explanation."
@@ -79,7 +79,7 @@ execute:
 
 ---
     --name "execute"
-    --enrich-global-context
+    --enrich full
     --tools read, read_lines, list_files, pattern_search, symbol_search, create_file, edit_file, rename_file
     --max-turns 100
     --system-prompt "You are an expert software engineer executing a task with full context already gathered. Produce a complete, correct, high-quality result that precisely matches the conventions and patterns of the existing codebase. Do not cut corners, leave placeholders, or add unrequested changes."

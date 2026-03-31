@@ -26,7 +26,7 @@
 ---
     --name "decompose"
     --prepend-user-prompt
-    --dont-enrich-global-context
+    --enrich none
     --max-turns 1
     --system-prompt "Output a plain list of focused research sub-questions — one per line, no bullets, no numbering, no extra text. Maximum 5 sub-questions."
     '''
@@ -53,7 +53,7 @@ for-each question in decompose: harness "harnesses/web-search-fetch.harness.cai"
 ---
     --name "synthesize"
     --prepend-user-prompt
-    --dont-enrich-global-context
+    --enrich none
     --max-turns 5
     --system-prompt "You are an expert research analyst. Your job is to synthesize gathered web research into a comprehensive, well-structured, and accurate answer. Prioritise depth and accuracy over brevity."
     '''
