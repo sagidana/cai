@@ -651,69 +651,71 @@ def call_llm(messages,
         else:
             tool_choice = "auto"
 
-        with _cai_logger.nest(1):
-            _cai_logger.log(1, "=== TURN {}/{} ===  [{}]{}".format(
-                turn, max_turns,
-                datetime.datetime.now().strftime("%H:%M:%S"),
-                "  tool_choice=required (force_tools)" if tool_choice == "required" else ""))
+        _cai_logger.push_nest(1)
+        _cai_logger.log(1, "=== TURN {}/{} ===  [{}]{}".format(
+            turn, max_turns,
+            datetime.datetime.now().strftime("%H:%M:%S"),
+            "  tool_choice=required (force_tools)" if tool_choice == "required" else ""))
 
-            content, tool_calls, usage = run_turn(messages,
-                                                  args,
-                                                  included_tools,
-                                                  stream_callback,
-                                                  tool_choice=tool_choice,
-                                                  interrupt_event=interrupt_event)
-            log.info("call_llm: turn=%d tokens prompt=%s completion=%s total=%s",
-                     turn,
-                     usage.get('prompt_tokens'),
-                     usage.get('completion_tokens'),
-                     usage.get('total_tokens'))
+        content, tool_calls, usage = run_turn(messages,
+                                              args,
+                                              included_tools,
+                                              stream_callback,
+                                              tool_choice=tool_choice,
+                                              interrupt_event=interrupt_event)
+        log.info("call_llm: turn=%d tokens prompt=%s completion=%s total=%s",
+                 turn,
+                 usage.get('prompt_tokens'),
+                 usage.get('completion_tokens'),
+                 usage.get('total_tokens'))
 
-            prompt_tokens = usage.get('prompt_tokens', 0)
-            completion_tokens = usage.get('completion_tokens', 0)
-            pct = f"{prompt_tokens / profile['context']:.0%}" if profile['context'] else "?"
-            ctx_str = f"ctx {pct} ({prompt_tokens}/{profile['context']})"
-            if ctx_callback:
-                ctx_callback(ctx_str)
+        prompt_tokens = usage.get('prompt_tokens', 0)
+        completion_tokens = usage.get('completion_tokens', 0)
+        pct = f"{prompt_tokens / profile['context']:.0%}" if profile['context'] else "?"
+        ctx_str = f"ctx {pct} ({prompt_tokens}/{profile['context']})"
+        if ctx_callback:
+            ctx_callback(ctx_str)
 
-            if not tool_calls:
-                log.info("call_llm: done turn=%d length=%d", turn, len(content))
-                _cai_logger.log(2, "[assistant]\n{}".format(content))
-                _emit_status("ready", status_callback)
-                return content
+        if not tool_calls:
+            log.info("call_llm: done turn=%d length=%d", turn, len(content))
+            _cai_logger.log(2, "[assistant]\n{}".format(content))
+            _emit_status("ready", status_callback)
+            _cai_logger.pop_nest(1)              # pop before early return
+            return content
 
-            if not getattr(args, 'oneline', False):
-                def _fmt_call(c):
-                    name = c.get('function', {}).get('name', '?')
-                    raw_args = c.get('function', {}).get('arguments', '')
-                    try:
-                        parsed = json.loads(raw_args) if raw_args else {}
-                        args_str = ", ".join(
-                            f"{k}={json.dumps(v)[:80]}{'...' if len(json.dumps(v)) > 80 else ''}"
-                            for k, v in parsed.items()
-                        )
-                    except Exception:
-                        args_str = raw_args[:160] + ("..." if len(raw_args) > 160 else "")
-                    return f"{name}({args_str})"
+        if not getattr(args, 'oneline', False):
+            def _fmt_call(c):
+                name = c.get('function', {}).get('name', '?')
+                raw_args = c.get('function', {}).get('arguments', '')
+                try:
+                    parsed = json.loads(raw_args) if raw_args else {}
+                    args_str = ", ".join(
+                        f"{k}={json.dumps(v)[:80]}{'...' if len(json.dumps(v)) > 80 else ''}"
+                        for k, v in parsed.items()
+                    )
+                except Exception:
+                    args_str = raw_args[:160] + ("..." if len(raw_args) > 160 else "")
+                return f"{name}({args_str})"
 
-                tool_calls_fmt = [_fmt_call(c) for c in tool_calls]
-                status = f"[turn {turn}/{max_turns}] {', '.join(tool_calls_fmt)}"
-                _emit_status(status, status_callback)
-                if tool_callback:
-                    for fmt in tool_calls_fmt:
-                        tool_callback(f"-> {fmt}\n")
-
-            # handle_tool_calls appends assistant + tool messages and logs each
-            # dispatch/result event at the point of append.
-            handle_tool_calls(tool_calls, messages, content, allowed_tool_names, tool_callback=tool_callback, usage=usage, profile=profile)
+            tool_calls_fmt = [_fmt_call(c) for c in tool_calls]
+            status = f"[turn {turn}/{max_turns}] {', '.join(tool_calls_fmt)}"
+            _emit_status(status, status_callback)
             if tool_callback:
-                tool_callback("\n")
+                for fmt in tool_calls_fmt:
+                    tool_callback(f"-> {fmt}\n")
 
-            # _warn_if_stuck may append a [USER] warning into messages
-            _warn_if_stuck(tool_calls, call_history, messages)
+        # handle_tool_calls appends assistant + tool messages and logs each
+        # dispatch/result event at the point of append.
+        handle_tool_calls(tool_calls, messages, content, allowed_tool_names, tool_callback=tool_callback, usage=usage, profile=profile)
+        if tool_callback:
+            tool_callback("\n")
 
-            # _check_context_budget may compact (replace) messages
-            _check_context_budget(messages, usage, profile, args, status_callback)
+        # _warn_if_stuck may append a [USER] warning into messages
+        _warn_if_stuck(tool_calls, call_history, messages)
+
+        # _check_context_budget may compact (replace) messages
+        _check_context_budget(messages, usage, profile, args, status_callback)
+        _cai_logger.pop_nest(1)              # pop at end of loop body
 
     log.warning("call_llm: reached max_turns=%d", max_turns)
     _cai_logger.log(1, "MAX TURNS REACHED ({})".format(max_turns))
@@ -964,34 +966,38 @@ def action_prompt(args, available_tools, external_mcps):
                 sys.stdout.flush()
                 _note_output(chunk)
 
-            with _cai_logger.nest(1):
-                call_llm(messages,
-                         args,
-                         available_tools,
-                         external_mcps,
-                         stream_callback=_stream_to_stdout,
-                         tool_callback=_stderr_tool,
-                         status_callback=_stderr_status,
-                         ctx_callback=_stderr_ctx)
+            _cai_logger.push_nest(1)
+            call_llm(messages,
+                     args,
+                     available_tools,
+                     external_mcps,
+                     stream_callback=_stream_to_stdout,
+                     tool_callback=_stderr_tool,
+                     status_callback=_stderr_status,
+                     ctx_callback=_stderr_ctx)
+            _cai_logger.pop_nest(1)
             print()
         except LLMError as e:
+            _cai_logger.pop_nest(1)
             print()
             _diag(f"[error] {e}")
     else:
         log.info("action_prompt: calling LLM (non-streaming)")
         try:
-            with _cai_logger.nest(1):
-                content = call_llm(messages,
-                                   args,
-                                   available_tools,
-                                   external_mcps,
-                                   tool_callback=_stderr_tool,
-                                   status_callback=_stderr_status,
-                                   ctx_callback=_stderr_ctx)
+            _cai_logger.push_nest(1)
+            content = call_llm(messages,
+                               args,
+                               available_tools,
+                               external_mcps,
+                               tool_callback=_stderr_tool,
+                               status_callback=_stderr_status,
+                               ctx_callback=_stderr_ctx)
+            _cai_logger.pop_nest(1)
             if args.oneline:
                 content = content.replace('\n', ' ')
             print(content)
         except LLMError as e:
+            _cai_logger.pop_nest(1)
             _diag(f"[error] {e}")
 
 def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_ctx):
@@ -1095,13 +1101,14 @@ def action_interactive(args, available_tools, external_mcps):
                 f"tools=[{_tools_str}]\n{user_input}"
             ))
             try:
-                with _cai_logger.nest(1):
-                    response = call_llm(messages, args, available_tools, external_mcps,
-                                        stream_callback=stream_cb,
-                                        status_callback=status_callback,
-                                        tool_callback=tool_cb,
-                                        ctx_callback=ctx_cb,
-                                        interrupt_event=screen._interrupt_event)
+                _cai_logger.push_nest(1)
+                response = call_llm(messages, args, available_tools, external_mcps,
+                                    stream_callback=stream_cb,
+                                    status_callback=status_callback,
+                                    tool_callback=tool_cb,
+                                    ctx_callback=ctx_cb,
+                                    interrupt_event=screen._interrupt_event)
+                _cai_logger.pop_nest(1)
                 if screen._interrupt_event.is_set():
                     screen.write(f"\n{_RESET}{_META_STYLE}[interrupted]{_RESET}\n\n")
                     status_callback("interrupted")
@@ -1109,9 +1116,11 @@ def action_interactive(args, available_tools, external_mcps):
                 screen.write(f"\n{_RESET}\n")
                 messages.append({"role": "assistant", "content": response})
             except LLMError as e:
+                _cai_logger.pop_nest(1)
                 screen.write(f"\n{_RESET}{_ERROR_STYLE}[error] {e}{_RESET}\n\n")
                 status_callback("error")
             except BaseException:
+                _cai_logger.pop_nest(1)
                 screen.write(_RESET)
                 raise
             finally:

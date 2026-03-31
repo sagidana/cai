@@ -131,6 +131,17 @@ def nest(delta: int = 1):
         _base.reset(tok)
 
 
+def push_nest(delta: int = 1) -> None:
+    """Increment the log nesting level by *delta*.
+    Pair with pop_nest(delta) at every exit path (return, break, except)."""
+    _base.set(_base.get() + delta)
+
+
+def pop_nest(delta: int = 1) -> None:
+    """Decrement the log nesting level by *delta*."""
+    _base.set(_base.get() - delta)
+
+
 def init(path: str = LOG_PATH) -> None:
     """Initialise the module-level logger (call once at program start)."""
     global _instance
