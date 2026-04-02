@@ -178,8 +178,14 @@ label:               # jump target (word followed by colon)
     --model gpt-4o           # override model for this block
     --max-turns 100          # override max tool-call turns
     --strict-format "regex:^(ok|retry)$"  # enforce output format
-    --system-prompt "..."    # block-specific system prompt
     --force-tools            # require at least one tool call
+    --system-prompt "..."    # single-line system prompt
+    --system-prompt          # multi-line system prompt (followed by '''...''' block)
+    '''
+    System prompt text here.
+    Multiple lines are fine.
+    '''
+    --prompt                 # optional explicit marker for the main prompt
     '''
     Prompt text goes here.
     Multiple lines are fine.

@@ -19,8 +19,13 @@ harness.cai format overview:
         --model gpt-4o
         --max-turns 50
         --strict-format "regex:^(ok|retry)$"
-        --system-prompt "You are a concise assistant."
         --force-tools
+        --system-prompt "You are a concise assistant."   # single-line
+        --system-prompt          # multi-line: followed by '''...''' block
+        '''
+        System prompt text here.
+        '''
+        --prompt                 # optional explicit marker for the main prompt
         '''
         Prompt text goes here.
         '''
@@ -151,6 +156,7 @@ class IfMoreThanInstruction:
 
 _NORMAL = 'normal'
 _BLOCK_HEADER = 'block_header'
+_BLOCK_SYSTEM_PROMPT = 'block_system_prompt'
 _BLOCK_PROMPT = 'block_prompt'
 _BLOCK_FOOTER = 'block_footer'
 
@@ -245,6 +251,7 @@ def parse_harness_file(path: str):
     state = _NORMAL
     current_flags = {}
     current_prompt_lines = []
+    current_system_prompt_lines = []
     block_close_lineno = 0
 
     for lineno, raw_line in enumerate(lines, 1):
@@ -258,6 +265,7 @@ def parse_harness_file(path: str):
                 state = _BLOCK_HEADER
                 current_flags = {}
                 current_prompt_lines = []
+                current_system_prompt_lines = []
                 continue
 
             # Label: bare word followed by colon, e.g. "ok:" or "enrichment:"
@@ -313,11 +321,23 @@ def parse_harness_file(path: str):
 
         elif state == _BLOCK_HEADER:
             if stripped == "'''":
-                state = _BLOCK_PROMPT
+                # If --system-prompt was given bare (no value), this ''' opens the system prompt block.
+                if current_flags.get('system_prompt') is True:
+                    state = _BLOCK_SYSTEM_PROMPT
+                else:
+                    state = _BLOCK_PROMPT
                 continue
             if stripped == '---':
                 raise SyntaxError(f"harness:{lineno}: block closed before prompt (missing ''')")
             _parse_flag_line(stripped, current_flags, lineno)
+
+        elif state == _BLOCK_SYSTEM_PROMPT:
+            if stripped == "'''":
+                current_flags['system_prompt'] = '\n'.join(current_system_prompt_lines).strip()
+                current_system_prompt_lines = []
+                state = _BLOCK_HEADER
+                continue
+            current_system_prompt_lines.append(raw_line)
 
         elif state == _BLOCK_PROMPT:
             if stripped == "'''":
