@@ -179,66 +179,6 @@ def register(mcp):
             return "Error: adb logcat timed out."
 
     @mcp.tool()
-    def adb_getprop(prop: str = "", serial: str = "") -> str:
-        """Read Android system properties via 'adb shell getprop'.
-
-        Args:
-            prop:   Specific property name to read, e.g. "ro.build.version.release".
-                    Leave empty to dump all properties.
-            serial: Device serial number. Leave empty if only one device is connected.
-
-        Returns:
-            Property value(s), or an error string.
-        """
-        prefix = ["-s", serial] if serial else []
-        cmd = ["getprop"] + ([prop] if prop else [])
-        return _adb(prefix + ["shell"] + cmd)
-
-    @mcp.tool()
-    def adb_screencap(local_path: str, serial: str = "") -> str:
-        """Take a screenshot on the device and pull it to the host.
-
-        Captures /sdcard/_screencap_tmp.png on the device, pulls it to
-        local_path, then removes the temporary file from the device.
-
-        Args:
-            local_path: Destination path on the host, e.g. "/tmp/screen.png".
-            serial:     Device serial number. Leave empty if only one device is connected.
-
-        Returns:
-            "Saved to <local_path>" on success, or an error string.
-        """
-        try:
-            local_path = safe_path(local_path)
-        except ValueError as e:
-            return str(e)
-        prefix = ["-s", serial] if serial else []
-        tmp = "/sdcard/_screencap_tmp.png"
-        out = _adb(prefix + ["shell", "screencap", "-p", tmp])
-        if out.startswith("Error"):
-            return out
-        out = _adb(prefix + ["pull", tmp, local_path], timeout=30)
-        if out.startswith("Error"):
-            return out
-        _adb(prefix + ["shell", "rm", tmp])
-        return f"Saved to {local_path}"
-
-    @mcp.tool()
-    def adb_forward(host_port: int, device_port: int, serial: str = "") -> str:
-        """Forward a TCP port from the host to the device (adb forward).
-
-        Args:
-            host_port:   Local port on the host machine.
-            device_port: Port on the Android device to forward to.
-            serial:      Device serial number. Leave empty if only one device is connected.
-
-        Returns:
-            The forwarded port number, or an error string.
-        """
-        prefix = ["-s", serial] if serial else []
-        return _adb(prefix + ["forward", f"tcp:{host_port}", f"tcp:{device_port}"])
-
-    @mcp.tool()
     def adb_package_list(filter: str = "", serial: str = "") -> str:
         """List installed packages on an Android device.
 
@@ -298,7 +238,6 @@ if __name__ == "__main__":
         for tool_name, kwargs in [
             ("adb_shell",      {"command": "echo hello"}),
             ("adb_root_shell", {"command": "id"}),
-            ("adb_getprop",    {"prop": "ro.build.version.release"}),
             ("adb_package_list", {}),
             ("adb_logcat",     {"lines": 5}),
         ]:
@@ -307,13 +246,6 @@ if __name__ == "__main__":
                 check(f"{tool_name} no crash", True)
             except Exception as e:
                 check(f"{tool_name} no crash", False, str(e))
-
-        # adb_forward: no device → error, but no Python exception
-        try:
-            r = T["adb_forward"](12345, 12345)
-            check("adb_forward no crash", True)
-        except Exception as e:
-            check("adb_forward no crash", False, str(e))
 
     # --- safe_path rejection tests (no device needed) ---
     r = T["adb_install"]("../../evil.apk")
@@ -324,9 +256,6 @@ if __name__ == "__main__":
 
     r = T["adb_push"]("../../escape", "/sdcard/file.txt")
     check("adb_push local_path traversal rejected", r.startswith("Error:"), r)
-
-    r = T["adb_screencap"]("../../escape.png")
-    check("adb_screencap local_path traversal rejected", r.startswith("Error:"), r)
 
     print(f"\n{_pass} passed, {_fail} failed")
     sys.exit(0 if _fail == 0 else 1)
