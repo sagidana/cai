@@ -166,15 +166,17 @@ def _tools_completer(prefix, **kwargs):
         matches = _glob.glob(prefix + '*')
         return matches
 
-    # Otherwise complete internal tool names from tools.py
-    tools_file = os.path.join(os.path.dirname(__file__), 'tools.py')
+    # Otherwise complete internal tool names from all *tools.py files
+    tools_dir = os.path.dirname(__file__)
+    names = []
     try:
-        with open(tools_file) as f:
-            content = f.read()
-        names = _re.findall(r'@mcp\.tool\(\)\s+def\s+(\w+)', content)
-        return [n for n in names if n.startswith(prefix)]
+        for tools_file in _glob.glob(os.path.join(tools_dir, '*tools.py')):
+            with open(tools_file) as f:
+                content = f.read()
+            names.extend(_re.findall(r'@mcp\.tool\(\)\s+def\s+(\w+)', content))
     except Exception:
-        return []
+        pass
+    return [n for n in names if n.startswith(prefix)]
 
 def setup_shell_completion():
     config_dir = os.path.expanduser("~/.config/cai")
