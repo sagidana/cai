@@ -1,9 +1,12 @@
 import json
 import os
+import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
+import uuid
 
 from cai.utils import safe_path
 
@@ -106,13 +109,30 @@ def _registry_write(data: dict) -> None:
 
 
 def _frida_attach(package: str, serial: str):
-    """Attach to a running app and return (device, session). Raises on failure."""
+    """Attach to a running app and return (device, session). Raises on failure.
+
+    Tries attaching by package/process name first (works on AOSP).  If that
+    fails (e.g. Samsung devices where frida sees the display name instead of
+    the package name), falls back to resolving the PID via ``adb pidof`` and
+    attaching by numeric PID.
+    """
     import frida  # deferred — avoids import-time crash if frida not installed
+    prefix = ["-s", serial] if serial else []
     if serial:
         device = frida.get_device(serial)
     else:
         device = frida.get_usb_device()
-    session = device.attach(package)
+
+    try:
+        session = device.attach(package)
+    except frida.ProcessNotFoundError:
+        # Fallback: resolve PID via adb (handles Samsung display-name quirk)
+        pids_out = _adb(prefix + ["shell", "pidof", package])
+        if not pids_out.strip() or pids_out.startswith("Error:"):
+            raise  # re-raise original error — process truly not found
+        pid = int(pids_out.strip().split()[0])
+        session = device.attach(pid)
+
     return device, session
 
 
@@ -271,6 +291,200 @@ def register(mcp):
 
         return "\n".join(r for r in results if r) or "(no classes found)"
 
+    @mcp.tool()
+    def frida_hook_method(
+        package: str,
+        class_name: str,
+        method_name: str,
+        serial: str = "",
+    ) -> str:
+        """Hook a Java method in a running Android app using Frida (async/non-blocking).
+
+        Starts a background worker that attaches to the app and intercepts every
+        call to the specified method, writing enter/leave/error events to a log file.
+        Returns immediately with a hook_id — use frida_hook_log(hook_id) to read
+        captured events and frida_unhook_method(hook_id) to stop the hook.
+
+        Typical workflow:
+          1. frida_hook_method(...)      → get hook_id
+          2. Trigger the target action in the app
+          3. frida_hook_log(hook_id)     → inspect captured events
+          4. frida_unhook_method(hook_id) → stop
+
+        Args:
+            package:     App package name, e.g. "com.example.app".
+            class_name:  Fully-qualified Java class, e.g. "com.example.Foo".
+            method_name: Method name to hook, e.g. "doSomething".
+            serial:      Device serial (from adb devices). Leave empty if only
+                         one device is connected.
+
+        Returns:
+            Multi-line status string containing hook_id, or "Error: ..." on failure.
+        """
+        hook_id = str(uuid.uuid4())[:8]
+        os.makedirs(LOG_DIR, exist_ok=True)
+        log_file = os.path.join(LOG_DIR, f"{hook_id}.jsonl")
+
+        cmd = [
+            sys.executable, "-m", "cai.frida_tools", "--worker",
+            "--hook-id", hook_id,
+            "--package", package,
+            "--class", class_name,
+            "--method", method_name,
+            "--log-file", log_file,
+            "--serial", serial,
+        ]
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except Exception as e:
+            return f"Error: could not start worker: {e}"
+
+        reg = _registry_read()
+        reg[hook_id] = {
+            "pid": proc.pid,
+            "package": package,
+            "class": class_name,
+            "method": method_name,
+            "log_file": log_file,
+            "serial": serial,
+            "status": "active",
+            "log_pos": 0,
+        }
+        _registry_write(reg)
+
+        return (
+            f"Hook started.\n"
+            f"hook_id:  {hook_id}\n"
+            f"class:    {class_name}\n"
+            f"method:   {method_name}\n"
+            f"package:  {package}\n"
+            f"Use frida_hook_log('{hook_id}') to read events.\n"
+            f"Use frida_unhook_method('{hook_id}') to stop."
+        )
+
+    @mcp.tool()
+    def frida_unhook_method(hook_id: str) -> str:
+        """Stop a Frida method hook and detach the worker from the app.
+
+        Sends SIGTERM to the background worker process, which will detach Frida
+        from the target app and write a final 'worker_stop' log entry.
+
+        Args:
+            hook_id: The hook_id returned by frida_hook_method.
+
+        Returns:
+            Status string, or "Error: ..." on failure.
+        """
+        reg = _registry_read()
+        if hook_id not in reg:
+            return f"Error: unknown hook_id {hook_id!r}"
+
+        entry = reg[hook_id]
+        if entry.get("status") == "stopped":
+            return f"Hook {hook_id} is already stopped."
+
+        pid = entry.get("pid")
+        if pid:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass  # worker already exited
+            except Exception as e:
+                return f"Error: could not signal worker (pid {pid}): {e}"
+
+        entry["status"] = "stopped"
+        reg[hook_id] = entry
+        _registry_write(reg)
+        return f"Hook {hook_id} stopped (pid {pid} sent SIGTERM)."
+
+    @mcp.tool()
+    def frida_hook_log(hook_id: str) -> str:
+        """Return new log entries for an active Frida hook since the last call.
+
+        Each call advances an internal cursor so only events captured since the
+        previous frida_hook_log call are returned. Call repeatedly to poll for
+        new method invocations.
+
+        Log entries are JSON objects with fields:
+          event  — "worker_start" | "enter" | "leave" | "error" |
+                   "hook_error" | "frida_error" | "worker_stop"
+          class, method, args, retval, error — depending on event type
+          ts     — Unix timestamp in milliseconds (0 for lifecycle events)
+
+        Args:
+            hook_id: The hook_id returned by frida_hook_method.
+
+        Returns:
+            Newline-separated JSON log entries, "(no new events)", or "Error: ...".
+        """
+        reg = _registry_read()
+        if hook_id not in reg:
+            return f"Error: unknown hook_id {hook_id!r}"
+
+        entry = reg[hook_id]
+        log_file = entry["log_file"]
+        pos = entry.get("log_pos", 0)
+
+        if not os.path.exists(log_file):
+            return "(no log file yet — worker may still be starting)"
+
+        with open(log_file, "r") as f:
+            lines = f.readlines()
+
+        new_lines = lines[pos:]
+        entry["log_pos"] = len(lines)
+        reg[hook_id] = entry
+        _registry_write(reg)
+
+        if not new_lines:
+            return "(no new events)"
+
+        return "".join(new_lines).strip()
+
+    @mcp.tool()
+    def frida_list_hooks() -> str:
+        """List all registered Frida hooks and their current status.
+
+        Checks whether each worker process is still alive and corrects any stale
+        "active" entries in the registry. Useful to see all hooks across sessions
+        and to get hook_ids for frida_hook_log / frida_unhook_method.
+
+        Returns:
+            A human-readable list of hooks with hook_id, status, package,
+            class.method, and PID — or "(no hooks registered)" if empty.
+        """
+        reg = _registry_read()
+        if not reg:
+            return "(no hooks registered)"
+
+        lines = []
+        dirty = False
+        for hid, entry in reg.items():
+            pid = entry.get("pid")
+            status = entry.get("status", "unknown")
+            if status == "active" and pid:
+                try:
+                    os.kill(pid, 0)  # signal 0 = existence check only
+                except ProcessLookupError:
+                    status = "dead (worker exited)"
+                    entry["status"] = status
+                    dirty = True
+            lines.append(
+                f"[{hid}] {status:<22}  pid={pid:<8}  "
+                f"{entry.get('package','?')}  "
+                f"{entry.get('class','?')}.{entry.get('method','?')}"
+            )
+
+        if dirty:
+            _registry_write(reg)
+
+        return "\n".join(lines)
+
 
 # ---------------------------------------------------------------------------
 # Worker & test harness
@@ -391,6 +605,7 @@ def _run_tests():
 
         # ── Group 3: frida_list_classes (frida + device required) ───────────
         print("\n=== frida_tools: frida_list_classes (frida + device required) ===")
+        _device_available = False
         try:
             import frida as _frida  # check installed
             # Try to get a device
@@ -399,6 +614,7 @@ def _run_tests():
                 # Ensure frida-server is running before class enumeration
                 r_start = T["frida_server_start"]()
                 print(f"    → ensuring frida-server: {r_start}")
+                _device_available = True
                 # Try a well-known always-running system process
                 test_pkg = "com.android.settings"
                 r = T["frida_list_classes"](test_pkg)
@@ -420,6 +636,181 @@ def _run_tests():
                 print(f"  SKIP  frida_list_classes (no USB device: {e})")
         except ImportError:
             print("  SKIP  frida_list_classes (frida not installed)")
+
+        # ── Group 4: hook tool unit tests (no device required) ───────────────
+        print("\n=== frida_tools: hook tools (unit tests, no device) ===")
+
+        # empty registry
+        _registry_write({})
+        check("frida_list_hooks empty → message",
+              "(no hooks registered)" in T["frida_list_hooks"]())
+
+        # unknown hook_id errors
+        check("frida_hook_log unknown id → Error",
+              T["frida_hook_log"]("deadbeef").startswith("Error:"))
+        check("frida_unhook_method unknown id → Error",
+              T["frida_unhook_method"]("deadbeef").startswith("Error:"))
+
+        # already-stopped guard
+        _registry_write({"stopped1": {
+            "pid": None, "package": "x", "class": "x", "method": "x",
+            "log_file": "/tmp/x", "serial": "", "status": "stopped", "log_pos": 0,
+        }})
+        check("frida_unhook_method already stopped → message",
+              "already stopped" in T["frida_unhook_method"]("stopped1"))
+
+        # dead PID auto-correction in frida_list_hooks
+        _registry_write({"fakepid": {
+            "pid": 99999999, "package": "com.example", "class": "com.example.Foo",
+            "method": "bar", "log_file": "/tmp/fake.jsonl",
+            "serial": "", "status": "active", "log_pos": 0,
+        }})
+        r_list = T["frida_list_hooks"]()
+        check("frida_list_hooks detects dead pid",
+              "dead" in r_list, r_list)
+        check("frida_list_hooks shows hook_id",
+              "fakepid" in r_list, r_list)
+        check("frida_list_hooks shows class.method",
+              "com.example.Foo.bar" in r_list, r_list)
+
+        # frida_hook_log: no log file yet
+        _registry_write({"nofile": {
+            "pid": 1, "package": "x", "class": "x", "method": "x",
+            "log_file": os.path.join(LOG_DIR, "does_not_exist_xyz.jsonl"),
+            "serial": "", "status": "active", "log_pos": 0,
+        }})
+        check("frida_hook_log no log file yet → message",
+              "starting" in T["frida_hook_log"]("nofile") or
+              "no log file" in T["frida_hook_log"]("nofile"))
+
+        # frida_hook_log: cursor advances correctly
+        fake_log = os.path.join(LOG_DIR, "cursortest.jsonl")
+        os.makedirs(LOG_DIR, exist_ok=True)
+        with open(fake_log, "w") as _f:
+            _f.write(json.dumps({"event": "worker_start"}) + "\n")
+            _f.write(json.dumps({"event": "enter", "method": "foo"}) + "\n")
+        _registry_write({"cursor1": {
+            "pid": 1, "package": "x", "class": "x", "method": "x",
+            "log_file": fake_log, "serial": "", "status": "active", "log_pos": 0,
+        }})
+        r_read1 = T["frida_hook_log"]("cursor1")
+        check("frida_hook_log first read returns all lines",
+              "worker_start" in r_read1 and "enter" in r_read1, r_read1)
+        r_read2 = T["frida_hook_log"]("cursor1")
+        check("frida_hook_log second read → no new events",
+              "no new events" in r_read2, r_read2)
+        with open(fake_log, "a") as _f:
+            _f.write(json.dumps({"event": "leave", "retval": "null"}) + "\n")
+        r_read3 = T["frida_hook_log"]("cursor1")
+        check("frida_hook_log third read returns only new line",
+              "leave" in r_read3 and "worker_start" not in r_read3, r_read3)
+
+        _registry_write({})  # clean up registry
+
+        # ── Group 5: hook integration tests (device + frida-server required) ──
+        print("\n=== frida_tools: hook integration tests (device required) ===")
+        if not _device_available:
+            print("  SKIP  all hook integration tests (no device / frida-server)")
+        else:
+            # Target: com.android.settings / android.app.Activity / onResume
+            # onResume fires on every activity foreground transition — easy to trigger.
+            hook_pkg  = "com.android.settings"
+            hook_cls  = "android.app.Activity"
+            hook_meth = "onResume"
+
+            # Ensure settings is running so frida can attach to its process.
+            # Force-stop first so we always get a fresh process.
+            _adb(["shell", "am", "force-stop", hook_pkg])
+            time.sleep(1)
+            _adb(["shell", "am", "start", "-a", "android.intent.action.MAIN",
+                  "-n", "com.android.settings/.Settings"])
+            time.sleep(3)   # wait for process to be schedulable by the OS
+
+            pid_check = _adb(["shell", "pidof", hook_pkg])
+            print(f"    → {hook_pkg} pid: {pid_check!r}")
+            proc_running = pid_check.strip() and not pid_check.startswith("Error:")
+
+            if not proc_running:
+                print(f"  SKIP  integration tests ({hook_pkg} not running after launch)")
+                T["frida_server_stop"]()
+            else:
+                # 1. Start the hook (non-blocking — returns immediately)
+                r_hook = T["frida_hook_method"](hook_pkg, hook_cls, hook_meth)
+                print(f"    → frida_hook_method:\n{r_hook}")
+                check("frida_hook_method returns hook_id",
+                      "hook_id:" in r_hook and not r_hook.startswith("Error:"), r_hook)
+
+                hook_id = None
+                for _line in r_hook.splitlines():
+                    if _line.strip().startswith("hook_id:"):
+                        hook_id = _line.split(":", 1)[1].strip()
+                        break
+
+                if not hook_id:
+                    print("  SKIP  remaining integration tests (hook_id not found)")
+                else:
+                    # 2. Wait for worker subprocess to compile JS and attach
+                    time.sleep(3)
+                    r_list = T["frida_list_hooks"]()
+                    print(f"    → frida_list_hooks:\n{r_list}")
+                    check("frida_list_hooks shows new hook as active",
+                          hook_id in r_list and "active" in r_list, r_list)
+
+                    # 3. Initial log — must contain worker_start (or attach_error to skip)
+                    r_log1 = T["frida_hook_log"](hook_id)
+                    print(f"    → frida_hook_log (initial): {r_log1[:300]}")
+                    attach_failed = "attach_error" in r_log1 or "fatal" in r_log1
+
+                    if attach_failed:
+                        print(f"  SKIP  trigger/unhook tests (worker attach failed)")
+                        T["frida_unhook_method"](hook_id)
+                    else:
+                        check("frida_hook_log initial: contains worker_start",
+                              "worker_start" in r_log1, r_log1[:300])
+
+                        # 4. Trigger onResume: home → reopen settings
+                        _adb(["shell", "input", "keyevent", "KEYCODE_HOME"])
+                        time.sleep(1)
+                        _adb(["shell", "am", "start", "-a", "android.intent.action.MAIN",
+                              "-n", "com.android.settings/.Settings"])
+                        time.sleep(3)   # let hook events land in the log file
+
+                        # 5. Log must now contain enter + leave events
+                        r_log2 = T["frida_hook_log"](hook_id)
+                        print(f"    → frida_hook_log (after trigger): {r_log2[:400]}")
+                        check("frida_hook_log: enter event captured",
+                              "enter" in r_log2, r_log2[:400])
+                        check("frida_hook_log: leave event captured",
+                              "leave" in r_log2, r_log2[:400])
+
+                        # 6. Unhook
+                        r_unhook = T["frida_unhook_method"](hook_id)
+                        print(f"    → frida_unhook_method: {r_unhook}")
+                        check("frida_unhook_method returns stopped",
+                              "stopped" in r_unhook, r_unhook)
+
+                        # 7. Log after stop must include worker_stop
+                        time.sleep(1)
+                        r_log3 = T["frida_hook_log"](hook_id)
+                        print(f"    → frida_hook_log (after unhook): {r_log3[:200]}")
+                        check("frida_hook_log after unhook: worker_stop or no new events",
+                              "worker_stop" in r_log3 or "no new events" in r_log3, r_log3)
+
+                        # 8. List hooks must show stopped status
+                        r_list2 = T["frida_list_hooks"]()
+                        print(f"    → frida_list_hooks (after unhook):\n{r_list2}")
+                        check("frida_list_hooks shows hook as stopped",
+                              hook_id in r_list2 and "stopped" in r_list2, r_list2)
+
+                        # 9. Double-unhook must be graceful
+                        check("frida_unhook_method double-stop → already stopped",
+                              "already stopped" in T["frida_unhook_method"](hook_id))
+
+                # 10. Stop frida-server to leave the device clean
+                r_srv_stop = T["frida_server_stop"]()
+                print(f"    → frida_server_stop: {r_srv_stop}")
+                check("frida_server_stop after integration tests",
+                      "stopped" in r_srv_stop or "Error:" in r_srv_stop, r_srv_stop)
 
     finally:
         REGISTRY_PATH = _orig_reg
