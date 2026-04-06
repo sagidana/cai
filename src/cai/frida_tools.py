@@ -401,6 +401,123 @@ def register(mcp):
         return "\n".join(r for r in results if r) or "(no classes found)"
 
     @mcp.tool()
+    def frida_list_methods(package: str, class_name: str,
+                           filter: str = "", serial: str = "") -> str:
+        """List all declared methods of a Java class in a running Android app.
+
+        Attaches to the app via frida-server, uses reflection to enumerate every
+        method declared directly on the class (not inherited), then detaches.
+        The app must already be running and frida-server must be active.
+
+        Args:
+            package:    App package name, e.g. "com.example.app".
+            class_name: Fully-qualified Java class, e.g. "com.example.Foo".
+            filter:     Optional substring filter applied to each method signature.
+            serial:     Device serial. Leave empty if only one device.
+
+        Returns:
+            One method signature per line, or "Error: ..." on failure.
+        """
+        try:
+            import frida  # noqa: F401
+        except ImportError:
+            return "Error: frida not installed. Run: pip install frida"
+
+        js = _JS_LIST_METHODS % json.dumps(class_name)
+
+        try:
+            _device, session = _frida_attach(package, serial)
+        except Exception as e:
+            return f"Error: could not attach to {package!r}: {e}"
+
+        try:
+            results = _collect_messages(session, js, timeout=30)
+        except Exception as e:
+            return f"Error: script error: {e}"
+        finally:
+            try:
+                session.detach()
+            except Exception:
+                pass
+
+        if filter:
+            results = [r for r in results if filter in r]
+
+        return "\n".join(r for r in results if r) or "(no methods found)"
+
+    @mcp.tool()
+    def frida_eval(package: str, script: str,
+                  serial: str = "", timeout: int = 10) -> str:
+        """Run arbitrary Frida JavaScript synchronously in a running Android app.
+
+        The script communicates results back via send(). Execution ends when
+        the script calls send({done: true}) or the timeout expires.
+
+        Example — read the app's package name via Java reflection:
+            import Java from "frida-java-bridge";
+            Java.perform(function() {
+                var pkg = Java.use("android.app.ActivityThread")
+                    .currentApplication().getPackageName();
+                send(pkg);
+                send({done: true});
+            });
+
+        Example — plain send without Java (no imports needed):
+            send("hello from frida");
+            send({done: true});
+
+        Args:
+            package: App package name, e.g. "com.example.app".
+            script:  Frida JavaScript source (ESM). May import frida-java-bridge.
+            serial:  Device serial. Leave empty if only one device.
+            timeout: Seconds to wait for send({done:true}) before returning
+                     whatever has been collected so far (default 10).
+
+        Returns:
+            Newline-separated send() payloads (strings serialised to JSON for
+            non-string values), or "Error: ..." on failure.
+        """
+        try:
+            import frida  # noqa: F401
+        except ImportError:
+            return "Error: frida not installed. Run: pip install frida"
+
+        try:
+            _device, session = _frida_attach(package, serial)
+        except Exception as e:
+            return f"Error: could not attach to {package!r}: {e}"
+
+        results = []
+        done = threading.Event()
+
+        def on_message(msg, _data):
+            if msg["type"] == "send":
+                p = msg["payload"]
+                if isinstance(p, dict) and p.get("done"):
+                    done.set()
+                else:
+                    results.append(p if isinstance(p, str) else json.dumps(p))
+            elif msg["type"] == "error":
+                results.append(f"[error] {msg.get('description', 'unknown')}")
+                done.set()
+
+        try:
+            bundle = _compile_js(script)
+            scr = session.create_script(bundle)
+            scr.on("message", on_message)
+            scr.load()
+            done.wait(timeout=timeout)
+        except Exception as e:
+            return f"Error: script error: {e}"
+        finally:
+            try:
+                session.detach()
+            except Exception:
+                pass
+
+        return "\n".join(results) if results else "(no output)"
+
+    @mcp.tool()
     def frida_hook_method(
         package: str,
         class_name: str,
@@ -751,6 +868,38 @@ def _run_tests():
                     check("frida_list_classes filter",
                           all("Activity" in l for l in r2.splitlines() if l and not l.startswith("[error]")),
                           r2[:200])
+
+                # ── frida_list_methods ───────────────────────────────────────
+                print("\n=== frida_tools: frida_list_methods (frida + device required) ===")
+                r_methods = T["frida_list_methods"](test_pkg, "com.android.settings.Settings")
+                if r_methods.startswith("Error:"):
+                    print(f"  SKIP  frida_list_methods ({r_methods})")
+                else:
+                    method_lines = [l for l in r_methods.splitlines() if l and not l.startswith("[error]")]
+                    check("frida_list_methods returns results",
+                          len(method_lines) > 0, r_methods[:200])
+                    check("frida_list_methods lines contain return type",
+                          all(any(t in l for t in ("void", "boolean", "int", "long",
+                                                    "String", "Object", "android", "java"))
+                              for l in method_lines),
+                          method_lines[:3])
+                    print(f"    → {len(method_lines)} methods found")
+                    for _m in method_lines[:5]:
+                        print(f"       {_m}")
+                    if len(method_lines) > 5:
+                        print(f"       ... ({len(method_lines) - 5} more)")
+
+                    # filter param
+                    filter_term = "Intent"
+                    r_mf = T["frida_list_methods"](test_pkg, "com.android.settings.Settings",
+                                                   filter=filter_term)
+                    filtered_lines = [l for l in r_mf.splitlines() if l and not l.startswith("[error]")]
+                    check("frida_list_methods filter returns subset",
+                          len(filtered_lines) <= len(method_lines), r_mf[:200])
+                    check("frida_list_methods filter: all lines contain filter term",
+                          all(filter_term in l for l in filtered_lines) if filtered_lines else True,
+                          filtered_lines[:3])
+
             except Exception as e:
                 print(f"  SKIP  frida_list_classes (no USB device: {e})")
         except ImportError:
@@ -826,7 +975,34 @@ def _run_tests():
 
         _registry_write({})  # clean up registry
 
-        # ── Group 5: hook integration tests (device + frida-server required) ──
+        # ── Group 5a: frida_eval (device required) ────────────────────────────
+        print("\n=== frida_tools: frida_eval (device required) ===")
+        if not _device_available:
+            print("  SKIP  frida_eval tests (no device / frida-server)")
+        else:
+            # Sanity 1: plain send, no Java imports needed
+            _plain_script = 'send("frida_eval_sanity_ok"); send({done: true});'
+            r_run1 = T["frida_eval"]("com.android.settings", _plain_script)
+            print(f"    → frida_eval plain send: {r_run1!r}")
+            check("frida_eval plain send returns expected string",
+                  "frida_eval_sanity_ok" in r_run1, r_run1)
+
+            # Sanity 2: Java.perform reads the actual package name of the process
+            _java_script = """\
+import Java from "frida-java-bridge";
+Java.perform(function() {
+    var pkg = Java.use("android.app.ActivityThread")
+        .currentApplication().getPackageName();
+    send(pkg);
+    send({done: true});
+});
+"""
+            r_run2 = T["frida_eval"]("com.android.settings", _java_script)
+            print(f"    → frida_eval Java.perform package name: {r_run2!r}")
+            check("frida_eval Java.perform returns package name",
+                  "com.android.settings" in r_run2, r_run2)
+
+        # ── Group 5b: hook integration tests (device + frida-server required) ──
         print("\n=== frida_tools: hook integration tests (device required) ===")
         if not _device_available:
             print("  SKIP  all hook integration tests (no device / frida-server)")
