@@ -172,10 +172,11 @@ def get_external_tools(server_path):
         process.terminate()
 
 if __name__ == '__main__':
-    from cai import files_tools, git_tools, smali_tools, web_tools
+    from cai import adb_tools, files_tools, git_tools, smali_tools, web_tools
 
     mcp = FastMCP(name="Tools Server")
 
+    adb_tools.register(mcp)
     files_tools.register(mcp)
     git_tools.register(mcp)
     smali_tools.register(mcp)
