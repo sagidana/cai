@@ -37,16 +37,18 @@ _RESET = "\033[0m"
 # so the first diagnostic needs to push itself onto a fresh line.
 _at_bol = False  # is the terminal cursor currently at beginning-of-line?
 
-def _diag(text, end='\n'):
+def _diag(text, end='\n', ensure_newline=True):
     """Write a diagnostic line to stderr only when stderr is a TTY.
 
     Always starts on its own line: if the cursor is mid-line (e.g. after a
     streamed stdout chunk) a leading newline is emitted first.
+    Pass ensure_newline=False to suppress the leading newline (e.g. for
+    continuation chunks in a streaming sequence already on the same line).
     """
     global _at_bol
     if not _STDERR_TTY:
         return
-    prefix = '' if _at_bol else '\n'
+    prefix = ('' if _at_bol else '\n') if ensure_newline else ''
     sys.stderr.write(f"{prefix}{_DIM}{text}{_RESET}{end}")
     sys.stderr.flush()
     _at_bol = end.endswith('\n') if end else False
@@ -483,7 +485,7 @@ def enforce_strict_format(call_fn, strict_format, messages=None, max_attempts=4)
     return call_fn()
 
 def _run_nonstreaming_turn(messages, args, included_tools, stream_callback=None, tool_choice="auto", interrupt_event=None):
-    """Single non-streaming LLM call. Returns (content, tool_calls, usage)."""
+    """Single non-streaming LLM call. Returns (content, reasoning, tool_calls, usage)."""
     _pre_format_len = len(messages)
     result = enforce_strict_format(lambda: openai_api.chat( messages,
                                                             model=args.model,
@@ -496,29 +498,40 @@ def _run_nonstreaming_turn(messages, args, included_tools, stream_callback=None,
     if args.strict_format and len(messages) > _pre_format_len:
         del messages[_pre_format_len:]
 
-    if not result: return "", None, {}
+    if not result: return "", "", None, {}
 
-    content, _reasoning, tool_calls, usage = result
-    return content or "", tool_calls, usage
+    content, reasoning, tool_calls, usage = result
+    return content or "", reasoning or "", tool_calls, usage
 
 def _run_streaming_turn(messages, args, included_tools, stream_callback, tool_choice="auto", interrupt_event=None):
-    """Single streaming LLM call. Returns (accumulated_text, tool_calls, usage)."""
+    """Single streaming LLM call. Returns (accumulated_text, reasoning, tool_calls, usage)."""
     accumulated = []
+    reasoning_chunks = []
+    reasoning_newline_pending = False  # need a newline on stderr before content starts
     last_tool_calls = None
     usage = {}
-    for chunk, tool_calls, usage in openai_api.chat_stream(messages,
-                                                           model=args.model,
-                                                           tools=included_tools,
-                                                           tool_choice=tool_choice):
+    for chunk, reasoning_chunk, tool_calls, usage in openai_api.chat_stream(messages,
+                                                                             model=args.model,
+                                                                             tools=included_tools,
+                                                                             tool_choice=tool_choice):
         if interrupt_event and interrupt_event.is_set():
             break
+        if reasoning_chunk:
+            reasoning_chunks.append(reasoning_chunk)
+            _diag(reasoning_chunk, end="", ensure_newline=not reasoning_newline_pending)
+            reasoning_newline_pending = True
         if chunk:
+            if reasoning_newline_pending:
+                _diag("")   # close the reasoning line before content starts
+                reasoning_newline_pending = False
             accumulated.append(chunk)
             if stream_callback:
                 stream_callback(chunk)
         if tool_calls:
             last_tool_calls = tool_calls
-    return "".join(accumulated), last_tool_calls, usage
+    if reasoning_newline_pending:
+        _diag("")   # ensure we end on a new line even if no content followed
+    return "".join(accumulated), "".join(reasoning_chunks), last_tool_calls, usage
 
 CONTEXT_BUDGET_THRESHOLDS = {'small': 0.60, 'mid': 0.75, 'large': 0.80}
 
@@ -659,12 +672,20 @@ def call_llm(messages,
             datetime.datetime.now().strftime("%H:%M:%S"),
             "  tool_choice=required (force_tools)" if tool_choice == "required" else ""))
 
-        content, tool_calls, usage = run_turn(messages,
-                                              args,
-                                              included_tools,
-                                              stream_callback,
-                                              tool_choice=tool_choice,
-                                              interrupt_event=interrupt_event)
+        content, reasoning, tool_calls, usage = run_turn(messages,
+                                                        args,
+                                                        included_tools,
+                                                        stream_callback,
+                                                        tool_choice=tool_choice,
+                                                        interrupt_event=interrupt_event)
+        if reasoning:
+            _cai_logger.log(2, "REASONING")
+            _cai_logger.log(3, reasoning)
+
+            if not stream_callback:
+                # Streaming already emitted reasoning live via _diag(); for
+                # non-streaming emit the full block now, before content appears.
+                _diag("[thinking]\n{}".format(reasoning))
         log.info("call_llm: turn=%d tokens prompt=%s completion=%s total=%s",
                  turn,
                  usage.get('prompt_tokens'),

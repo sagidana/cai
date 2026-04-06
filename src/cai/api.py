@@ -165,10 +165,11 @@ class OpenAiApi:
                     log.info("chat_stream: finish_reason=%s", finish_reason)
 
                 content = delta.get('content', None)
+                reasoning = delta.get('reasoning', None)
 
-                if content or tool_calls:
-                    yield content, finished_tool_calls, {}
-            yield None, finished_tool_calls, usage
+                if content or reasoning or tool_calls:
+                    yield content, reasoning, finished_tool_calls, {}
+            yield None, None, finished_tool_calls, usage
 
 class AnthropicApi:
     def __init__(self, api_key):
