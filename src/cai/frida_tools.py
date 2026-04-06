@@ -1,3 +1,4 @@
+import contextlib
 import json
 import os
 import signal
@@ -45,6 +46,71 @@ import Java from "frida-java-bridge";
     send({ done: true });
   });
 })(%s)
+"""
+
+_JS_LIST_FIELDS = """\
+import Java from "frida-java-bridge";
+(function(cls) {
+  Java.perform(function() {
+    try {
+      var fields = Java.use(cls).class.getDeclaredFields();
+      for (var i = 0; i < fields.length; i++) {
+        send({ name: fields[i].toString() });
+      }
+    } catch(e) { send({ error: e.toString() }); }
+    send({ done: true });
+  });
+})(%s)
+"""
+
+_JS_CLASS_HIERARCHY = """\
+import Java from "frida-java-bridge";
+(function(cls) {
+  Java.perform(function() {
+    try {
+      var klass = Java.use(cls).class;
+      var sup = klass.getSuperclass();
+      while (sup !== null) {
+        send({ kind: "superclass", name: sup.getName() });
+        sup = sup.getSuperclass();
+      }
+      var ifaces = klass.getInterfaces();
+      for (var i = 0; i < ifaces.length; i++) {
+        send({ kind: "interface", name: ifaces[i].getName() });
+      }
+    } catch(e) { send({ error: e.toString() }); }
+    send({ done: true });
+  });
+})(%s)
+"""
+
+_JS_CALL_METHOD = """\
+import Java from "frida-java-bridge";
+(function(cls, method, args) {
+  Java.perform(function() {
+    try {
+      var klass = Java.use(cls);
+      var result = klass[method].apply(klass, args);
+      send({ result: (result !== null && result !== undefined) ? String(result) : "null" });
+    } catch(e) { send({ error: e.toString() }); }
+    send({ done: true });
+  });
+})(%s, %s, %s)
+"""
+
+_JS_GET_FIELD = """\
+import Java from "frida-java-bridge";
+(function(cls, field) {
+  Java.perform(function() {
+    try {
+      var f = Java.use(cls).class.getDeclaredField(field);
+      f.setAccessible(true);
+      var val = f.get(null);
+      send({ value: (val !== null) ? String(val) : "null" });
+    } catch(e) { send({ error: e.toString() }); }
+    send({ done: true });
+  });
+})(%s, %s)
 """
 
 _JS_HOOK_WORKER = """\
@@ -252,22 +318,41 @@ def _compile_js(js: str) -> str:
             pass
 
 
-def _collect_messages(session, js: str, timeout: int = 30) -> list:
-    """Load a script and collect send() payloads until {done: true} or timeout."""
-    results = []
+@contextlib.contextmanager
+def _session(package: str, serial: str):
+    """Context manager: attach frida to *package* and yield the session.
+
+    Detaches cleanly on exit regardless of exceptions.
+    """
+    _device, session = _frida_attach(package, serial)
+    try:
+        yield session
+    finally:
+        try:
+            session.detach()
+        except Exception:
+            pass
+
+
+def _run_script(session, js: str, timeout: int = 30) -> list:
+    """Compile and load *js*, collecting every send() payload into a list.
+
+    Stops when the script calls ``send({done: true})`` or *timeout* expires.
+    Frida-level runtime errors are appended as ``{"error": "..."}`` dicts so
+    callers can handle them uniformly alongside JS-side error payloads.
+    """
+    payloads = []
     done = threading.Event()
 
     def on_message(msg, _data):
         if msg["type"] == "send":
             p = msg["payload"]
-            if p.get("done"):
+            if isinstance(p, dict) and p.get("done"):
                 done.set()
-            elif p.get("error"):
-                results.append(f"[error] {p['error']}")
             else:
-                results.append(p.get("name", ""))
+                payloads.append(p)
         elif msg["type"] == "error":
-            results.append(f"[error] {msg.get('description', 'unknown')}")
+            payloads.append({"error": msg.get("description", "unknown")})
             done.set()
 
     bundle = _compile_js(js)
@@ -275,7 +360,7 @@ def _collect_messages(session, js: str, timeout: int = 30) -> list:
     script.on("message", on_message)
     script.load()
     done.wait(timeout=timeout)
-    return results
+    return payloads
 
 
 def register(mcp):
@@ -374,30 +459,23 @@ def register(mcp):
             One class name per line, or "Error: ..." on failure.
         """
         try:
-            import frida  # noqa: F401 — ensure it's installed
+            import frida  # noqa: F401
         except ImportError:
             return "Error: frida not installed. Run: pip install frida"
 
         js = _JS_LIST_CLASSES % json.dumps(package)
-
         try:
-            _device, session = _frida_attach(package, serial)
+            with _session(package, serial) as sess:
+                payloads = _run_script(sess, js)
         except Exception as e:
-            return f"Error: could not attach to {package!r}: {e}"
+            return f"Error: {e}"
 
-        try:
-            results = _collect_messages(session, js, timeout=30)
-        except Exception as e:
-            return f"Error: script error: {e}"
-        finally:
-            try:
-                session.detach()
-            except Exception:
-                pass
-
+        results = [
+            f"[error] {p['error']}" if p.get("error") else p.get("name", "")
+            for p in payloads
+        ]
         if filter:
             results = [r for r in results if filter in r]
-
         return "\n".join(r for r in results if r) or "(no classes found)"
 
     @mcp.tool()
@@ -424,26 +502,172 @@ def register(mcp):
             return "Error: frida not installed. Run: pip install frida"
 
         js = _JS_LIST_METHODS % json.dumps(class_name)
-
         try:
-            _device, session = _frida_attach(package, serial)
+            with _session(package, serial) as sess:
+                payloads = _run_script(sess, js)
         except Exception as e:
-            return f"Error: could not attach to {package!r}: {e}"
+            return f"Error: {e}"
 
-        try:
-            results = _collect_messages(session, js, timeout=30)
-        except Exception as e:
-            return f"Error: script error: {e}"
-        finally:
-            try:
-                session.detach()
-            except Exception:
-                pass
-
+        results = [
+            f"[error] {p['error']}" if p.get("error") else p.get("name", "")
+            for p in payloads
+        ]
         if filter:
             results = [r for r in results if filter in r]
-
         return "\n".join(r for r in results if r) or "(no methods found)"
+
+    @mcp.tool()
+    def frida_list_fields(package: str, class_name: str,
+                          filter: str = "", serial: str = "") -> str:
+        """List all declared fields of a Java class in a running Android app.
+
+        Uses reflection to enumerate every field declared directly on the class
+        (not inherited). Complements frida_list_methods.
+
+        Args:
+            package:    App package name, e.g. "com.example.app".
+            class_name: Fully-qualified Java class, e.g. "com.example.Foo".
+            filter:     Optional substring filter on field signatures.
+            serial:     Device serial. Leave empty if only one device.
+
+        Returns:
+            One field signature per line, or "Error: ..." on failure.
+        """
+        try:
+            import frida  # noqa: F401
+        except ImportError:
+            return "Error: frida not installed. Run: pip install frida"
+
+        js = _JS_LIST_FIELDS % json.dumps(class_name)
+        try:
+            with _session(package, serial) as sess:
+                payloads = _run_script(sess, js)
+        except Exception as e:
+            return f"Error: {e}"
+
+        results = [
+            f"[error] {p['error']}" if p.get("error") else p.get("name", "")
+            for p in payloads
+        ]
+        if filter:
+            results = [r for r in results if filter in r]
+        return "\n".join(r for r in results if r) or "(no fields found)"
+
+    @mcp.tool()
+    def frida_get_class_hierarchy(package: str, class_name: str,
+                                  serial: str = "") -> str:
+        """Return the superclass chain and implemented interfaces of a Java class.
+
+        Useful for finding which ancestor class to hook when getDeclaredMethods
+        returns nothing, or for understanding the full type hierarchy.
+
+        Output format — one entry per line:
+            superclass: android.app.Activity
+            superclass: android.view.ContextThemeWrapper
+            ...
+            interface:  android.view.Window$Callback
+
+        Args:
+            package:    App package name, e.g. "com.example.app".
+            class_name: Fully-qualified Java class, e.g. "com.example.Foo".
+            serial:     Device serial. Leave empty if only one device.
+
+        Returns:
+            Superclass chain then interfaces, or "Error: ..." on failure.
+        """
+        try:
+            import frida  # noqa: F401
+        except ImportError:
+            return "Error: frida not installed. Run: pip install frida"
+
+        js = _JS_CLASS_HIERARCHY % json.dumps(class_name)
+        try:
+            with _session(package, serial) as sess:
+                payloads = _run_script(sess, js)
+        except Exception as e:
+            return f"Error: {e}"
+
+        results = [
+            f"[error] {p['error']}" if p.get("error") else f"{p['kind']}: {p['name']}"
+            for p in payloads
+        ]
+        return "\n".join(results) or "(no hierarchy found)"
+
+    @mcp.tool()
+    def frida_call_method(package: str, class_name: str, method_name: str,
+                          args: list = None, serial: str = "") -> str:
+        """Call a static Java method and return its result as a string.
+
+        Uses frida-java-bridge to invoke the method synchronously inside the
+        app process. frida-java-bridge resolves overloads automatically for
+        simple primitive/string args; use frida_eval with explicit
+        overload(...) for ambiguous cases.
+
+        Args:
+            package:     App package name, e.g. "com.example.app".
+            class_name:  Fully-qualified class, e.g. "android.os.SystemClock".
+            method_name: Static method name, e.g. "elapsedRealtime".
+            args:        JSON-serialisable list of arguments (default: []).
+            serial:      Device serial. Leave empty if only one device.
+
+        Returns:
+            String representation of the return value, or "Error: ..." on failure.
+        """
+        try:
+            import frida  # noqa: F401
+        except ImportError:
+            return "Error: frida not installed. Run: pip install frida"
+
+        js = _JS_CALL_METHOD % (
+            json.dumps(class_name),
+            json.dumps(method_name),
+            json.dumps(args or []),
+        )
+        try:
+            with _session(package, serial) as sess:
+                payloads = _run_script(sess, js, timeout=15)
+        except Exception as e:
+            return f"Error: {e}"
+
+        if not payloads:
+            return "(no result)"
+        p = payloads[0]
+        return f"[error] {p['error']}" if p.get("error") else p.get("result", "null")
+
+    @mcp.tool()
+    def frida_get_field_value(package: str, class_name: str, field_name: str,
+                              serial: str = "") -> str:
+        """Read the value of a static Java field.
+
+        Uses reflection with setAccessible(true) so private fields are also
+        readable. Works for static fields only; for instance fields use
+        frida_eval to obtain an instance first.
+
+        Args:
+            package:    App package name, e.g. "com.example.app".
+            class_name: Fully-qualified class, e.g. "android.os.Build".
+            field_name: Field name, e.g. "MODEL".
+            serial:     Device serial. Leave empty if only one device.
+
+        Returns:
+            String representation of the field value, or "Error: ..." on failure.
+        """
+        try:
+            import frida  # noqa: F401
+        except ImportError:
+            return "Error: frida not installed. Run: pip install frida"
+
+        js = _JS_GET_FIELD % (json.dumps(class_name), json.dumps(field_name))
+        try:
+            with _session(package, serial) as sess:
+                payloads = _run_script(sess, js, timeout=15)
+        except Exception as e:
+            return f"Error: {e}"
+
+        if not payloads:
+            return "(no value)"
+        p = payloads[0]
+        return f"[error] {p['error']}" if p.get("error") else p.get("value", "null")
 
     @mcp.tool()
     def frida_eval(package: str, script: str,
@@ -483,38 +707,12 @@ def register(mcp):
             return "Error: frida not installed. Run: pip install frida"
 
         try:
-            _device, session = _frida_attach(package, serial)
+            with _session(package, serial) as sess:
+                payloads = _run_script(sess, script, timeout=timeout)
         except Exception as e:
-            return f"Error: could not attach to {package!r}: {e}"
+            return f"Error: {e}"
 
-        results = []
-        done = threading.Event()
-
-        def on_message(msg, _data):
-            if msg["type"] == "send":
-                p = msg["payload"]
-                if isinstance(p, dict) and p.get("done"):
-                    done.set()
-                else:
-                    results.append(p if isinstance(p, str) else json.dumps(p))
-            elif msg["type"] == "error":
-                results.append(f"[error] {msg.get('description', 'unknown')}")
-                done.set()
-
-        try:
-            bundle = _compile_js(script)
-            scr = session.create_script(bundle)
-            scr.on("message", on_message)
-            scr.load()
-            done.wait(timeout=timeout)
-        except Exception as e:
-            return f"Error: script error: {e}"
-        finally:
-            try:
-                session.detach()
-            except Exception:
-                pass
-
+        results = [p if isinstance(p, str) else json.dumps(p) for p in payloads]
         return "\n".join(results) if results else "(no output)"
 
     @mcp.tool()
@@ -899,6 +1097,78 @@ def _run_tests():
                     check("frida_list_methods filter: all lines contain filter term",
                           all(filter_term in l for l in filtered_lines) if filtered_lines else True,
                           filtered_lines[:3])
+
+                # ── frida_list_fields ────────────────────────────────────────
+                # Use android.os.Build — has many well-known public static fields
+                print("\n=== frida_tools: frida_list_fields (frida + device required) ===")
+                r_fields = T["frida_list_fields"](test_pkg, "android.os.Build")
+                if r_fields.startswith("Error:"):
+                    print(f"  SKIP  frida_list_fields ({r_fields})")
+                else:
+                    field_lines = [l for l in r_fields.splitlines() if l and not l.startswith("[error]")]
+                    check("frida_list_fields returns results",
+                          len(field_lines) > 0, r_fields[:200])
+                    check("frida_list_fields lines contain a Java type keyword",
+                          all(any(t in l for t in ("int", "long", "boolean", "String",
+                                                    "android", "java", "static", "final"))
+                              for l in field_lines),
+                          field_lines[:3])
+                    check("frida_list_fields contains MODEL field",
+                          any("MODEL" in l for l in field_lines), field_lines[:5])
+                    print(f"    → {len(field_lines)} fields found")
+                    for _f in field_lines[:5]:
+                        print(f"       {_f}")
+
+                    # filter param
+                    r_ff = T["frida_list_fields"](test_pkg, "android.os.Build", filter="String")
+                    filtered_ff = [l for l in r_ff.splitlines() if l and not l.startswith("[error]")]
+                    check("frida_list_fields filter: all lines contain 'String'",
+                          all("String" in l for l in filtered_ff) if filtered_ff else True,
+                          filtered_ff[:3])
+
+                # ── frida_get_class_hierarchy ────────────────────────────────
+                print("\n=== frida_tools: frida_get_class_hierarchy (frida + device required) ===")
+                r_hier = T["frida_get_class_hierarchy"](test_pkg, "com.android.settings.Settings")
+                if r_hier.startswith("Error:"):
+                    print(f"  SKIP  frida_get_class_hierarchy ({r_hier})")
+                else:
+                    hier_lines = [l for l in r_hier.splitlines() if l and not l.startswith("[error]")]
+                    check("frida_get_class_hierarchy returns results",
+                          len(hier_lines) > 0, r_hier[:300])
+                    check("frida_get_class_hierarchy contains superclass entries",
+                          any(l.startswith("superclass:") for l in hier_lines), hier_lines)
+                    check("frida_get_class_hierarchy chain ends at java.lang.Object",
+                          any("java.lang.Object" in l for l in hier_lines), hier_lines)
+                    check("frida_get_class_hierarchy contains android.app.Activity",
+                          any("android.app.Activity" in l for l in hier_lines), hier_lines)
+                    print(f"    → {len(hier_lines)} hierarchy entries:")
+                    for _h in hier_lines:
+                        print(f"       {_h}")
+
+                # ── frida_call_method ────────────────────────────────────────
+                print("\n=== frida_tools: frida_call_method (frida + device required) ===")
+                # android.os.SystemClock.elapsedRealtime() — no args, returns ms uptime as long
+                r_call = T["frida_call_method"](test_pkg, "android.os.SystemClock",
+                                                "elapsedRealtime", [])
+                print(f"    → frida_call_method SystemClock.elapsedRealtime(): {r_call!r}")
+                check("frida_call_method returns a numeric string",
+                      r_call.isdigit() or (r_call.lstrip("-").isdigit()), r_call)
+                check("frida_call_method result is positive uptime",
+                      int(r_call) > 0, r_call)
+
+                # ── frida_get_field_value ────────────────────────────────────
+                print("\n=== frida_tools: frida_get_field_value (frida + device required) ===")
+                # android.os.Build.MODEL — public static String, always set on any device
+                r_field = T["frida_get_field_value"](test_pkg, "android.os.Build", "MODEL")
+                print(f"    → frida_get_field_value Build.MODEL: {r_field!r}")
+                check("frida_get_field_value returns non-empty string",
+                      bool(r_field) and r_field != "null" and not r_field.startswith("[error]"),
+                      r_field)
+                # Cross-check against adb to confirm the value is correct
+                adb_model = _adb(["shell", "getprop", "ro.product.model"]).strip()
+                print(f"    → adb getprop ro.product.model: {adb_model!r}")
+                check("frida_get_field_value Build.MODEL matches adb ro.product.model",
+                      r_field.strip() == adb_model, f"frida={r_field!r} adb={adb_model!r}")
 
             except Exception as e:
                 print(f"  SKIP  frida_list_classes (no USB device: {e})")
