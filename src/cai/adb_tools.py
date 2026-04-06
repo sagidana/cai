@@ -165,7 +165,8 @@ def register(mcp):
         try:
             result = subprocess.run(
                 ["adb"] + args,
-                capture_output=True, text=True, timeout=30
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=30
             )
             out = result.stdout.strip()
             if result.returncode != 0:
@@ -257,3 +258,75 @@ def register(mcp):
         if filter:
             packages = [p for p in packages if filter in p]
         return "\n".join(packages) or "(no packages matched)"
+
+
+if __name__ == "__main__":
+    import sys
+
+    class _MockMCP:
+        def __init__(self): self._tools = {}
+        def tool(self):
+            def dec(fn): self._tools[fn.__name__] = fn; return fn
+            return dec
+
+    mcp = _MockMCP()
+    register(mcp)
+    T = mcp._tools
+
+    _pass = _fail = 0
+    def check(name, cond, got=""):
+        global _pass, _fail
+        if cond:
+            print(f"  PASS  {name}")
+            _pass += 1
+        else:
+            print(f"  FAIL  {name}  →  {got!r}")
+            _fail += 1
+
+    print("=== adb_tools tests ===")
+
+    # adb_devices: always exits 0 regardless of connected devices
+    r = T["adb_devices"]()
+    if r.startswith("Error: adb is not installed"):
+        print(f"  SKIP  all adb runtime tests (adb not on PATH)")
+    else:
+        check("adb_devices returns header", "List of devices" in r, r)
+
+        # adb_shell / adb_root_shell / adb_getprop / adb_package_list / adb_logcat:
+        # with no device they return a recognisable error; with a device they return output.
+        # Either outcome is acceptable — we just check there's no Python exception.
+        for tool_name, kwargs in [
+            ("adb_shell",      {"command": "echo hello"}),
+            ("adb_root_shell", {"command": "id"}),
+            ("adb_getprop",    {"prop": "ro.build.version.release"}),
+            ("adb_package_list", {}),
+            ("adb_logcat",     {"lines": 5}),
+        ]:
+            try:
+                r = T[tool_name](**kwargs)
+                check(f"{tool_name} no crash", True)
+            except Exception as e:
+                check(f"{tool_name} no crash", False, str(e))
+
+        # adb_forward: no device → error, but no Python exception
+        try:
+            r = T["adb_forward"](12345, 12345)
+            check("adb_forward no crash", True)
+        except Exception as e:
+            check("adb_forward no crash", False, str(e))
+
+    # --- safe_path rejection tests (no device needed) ---
+    r = T["adb_install"]("../../evil.apk")
+    check("adb_install traversal rejected", r.startswith("Error:"), r)
+
+    r = T["adb_pull"]("/sdcard/file.txt", "../../escape")
+    check("adb_pull local_path traversal rejected", r.startswith("Error:"), r)
+
+    r = T["adb_push"]("../../escape", "/sdcard/file.txt")
+    check("adb_push local_path traversal rejected", r.startswith("Error:"), r)
+
+    r = T["adb_screencap"]("../../escape.png")
+    check("adb_screencap local_path traversal rejected", r.startswith("Error:"), r)
+
+    print(f"\n{_pass} passed, {_fail} failed")
+    sys.exit(0 if _fail == 0 else 1)

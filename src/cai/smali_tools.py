@@ -72,11 +72,14 @@ def _smali_enclosing_method(node):
 
 def _smali_rg_files(needle: str, safe_path: str) -> list:
     """Return smali files whose text contains needle (fixed-string, via rg)."""
-    r = subprocess.run(
-        ['rg', '--fixed-strings', '-l', needle, '--glob', '*.smali', safe_path],
-        capture_output=True, text=True
-    )
-    return [f.strip() for f in r.stdout.splitlines() if f.strip()] if r.returncode in (0, 1) else []
+    try:
+        r = subprocess.run(
+            ['rg', '--fixed-strings', '-l', '-e', needle, '--glob', '*.smali', safe_path],
+            capture_output=True, text=True
+        )
+        return [f.strip() for f in r.stdout.splitlines() if f.strip()] if r.returncode in (0, 1) else []
+    except FileNotFoundError:
+        return []
 
 
 def register(mcp):
@@ -391,3 +394,159 @@ def register(mcp):
 
         _recurse(interface_descriptor, 0)
         return json.dumps(results)
+
+
+if __name__ == "__main__":
+    import sys
+    import shutil
+    import tempfile
+
+    class _MockMCP:
+        def __init__(self): self._tools = {}
+        def tool(self):
+            def dec(fn): self._tools[fn.__name__] = fn; return fn
+            return dec
+
+    mcp = _MockMCP()
+    register(mcp)
+    T = mcp._tools
+
+    _pass = _fail = 0
+    def check(name, cond, got=""):
+        global _pass, _fail
+        if cond:
+            print(f"  PASS  {name}")
+            _pass += 1
+        else:
+            print(f"  FAIL  {name}  →  {got!r}")
+            _fail += 1
+
+    print("=== smali_tools tests ===")
+
+    # --- safe_path rejections ---
+    for tool_name in ("smali_find_callers", "smali_find_callees",
+                      "smali_resolve_descriptor", "smali_find_implementations"):
+        r = T[tool_name]("anything", path="../../etc")
+        check(f"{tool_name} traversal rejected", r.startswith("Error:"), r)
+
+    # smali_find_callees: missing '->' in descriptor
+    r = T["smali_find_callees"]("NoDashArrow", path=".")
+    check("smali_find_callees bad descriptor", r.startswith("Error:"), r)
+
+    # smali_resolve_descriptor: already-full descriptor is returned as-is
+    full = "Lcom/example/Foo;->bar(I)V"
+    r = T["smali_resolve_descriptor"](full, path=".")
+    data = json.loads(r)
+    check("smali_resolve_descriptor full passthrough", len(data) == 1 and data[0]["descriptor"] == full, r)
+
+    # --- synthetic smali files ---
+    tmp = tempfile.mkdtemp(dir=".")
+    rel = os.path.relpath(tmp)
+
+    FOO_SMALI = """\
+.class public Lcom/example/Foo;
+.super Ljava/lang/Object;
+
+.method public static main()V
+    .registers 1
+    invoke-static {}, Lcom/example/Bar;->doSomething()V
+    return-void
+.end method
+"""
+    BAR_SMALI = """\
+.class public Lcom/example/Bar;
+.super Ljava/lang/Object;
+
+.method public static doSomething()V
+    .registers 1
+    return-void
+.end method
+"""
+    IFACE_SMALI = """\
+.class public interface Lcom/example/IProcessor;
+.super Ljava/lang/Object;
+
+.method public abstract process()V
+.end method
+"""
+    IMPL_SMALI = """\
+.class public Lcom/example/ProcessorImpl;
+.super Ljava/lang/Object;
+.implements Lcom/example/IProcessor;
+
+.method public process()V
+    .registers 1
+    return-void
+.end method
+"""
+    # Skip synthetic tests if rg or tree-sitter is unavailable
+    try:
+        subprocess.run(["rg", "--version"], capture_output=True, check=True)
+        _rg_ok = True
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        _rg_ok = False
+
+    if not _rg_ok:
+        print("  SKIP  all synthetic smali tests (rg not on PATH)")
+        shutil.rmtree(tmp, ignore_errors=True)
+        print(f"\n{_pass} passed, {_fail} failed")
+        sys.exit(0 if _fail == 0 else 1)
+
+    try:
+        with open(os.path.join(tmp, "Foo.smali"), "w") as f: f.write(FOO_SMALI)
+        with open(os.path.join(tmp, "Bar.smali"), "w") as f: f.write(BAR_SMALI)
+        with open(os.path.join(tmp, "IProcessor.smali"), "w") as f: f.write(IFACE_SMALI)
+        with open(os.path.join(tmp, "ProcessorImpl.smali"), "w") as f: f.write(IMPL_SMALI)
+
+        # smali_find_callers
+        r = T["smali_find_callers"]("->doSomething(", path=rel)
+        data = json.loads(r)
+        check("smali_find_callers finds caller", len(data) == 1, r)
+        check("smali_find_callers caller class", data[0]["caller_class"] == "Lcom/example/Foo;", data)
+        check("smali_find_callers invoke_kind", data[0]["invoke_kind"] == "static", data)
+
+        r = T["smali_find_callers"]("->nonexistent(", path=rel)
+        check("smali_find_callers no match → []", json.loads(r) == [], r)
+
+        # smali_find_callees
+        r = T["smali_find_callees"]("Lcom/example/Foo;->main()V", path=rel)
+        data = json.loads(r)
+        check("smali_find_callees finds callee", len(data) == 1, r)
+        check("smali_find_callees callee descriptor",
+              "Lcom/example/Bar;->doSomething()V" in data[0]["callee_descriptor"], data)
+
+        r = T["smali_find_callees"]("Lcom/example/Bar;->doSomething()V", path=rel)
+        data = json.loads(r)
+        check("smali_find_callees leaf method → []", data == [], r)
+
+        # smali_resolve_descriptor
+        r = T["smali_resolve_descriptor"]("Bar", path=rel)
+        data = json.loads(r)
+        check("smali_resolve_descriptor by class name", any(d["descriptor"] == "Lcom/example/Bar;" for d in data), r)
+
+        r = T["smali_resolve_descriptor"]("doSomething", path=rel)
+        data = json.loads(r)
+        check("smali_resolve_descriptor by method name", any("doSomething" in d["descriptor"] for d in data), r)
+
+        # smali_find_implementations
+        r = T["smali_find_implementations"]("Lcom/example/IProcessor;", path=rel)
+        data = json.loads(r)
+        check("smali_find_implementations finds impl", len(data) == 1, r)
+        check("smali_find_implementations implementor",
+              data[0]["implementor_class"] == "Lcom/example/ProcessorImpl;", data)
+
+        r = T["smali_find_implementations"]("Lcom/example/IProcessor;", method_name="process", path=rel)
+        data = json.loads(r)
+        check("smali_find_implementations with method filter", len(data) == 1, r)
+
+        r = T["smali_find_implementations"]("Lcom/example/IProcessor;", method_name="nonexistent", path=rel)
+        data = json.loads(r)
+        check("smali_find_implementations method filter no match → []", data == [], r)
+
+    except ImportError as e:
+        print(f"  SKIP  smali synthetic tests (tree_sitter_language_pack unavailable: {e})")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    print(f"\n{_pass} passed, {_fail} failed")
+    sys.exit(0 if _fail == 0 else 1)

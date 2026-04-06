@@ -65,6 +65,7 @@ def register(mcp):
         except (IOError, OSError) as e:
             return f"Error: {e}"
 
+
     @mcp.tool()
     def list_files(path: str = ".", pattern: str = "") -> str:
         """Recursively list all files and directories under the given path, ordered by depth
@@ -249,3 +250,110 @@ def register(mcp):
         with open(safe, 'w') as f:
             f.write(updated)
         return f"Replaced 1 occurrence in {file_path}"
+
+
+if __name__ == "__main__":
+    import sys
+    import tempfile
+
+    class _MockMCP:
+        def __init__(self): self._tools = {}
+        def tool(self):
+            def dec(fn): self._tools[fn.__name__] = fn; return fn
+            return dec
+
+    mcp = _MockMCP()
+    register(mcp)
+    T = mcp._tools
+
+    _pass = _fail = 0
+    def check(name, cond, got=""):
+        global _pass, _fail
+        if cond:
+            print(f"  PASS  {name}")
+            _pass += 1
+        else:
+            print(f"  FAIL  {name}  →  {got!r}")
+            _fail += 1
+
+    print("=== files_tools tests ===")
+
+    # Use a temp subdir inside CWD so safe_path accepts relative paths
+    tmp = tempfile.mkdtemp(dir=".")
+    rel = os.path.relpath(tmp)
+
+    try:
+        # create_file
+        r = T["create_file"](f"{rel}/hello.txt", "line1\nline2\nline3\n")
+        check("create_file", "Created" in r, r)
+
+        # read_file - whole file
+        r = T["read_file"](f"{rel}/hello.txt")
+        check("read_file whole", r == "line1\nline2\nline3\n", r)
+
+        # read_file - line range
+        r = T["read_file"](f"{rel}/hello.txt", 2, 3)
+        check("read_file line range", r == "line2\nline3\n", r)
+
+        # read_file - start beyond EOF
+        r = T["read_file"](f"{rel}/hello.txt", 999)
+        check("read_file beyond EOF", r == "", r)
+
+        # list_files
+        r = T["list_files"](rel)
+        check("list_files", "hello.txt" in r, r)
+
+        # list_files with pattern
+        r = T["list_files"](rel, r"\.txt$")
+        check("list_files pattern match", "hello.txt" in r, r)
+
+        r = T["list_files"](rel, r"\.py$")
+        check("list_files pattern no match", r == "(empty)", r)
+
+        # search
+        r = T["search"]("line2", rel)
+        if "rg) is not installed" in r:
+            print("  SKIP  search found (rg not on PATH)")
+            print("  SKIP  search no match (rg not on PATH)")
+        else:
+            check("search found", "line2" in r, r)
+            r2 = T["search"]("zzznomatch", rel)
+            check("search no match", "No matches" in r2, r2)
+
+        # edit_file
+        r = T["edit_file"](f"{rel}/hello.txt", "line1", "changed")
+        check("edit_file", "Replaced 1 occurrence" in r, r)
+
+        r = T["read_file"](f"{rel}/hello.txt", 1, 1)
+        check("edit_file content updated", "changed" in r, r)
+
+        r = T["edit_file"](f"{rel}/hello.txt", "zzznomatch", "x")
+        check("edit_file old_text not found", r.startswith("Error:"), r)
+
+        # rename_file
+        r = T["rename_file"](f"{rel}/hello.txt", f"{rel}/renamed.txt")
+        check("rename_file", "Renamed" in r, r)
+
+        check("rename_file source gone", not os.path.exists(f"{tmp}/hello.txt"))
+        check("rename_file dest exists", os.path.exists(f"{tmp}/renamed.txt"))
+
+        # remove_file
+        r = T["remove_file"](f"{rel}/renamed.txt")
+        check("remove_file", "Removed" in r, r)
+
+        r = T["remove_file"](f"{rel}/renamed.txt")
+        check("remove_file missing", r.startswith("Error:"), r)
+
+        # safe_path rejection
+        r = T["read_file"]("../../etc/passwd")
+        check("safe_path traversal rejected", r.startswith("Error:"), r)
+
+        r = T["create_file"]("../outside.txt", "x")
+        check("create_file traversal rejected", r.startswith("Error:"), r)
+
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    print(f"\n{_pass} passed, {_fail} failed")
+    sys.exit(0 if _fail == 0 else 1)
