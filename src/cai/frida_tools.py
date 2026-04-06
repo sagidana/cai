@@ -10,14 +10,13 @@ import uuid
 
 from cai.utils import safe_path
 
-REGISTRY_PATH = "/tmp/cai_frida_registry.json"
-LOG_DIR = "/tmp/cai_frida_logs"
+# All runtime state lives under /tmp/cai/ — no user setup required.
+_CAI_DIR      = "/tmp/cai"
+REGISTRY_PATH = os.path.join(_CAI_DIR, "frida_registry.json")
+LOG_DIR       = os.path.join(_CAI_DIR, "frida_logs")
+_FRIDA_JS_ROOT     = os.path.join(_CAI_DIR, "frida_js")
+_FRIDA_SERVER_CACHE = os.path.join(_CAI_DIR, "frida_server")
 DEVICE_SERVER = "/data/local/tmp/frida-server"
-
-# Frida 17: frida-java-bridge is no longer a built-in global. Scripts must use
-# ESM import syntax and be compiled via frida.Compiler before loading.
-# _FRIDA_JS_ROOT must point to a directory containing node_modules/frida-java-bridge.
-_FRIDA_JS_ROOT = os.environ.get("FRIDA_JS_ROOT", "/tmp/frida_js_test")
 
 _JS_LIST_CLASSES = """\
 import Java from "frida-java-bridge";
@@ -75,6 +74,99 @@ import Java from "frida-java-bridge";
   });
 })(%s, %s)
 """
+
+
+def _ensure_frida_js() -> None:
+    """Install frida-java-bridge into _FRIDA_JS_ROOT if not already present.
+
+    Called lazily on first compile so no user setup is required after
+    ``pip install cai``.  Requires npm to be on PATH.
+    """
+    bridge_dir = os.path.join(_FRIDA_JS_ROOT, "node_modules", "frida-java-bridge")
+    if os.path.isdir(bridge_dir):
+        return
+
+    os.makedirs(_FRIDA_JS_ROOT, exist_ok=True)
+
+    pkg_json = os.path.join(_FRIDA_JS_ROOT, "package.json")
+    if not os.path.exists(pkg_json):
+        with open(pkg_json, "w") as f:
+            json.dump({
+                "name": "cai-frida-js",
+                "version": "1.0.0",
+                "private": True,
+                "dependencies": {"frida-java-bridge": "*"},
+            }, f)
+
+    result = subprocess.run(
+        ["npm", "install", "--prefix", _FRIDA_JS_ROOT],
+        capture_output=True, text=True, timeout=120,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"npm install frida-java-bridge failed:\n{result.stderr.strip()}"
+        )
+
+
+def _ensure_frida_server(serial: str = "") -> str:
+    """Return a local path to a frida-server binary matching the installed frida version.
+
+    Downloads from the official GitHub release if not already cached under
+    _FRIDA_SERVER_CACHE.  The binary version is derived from ``frida.__version__``
+    so it always matches the Python package installed by ``pip install cai``.
+
+    Args:
+        serial: Device serial used to detect the device ABI via adb.
+
+    Returns:
+        Absolute path to the cached binary, ready to push to the device.
+
+    Raises:
+        RuntimeError: if adb, the ABI, or the download fails.
+    """
+    import frida as _frida_mod
+    import lzma
+    import urllib.request
+
+    version = _frida_mod.__version__
+    prefix = ["-s", serial] if serial else []
+
+    abi = _adb(prefix + ["shell", "getprop", "ro.product.cpu.abi"]).strip()
+    if not abi or abi.startswith("Error:"):
+        raise RuntimeError(f"Could not detect device ABI: {abi!r}")
+
+    arch_map = {
+        "arm64-v8a":   "arm64",
+        "armeabi-v7a": "arm",
+        "x86_64":      "x86_64",
+        "x86":         "x86",
+    }
+    arch = arch_map.get(abi, abi)
+
+    os.makedirs(_FRIDA_SERVER_CACHE, exist_ok=True)
+    binary_name = f"frida-server-{version}-android-{arch}"
+    binary_path = os.path.join(_FRIDA_SERVER_CACHE, binary_name)
+
+    if os.path.isfile(binary_path):
+        return binary_path
+
+    url = (
+        f"https://github.com/frida/frida/releases/download/"
+        f"{version}/{binary_name}.xz"
+    )
+    xz_path = binary_path + ".xz"
+    try:
+        urllib.request.urlretrieve(url, xz_path)
+        with lzma.open(xz_path) as xz_f, open(binary_path, "wb") as out_f:
+            out_f.write(xz_f.read())
+        os.chmod(binary_path, 0o755)
+    finally:
+        try:
+            os.unlink(xz_path)
+        except OSError:
+            pass
+
+    return binary_path
 
 
 def _adb(args: list, timeout: int = 30) -> str:
@@ -140,10 +232,12 @@ def _compile_js(js: str) -> str:
     """Compile an ESM script (using frida-java-bridge imports) into a loadable bundle.
 
     Requires frida-java-bridge to be installed as an npm package under
-    _FRIDA_JS_ROOT/node_modules. Falls back to the raw source (for runtimes
-    that support static import natively).
+    _FRIDA_JS_ROOT/node_modules. The temp source file is written to the system
+    temp dir (always writable); _FRIDA_JS_ROOT is only used as project_root so
+    the compiler can locate node_modules.
     """
     import frida  # deferred
+    _ensure_frida_js()
     with tempfile.NamedTemporaryFile(
         suffix=".js", mode="w", dir=_FRIDA_JS_ROOT, delete=False
     ) as f:
@@ -189,28 +283,43 @@ def register(mcp):
     def frida_server_start(serial: str = "", server_binary: str = "") -> str:
         """Start frida-server on a connected Android device.
 
-        Starts frida-server as a background daemon. Requires a rooted device
-        (su must be available). Uses nohup + full stdio redirect so the adb
-        shell exits immediately and the call stays synchronous.
+        Automatically downloads the correct frida-server binary for the
+        device's ABI and the installed frida version (from pip) if one is not
+        already present on the device or provided explicitly.  Requires a
+        rooted device (su must be available).
 
         Args:
             serial:        Device serial (from adb devices). Leave empty if only
                            one device is connected.
-            server_binary: Local path to a frida-server binary to push to the
-                           device first. Leave empty to use the binary already
-                           on the device at /data/local/tmp/frida-server.
+            server_binary: Local path to a specific frida-server binary to push.
+                           Leave empty to auto-download the version that matches
+                           the installed frida Python package.
 
         Returns:
             Status string, or "Error: ..." on failure.
         """
         prefix = ["-s", serial] if serial else []
 
+        # Resolve the binary to push: explicit path → auto-download → skip push
+        binary_to_push = None
         if server_binary:
             try:
-                safe_bin = safe_path(server_binary)
+                binary_to_push = safe_path(server_binary)
             except ValueError as e:
                 return str(e)
-            r = _adb(prefix + ["push", safe_bin, DEVICE_SERVER], timeout=60)
+        else:
+            # Check if a matching binary is already on the device
+            running = _adb(prefix + ["shell", "pgrep", "-f", "frida-server"])
+            already_on_device = _adb(prefix + ["shell", "test", "-f", DEVICE_SERVER,
+                                                "&&", "echo", "yes"]).strip() == "yes"
+            if not already_on_device:
+                try:
+                    binary_to_push = _ensure_frida_server(serial)
+                except Exception as e:
+                    return f"Error: could not obtain frida-server binary: {e}"
+
+        if binary_to_push:
+            r = _adb(prefix + ["push", binary_to_push, DEVICE_SERVER], timeout=120)
             if r.startswith("Error:"):
                 return r
             r = _adb(prefix + ["shell", "su", "-c", f"chmod 755 {DEVICE_SERVER}"])
@@ -494,17 +603,18 @@ def _run_worker(hook_id, package, class_name, method_name, log_file, serial):
     """Background daemon: attaches frida, hooks method, writes log until SIGTERM."""
     import signal as _signal
 
+    # Create log directory first so _write always works, even in error paths.
+    os.makedirs(os.path.dirname(log_file), exist_ok=True)
+
     def _write(entry):
         with open(log_file, "a") as f:
             f.write(json.dumps(entry) + "\n")
 
     try:
-        import frida
+        import frida  # noqa: F401
     except ImportError:
         _write({"event": "fatal", "error": "frida not installed", "ts": 0})
         return
-
-    os.makedirs(os.path.dirname(log_file), exist_ok=True)
 
     js = _JS_HOOK_WORKER % (json.dumps(class_name), json.dumps(method_name))
 
@@ -520,12 +630,21 @@ def _run_worker(hook_id, package, class_name, method_name, log_file, serial):
         elif msg["type"] == "error":
             _write({"event": "frida_error", "error": msg.get("description", ""), "ts": 0})
 
-    bundle = _compile_js(js)
-    script = session.create_script(bundle)
-    script.on("message", on_message)
+    try:
+        bundle = _compile_js(js)
+        script = session.create_script(bundle)
+        script.on("message", on_message)
+        script.load()
+    except Exception as e:
+        _write({"event": "script_error", "error": str(e), "ts": 0})
+        try:
+            session.detach()
+        except Exception:
+            pass
+        return
+
     _write({"event": "worker_start", "hook_id": hook_id,
             "class": class_name, "method": method_name, "ts": 0})
-    script.load()
 
     stop = threading.Event()
     _signal.signal(_signal.SIGTERM, lambda *_: stop.set())
@@ -782,6 +901,60 @@ def _run_tests():
                               "enter" in r_log2, r_log2[:400])
                         check("frida_hook_log: leave event captured",
                               "leave" in r_log2, r_log2[:400])
+
+                        # ── Group 5b: specific custom-string verification ─────
+                        # Accumulate everything logged so far for full inspection.
+                        print("\n=== frida_tools: specific custom-string log verification ===")
+                        all_log = r_log1 + "\n" + r_log2
+
+                        # The hook_id is a unique UUID prefix we generated — it
+                        # must appear verbatim inside the worker_start JSON entry.
+                        check("log contains unique hook_id string",
+                              hook_id in all_log, all_log[:500])
+
+                        # The class and method names we passed to frida_hook_method
+                        # must appear verbatim inside every enter/leave event.
+                        check("log contains hooked class name",
+                              hook_cls in all_log, all_log[:500])
+                        check("log contains hooked method name",
+                              hook_meth in all_log, all_log[:500])
+
+                        # Parse every line and assert the enter event has the
+                        # correct structured fields — not just substrings.
+                        parsed = []
+                        for _raw in all_log.splitlines():
+                            _raw = _raw.strip()
+                            if not _raw:
+                                continue
+                            try:
+                                parsed.append(json.loads(_raw))
+                            except json.JSONDecodeError:
+                                pass
+
+                        enter_events = [e for e in parsed if e.get("event") == "enter"]
+                        leave_events = [e for e in parsed if e.get("event") == "leave"]
+
+                        check("enter event: class field == hooked class",
+                              any(e.get("class") == hook_cls for e in enter_events),
+                              str(enter_events))
+                        check("enter event: method field == hooked method",
+                              any(e.get("method") == hook_meth for e in enter_events),
+                              str(enter_events))
+                        check("enter event: args field is a list",
+                              all(isinstance(e.get("args"), list) for e in enter_events),
+                              str(enter_events))
+                        check("enter event: ts field is an integer",
+                              all(isinstance(e.get("ts"), int) for e in enter_events),
+                              str(enter_events))
+                        check("leave event: retval field present",
+                              all("retval" in e for e in leave_events),
+                              str(leave_events))
+
+                        # Print a summary of all captured events for visibility
+                        print(f"    → parsed {len(parsed)} total log entries, "
+                              f"{len(enter_events)} enter, {len(leave_events)} leave")
+                        for _e in parsed:
+                            print(f"       {json.dumps(_e)}")
 
                         # 6. Unhook
                         r_unhook = T["frida_unhook_method"](hook_id)
