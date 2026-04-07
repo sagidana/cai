@@ -1110,7 +1110,7 @@ def action_interactive(args, available_tools, external_mcps):
                 user_input = screen.prompt("> ")
             if not user_input.strip():
                 continue
-            if user_input.startswith(":"):
+            if user_input.startswith("/"):
                 _handle_interactive_cmd(user_input[1:].strip(), screen, messages, args, status_callback, last_ctx)
                 continue
             messages.append({"role": "user", "content": user_input})

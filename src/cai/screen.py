@@ -1,13 +1,18 @@
 """
-screen.py — full-screen TUI via raw ANSI escape codes.
+screen.py — inline TUI via raw ANSI escape codes.
 
-Layout (rows top to bottom, 1-indexed):
-  1 … (rows - 2)  : conversation view (content buffer, redrawn on resize)
-  (rows - 1)      : prompt / input line
-  rows            : status bar
+Content streams directly into the normal terminal buffer so the user can
+scroll back through conversation history with the terminal's own scrollback.
 
-Uses the alternate screen buffer (\033[?1049h) so the original terminal
-contents are fully restored when the TUI exits.
+The only "managed" region is a two-line footer (status + prompt) that is
+drawn just before input is collected and erased on Enter.  A saved-cursor
+anchor (\033[s / \033[u) is used to redraw the footer in place without
+knowing absolute row numbers.
+
+Layout while prompting:
+  [anchor line — blank, saved with \033[s]
+  status bar   — model name / context info
+  prompt line  — "> " + user input
 """
 
 import os
@@ -128,7 +133,7 @@ class _CommandException(Exception):
 # ---------------------------------------------------------------------------
 
 class Screen:
-    """Full-screen TUI for --interactive mode.  Sole owner of the terminal."""
+    """Inline TUI for --interactive mode.  Content flows into terminal scrollback."""
 
     _PROMPT_PREFIX = '> '
     _CONT_PREFIX   = '  '   # continuation-line prefix (same visual width)
@@ -149,12 +154,6 @@ class Screen:
         ts = shutil.get_terminal_size()
         self._rows: int = ts.lines
         self._cols: int = ts.columns
-
-        # Conversation content buffer (source of truth)
-        self._segments: list[str] = []
-        self._display_lines: list[str] = []
-        self._pinned_top_line: int = 0  # absolute first visible line when frozen
-        self._follow_tail: bool = True
 
         # Input state
         self._input_buf: list[str] = []
@@ -178,7 +177,7 @@ class Screen:
         # Guard against double-close
         self._closed: bool = False
 
-        # Threading: render lock + input listener for scroll/interrupt during streaming
+        # Threading: render lock + input listener for interrupt during streaming
         self._render_lock = threading.RLock()
         self._interrupt_event = threading.Event()
         self._listener_active = False
@@ -190,141 +189,94 @@ class Screen:
         # Save "cooked" terminal attrs for vim handoff
         self._cooked_attrs = termios.tcgetattr(self._tty_fd)
 
-        # Enter alternate screen, clear it, hide cursor
-        sys.stdout.write('\033[?1049h\033[2J\033[?25l')
+        # Hide cursor initially (shown when prompt is active)
+        sys.stdout.write('\033[?25l')
         sys.stdout.flush()
 
         signal.signal(signal.SIGWINCH, self._on_resize)
 
-        # Draw initial (empty) status bar
-        self._redraw_status()
-        sys.stdout.flush()
+    # ------------------------------------------------------------------ footer rendering
 
-    # ------------------------------------------------------------------ layout
+    def _redraw_footer(self, msg: str = '> ') -> None:
+        """
+        Restore to the saved footer anchor, clear to end of screen, and
+        redraw the status line + prompt with the current input buffer.
 
-    def _main_rows(self) -> int:
-        """Rows available for the conversation view (rows 1 … rows-2)."""
-        return max(1, self._rows - 2)
+        Must be called only after \033[s has been written (done at the top of
+        prompt() and whenever the footer is redrawn from scratch).
+        """
+        # Return to anchor (col 1 of the blank anchor line), clear to end
+        sys.stdout.write('\033[u\r\033[J')
 
-    def _prompt_row(self) -> int:
-        return self._rows - 1
+        # Status line (one line below anchor)
+        text = self._status_text[: self._cols - 1]
+        sys.stdout.write(f'\n{self._STATUS_STYLE}{text}\033[K{self._RESET}')
 
-    def _status_row(self) -> int:
-        return self._rows
-
-    # ------------------------------------------------------------------ content buffer
-
-    def _rebuild_display_lines(self) -> None:
-        """Re-wrap all segments into display lines for the current column width."""
-        raw = ''.join(self._segments)
-        # cols-1 to avoid terminal auto-wrap at the last column
-        self._display_lines = _wrap_ansi(raw, max(1, self._cols - 1))
-        if not self._follow_tail:
-            max_top = max(0, len(self._display_lines) - self._main_rows())
-            if self._pinned_top_line > max_top:
-                self._pinned_top_line = max_top
-
-    # ------------------------------------------------------------------ rendering
-
-    def _redraw_main_view(self) -> None:
-        """Redraw the conversation area."""
-        h = self._main_rows()
-        total = len(self._display_lines)
-
-        if self._follow_tail:
-            start = max(0, total - h)
-        else:
-            start = self._pinned_top_line
-        end = start + h
-
-        visible = self._display_lines[start:end]
-
-        buf: list[str] = []
-        for i, line in enumerate(visible):
-            row = i + 1   # 1-indexed
-            buf.append(f'\033[{row};1H\033[m\033[K{line}')
-        # Clear any unused rows below the content
-        for i in range(len(visible), h):
-            buf.append(f'\033[{i + 1};1H\033[K')
-
-        sys.stdout.write(''.join(buf))
-
-    def _redraw_prompt_line(self, msg: str = '> ') -> None:
-        """Redraw the input row and position the cursor correctly."""
-        row = self._prompt_row()
-        sys.stdout.write(f'\033[{row};1H\033[m\033[K')
-
+        # Prompt line(s) — handle multi-line input (Alt-Enter / backslash)
         buf_str = ''.join(self._input_buf)
         lines = buf_str.split('\n')
-
         chars_before = ''.join(self._input_buf[: self._cursor_pos])
-        line_idx = chars_before.count('\n')
+        line_idx = chars_before.count('\n')   # which logical line the cursor is on
 
-        current_line = lines[line_idx] if line_idx < len(lines) else ''
-        prefix = msg if line_idx == 0 else self._CONT_PREFIX
-        sys.stdout.write(f'{prefix}{current_line}')
+        for i, line in enumerate(lines):
+            prefix = msg if i == 0 else self._CONT_PREFIX
+            # Use \r\n, not bare \n: in raw mode \n is a pure line-feed that
+            # does NOT reset the column, so without \r the prompt would start
+            # at whatever column the status text ended at.
+            sys.stdout.write(f'\r\n{prefix}{line}')
+
+        # Move cursor to the correct line and column
+        # After printing all lines the cursor is on the last line.
+        # Move up if the edit cursor is on an earlier line.
+        lines_below_cursor = len(lines) - 1 - line_idx
+        if lines_below_cursor > 0:
+            sys.stdout.write(f'\033[{lines_below_cursor}A')
 
         last_nl = chars_before.rfind('\n')
         cursor_in_line = len(chars_before) - last_nl - 1
-        col = len(prefix) + cursor_in_line + 1   # 1-indexed
-        sys.stdout.write(f'\033[{row};{col}H')
-
-    def _clear_prompt_row(self) -> None:
-        row = self._prompt_row()
-        sys.stdout.write(f'\033[{row};1H\033[m\033[K')
-
-    def _redraw_status(self) -> None:
-        """Redraw the status bar (cursor lands at status row after this)."""
-        sr = self._status_row()
-        text = self._status_text[: self._cols - 1]
-        sys.stdout.write(
-            f'\033[{sr};1H\033[m'
-            f'{self._STATUS_STYLE}{text}\033[K\033[m'
-        )
-
-    def _redraw_all(self) -> None:
-        """Full repaint of every region."""
-        sys.stdout.write('\033[2J')
-        self._redraw_main_view()
-        if self._in_prompt:
-            self._redraw_prompt_line(self._current_prompt_msg)
-        self._redraw_status()
+        prefix = msg if line_idx == 0 else self._CONT_PREFIX
+        col = len(prefix) + cursor_in_line   # 0-indexed offset from col 1
+        if col > 0:
+            sys.stdout.write(f'\r\033[{col}C')
+        else:
+            sys.stdout.write('\r')
 
     # ------------------------------------------------------------------ public API
 
     def write(self, text: str) -> None:
-        """Append *text* to the conversation view and redraw."""
+        """Write *text* directly to stdout (flows into terminal scrollback)."""
         if not text:
             return
         with self._render_lock:
-            self._segments.append(text)
-            self._rebuild_display_lines()
-            self._redraw_main_view()
-            if self._in_prompt:
-                self._redraw_prompt_line(self._current_prompt_msg)
-            if not self._cmd_mode:
-                self._redraw_status()
+            # Normalize newlines to \r\n.  The input-listener thread calls
+            # tty.setraw() during LLM streaming, so a bare \n is a pure
+            # line-feed that does NOT reset the column — producing progressively
+            # indented output.  Normalising ensures every line starts at col 1
+            # in both raw and cooked mode (the extra \r is a no-op in cooked).
+            normalized = text.replace('\r\n', '\n').replace('\n', '\r\n')
+            sys.stdout.write(normalized)
             sys.stdout.flush()
 
     def set_status(self, text: str) -> None:
-        """Update the status bar in place."""
+        """Update the status bar text.  Redraws the footer if currently prompting."""
         self._status_text = text
-        if not self._cmd_mode:
-            self._redraw_status()
-            if self._in_prompt:
-                self._redraw_prompt_line(self._current_prompt_msg)
-            sys.stdout.flush()
+        if self._in_prompt and not self._cmd_mode:
+            with self._render_lock:
+                self._redraw_footer(self._current_prompt_msg)
+                sys.stdout.flush()
 
     def show_prompt_placeholder(self, msg: str = '> ') -> None:
-        """Draw the prompt prefix without entering input mode."""
-        self._clear_prompt_row()
-        row = self._prompt_row()
-        sys.stdout.write(f'\033[{row};1H{msg}')
-        sys.stdout.flush()
+        """No-op in inline mode — streaming output acts as its own indicator."""
+        pass
 
     def prompt(self, msg: str = '> ') -> str:
         """
-        Collect user input at the prompt row.  Returns the entered string.
+        Collect user input at the prompt.  Returns the entered string.
+
+        Draws a two-line footer (status + prompt) just above the cursor,
+        anchored with \033[s so it can be redrawn in-place on every keypress.
+        On Enter the footer is erased and the submitted text is written
+        permanently into the terminal buffer before returning.
 
         Blocking.  Raises KeyboardInterrupt on Ctrl-C, EOFError on Ctrl-D
         with an empty buffer.
@@ -335,6 +287,16 @@ class Screen:
         self._cursor_pos = 0
         self._history_idx = -1
 
+        # Pre-reserve FOOTER_ROWS lines below the cursor before saving the anchor.
+        # Without this, _redraw_footer's two \n characters would scroll the terminal
+        # when the cursor is at or near the bottom row, invalidating the saved position
+        # and causing a spurious scroll on every subsequent keypress.
+        FOOTER_ROWS = 2
+        sys.stdout.write(f'\n' * FOOTER_ROWS + f'\033[{FOOTER_ROWS}A')
+        # Save the footer anchor.  _redraw_footer uses \033[u to return here.
+        sys.stdout.write('\033[s')
+        sys.stdout.flush()
+
         old = termios.tcgetattr(self._tty_fd)
         result = None
         caught_exc = None
@@ -342,7 +304,7 @@ class Screen:
             tty.setraw(self._tty_fd)
             termios.tcflush(self._tty_fd, termios.TCIFLUSH)
             sys.stdout.write('\033[?25h\033[5 q')   # show blinking bar cursor
-            self._redraw_prompt_line(msg)
+            self._redraw_footer(msg)
             sys.stdout.flush()
 
             while True:
@@ -353,7 +315,13 @@ class Screen:
                     result = e.value
                     break
                 except _CommandException as e:
-                    result = f':{e.value}'
+                    # Clear the footer and echo the command into the terminal
+                    # buffer so it becomes part of the permanent history.
+                    sys.stdout.write('\033[u\r\033[J')
+                    cmd_str = f'/{e.value}' if e.value else '/'
+                    sys.stdout.write(f'{self._META_STYLE}{cmd_str}{self._RESET}\r\n\r\n')
+                    sys.stdout.flush()
+                    result = f'/{e.value}'
                     break
                 sys.stdout.flush()
 
@@ -365,8 +333,8 @@ class Screen:
             sys.stdout.write('\033[?25l\033[0 q')   # hide cursor, reset shape
             sys.stdout.flush()
             if caught_exc is not None:
-                self._clear_prompt_row()
-                self._redraw_status()
+                # Clear the footer on interrupt/EOF
+                sys.stdout.write('\033[u\r\033[J')
                 sys.stdout.flush()
                 raise caught_exc
 
@@ -375,7 +343,7 @@ class Screen:
     # ------------------------------------------------------------------ streaming listener
 
     def start_input_listener(self) -> None:
-        """Start a daemon thread that reads scroll/interrupt keys during LLM streaming."""
+        """Start a daemon thread that reads interrupt keys during LLM streaming."""
         self._interrupt_event.clear()
         self._listener_active = True
         self._listener_thread = threading.Thread(
@@ -391,7 +359,7 @@ class Screen:
             self._listener_thread = None
 
     def _input_listener_loop(self) -> None:
-        """Daemon loop: read raw keys and handle scroll/interrupt during streaming."""
+        """Daemon loop: read raw keys and handle interrupt during streaming."""
         old = termios.tcgetattr(self._tty_fd)
         try:
             tty.setraw(self._tty_fd)
@@ -405,59 +373,17 @@ class Screen:
             termios.tcsetattr(self._tty_fd, termios.TCSADRAIN, old)
 
     def _handle_listener_key(self, key: str) -> None:
-        """Handle a keypress received during streaming (scroll + Ctrl-C interrupt)."""
+        """Handle a keypress received during streaming (Ctrl-C interrupt only)."""
         if key == '\x03':    # Ctrl-C → signal interrupt
             self._interrupt_event.set()
-            return
-
-        with self._render_lock:
-            h = self._main_rows()
-            total = len(self._display_lines)
-
-            if key == '\033[5~':   # Page Up
-                full = max(1, h)
-                current_start = max(0, total - h) if self._follow_tail else self._pinned_top_line
-                self._follow_tail = False
-                self._pinned_top_line = max(0, current_start - full)
-                self._redraw_main_view()
-                sys.stdout.flush()
-            elif key == '\033[6~':   # Page Down
-                full = max(1, h)
-                if not self._follow_tail:
-                    new_top = self._pinned_top_line + full
-                    if new_top >= max(0, total - h):
-                        self._follow_tail = True
-                        self._pinned_top_line = 0
-                    else:
-                        self._pinned_top_line = new_top
-                self._redraw_main_view()
-                sys.stdout.flush()
-            elif key == '\x15':   # Ctrl-U — half page up
-                half = max(1, h // 2)
-                current_start = max(0, total - h) if self._follow_tail else self._pinned_top_line
-                self._follow_tail = False
-                self._pinned_top_line = max(0, current_start - half)
-                self._redraw_main_view()
-                sys.stdout.flush()
-            elif key == '\x04':   # Ctrl-D — half page down
-                half = max(1, h // 2)
-                if not self._follow_tail:
-                    new_top = self._pinned_top_line + half
-                    if new_top >= max(0, total - h):
-                        self._follow_tail = True
-                        self._pinned_top_line = 0
-                    else:
-                        self._pinned_top_line = new_top
-                self._redraw_main_view()
-                sys.stdout.flush()
 
     def close(self) -> None:
-        """Exit alternate screen and restore the terminal."""
+        """Restore the terminal to a clean state."""
         if self._closed:
             return
         self._closed = True
-        # Show cursor, reset shape/attrs, exit alternate screen
-        sys.stdout.write('\033[?25h\033[0 q\033[m\033[?1049l')
+        # Show cursor, reset shape/attrs, move to a fresh line
+        sys.stdout.write('\033[?25h\033[0 q\033[m\n')
         sys.stdout.flush()
         signal.signal(signal.SIGWINCH, signal.SIG_DFL)
         try:
@@ -480,14 +406,12 @@ class Screen:
             f.write(content)
             tmp = f.name
         try:
-            # Restore cooked terminal + leave alternate screen
+            # Restore cooked terminal so vim has normal terminal control
             termios.tcsetattr(self._tty_fd, termios.TCSADRAIN, self._cooked_attrs)
-            sys.stdout.write('\033[?1049l')
+            sys.stdout.write('\033[?25h')   # show cursor for vim
             sys.stdout.flush()
             subprocess.run(['nvim', tmp])
-            # Re-enter alternate screen and restore raw mode for the prompt loop
-            sys.stdout.write('\033[?1049h')
-            sys.stdout.flush()
+            # Re-enter raw mode for the prompt loop
             tty.setraw(self._tty_fd)
             with open(tmp, 'r') as f:
                 new_content = f.read().rstrip('\n')
@@ -498,8 +422,8 @@ class Screen:
                 pass
         self._input_buf = list(new_content)
         self._cursor_pos = len(self._input_buf)
-        self._redraw_all()
-        self._redraw_prompt_line(prompt_msg)
+        # Redraw footer with updated input
+        self._redraw_footer(prompt_msg)
         sys.stdout.flush()
 
     # ------------------------------------------------------------------ input internals
@@ -522,89 +446,32 @@ class Screen:
             self._handle_cmd_key(key)
             return
 
-        # ---- Scroll: Page Up / Page Down (full page) ----
-        if key == '\033[5~':   # Page Up
-            h = self._main_rows()
-            total = len(self._display_lines)
-            full = max(1, h)
-            current_start = max(0, total - h) if self._follow_tail else self._pinned_top_line
-            self._follow_tail = False
-            self._pinned_top_line = max(0, current_start - full)
-            self._redraw_main_view()
-            self._redraw_prompt_line(msg)
-            return
-        if key == '\033[6~':   # Page Down
-            h = self._main_rows()
-            total = len(self._display_lines)
-            full = max(1, h)
-            if not self._follow_tail:
-                new_top = self._pinned_top_line + full
-                if new_top >= max(0, total - h):
-                    self._follow_tail = True
-                    self._pinned_top_line = 0
-                else:
-                    self._pinned_top_line = new_top
-            self._redraw_main_view()
-            self._redraw_prompt_line(msg)
-            return
-
-        # ---- Scroll: Ctrl-U / Ctrl-D (half page) ----
-        if key == '\x15':   # Ctrl-U — scroll half page up
-            h = self._main_rows()
-            total = len(self._display_lines)
-            half = max(1, h // 2)
-            current_start = max(0, total - h) if self._follow_tail else self._pinned_top_line
-            self._follow_tail = False
-            self._pinned_top_line = max(0, current_start - half)
-            self._redraw_main_view()
-            self._redraw_prompt_line(msg)
-            return
-        if key == '\x04':   # Ctrl-D — scroll half page down
-            h = self._main_rows()
-            total = len(self._display_lines)
-            half = max(1, h // 2)
-            if not self._follow_tail:
-                new_top = self._pinned_top_line + half
-                if new_top >= max(0, total - h):
-                    self._follow_tail = True
-                    self._pinned_top_line = 0
-                else:
-                    self._pinned_top_line = new_top
-            self._redraw_main_view()
-            self._redraw_prompt_line(msg)
-            return
-
         # ---- Submit (or line continuation with \) ----
         if key in ('\r', '\n'):
             if self._cursor_pos > 0 and self._input_buf[self._cursor_pos - 1] == '\\':
                 self._input_buf[self._cursor_pos - 1] = '\n'
-                self._redraw_prompt_line(msg)
+                self._redraw_footer(msg)
                 return
             result = ''.join(self._input_buf)
             if result.strip():
                 self._history.insert(0, result)
-            # Echo submitted input into the conversation buffer
+            # Erase the footer and write the user's turn as permanent terminal output.
+            # Use \r\n (not bare \n): this handler runs inside tty.setraw() so a
+            # bare \n is a pure line-feed that does not reset the column.
+            sys.stdout.write('\033[u\r\033[J')
             for i, line in enumerate(result.split('\n')):
                 prefix = msg if i == 0 else self._CONT_PREFIX
-                self._segments.append(
-                    f'{self._USER_STYLE}{prefix}{line}{self._RESET}\n'
-                )
-            self._segments.append('\n')
-            self._follow_tail = True
-            self._pinned_top_line = 0
-            self._rebuild_display_lines()
-            self._in_prompt = False
-            self._clear_prompt_row()
-            self._redraw_main_view()
-            self._redraw_status()
+                sys.stdout.write(f'{self._USER_STYLE}{prefix}{line}{self._RESET}\r\n')
+            sys.stdout.write('\r\n')
             sys.stdout.flush()
+            self._in_prompt = False
             raise _SubmitException(result)
 
         # ---- Newline in buffer (Alt-Enter) ----
         if key in ('\033\r', '\033\n'):
             self._input_buf.insert(self._cursor_pos, '\n')
             self._cursor_pos += 1
-            self._redraw_prompt_line(msg)
+            self._redraw_footer(msg)
             return
 
         # ---- Backspace ----
@@ -612,7 +479,7 @@ class Screen:
             if self._cursor_pos > 0:
                 del self._input_buf[self._cursor_pos - 1]
                 self._cursor_pos -= 1
-                self._redraw_prompt_line(msg)
+                self._redraw_footer(msg)
             return
 
         # ---- Ctrl-W / Ctrl-Backspace — delete word before cursor ----
@@ -624,14 +491,14 @@ class Screen:
             while self._cursor_pos > 0 and self._input_buf[self._cursor_pos - 1] not in ' \t\n':
                 del self._input_buf[self._cursor_pos - 1]
                 self._cursor_pos -= 1
-            self._redraw_prompt_line(msg)
+            self._redraw_footer(msg)
             return
 
         # ---- Forward delete ----
         if key == '\033[3~':
             if self._cursor_pos < len(self._input_buf):
                 del self._input_buf[self._cursor_pos]
-                self._redraw_prompt_line(msg)
+                self._redraw_footer(msg)
             return
 
         # ---- Ctrl-C ----
@@ -639,7 +506,7 @@ class Screen:
             if self._input_buf:
                 self._input_buf.clear()
                 self._cursor_pos = 0
-                self._redraw_prompt_line(msg)
+                self._redraw_footer(msg)
                 return
             raise KeyboardInterrupt
 
@@ -661,7 +528,7 @@ class Screen:
                 target_col = min(cur_col, len(all_lines[cur_line - 1]))
                 new_pos = sum(len(all_lines[i]) + 1 for i in range(cur_line - 1)) + target_col
                 self._cursor_pos = new_pos
-                self._redraw_prompt_line(msg)
+                self._redraw_footer(msg)
             return
         if key == '\033[B':   # down
             all_lines = ''.join(self._input_buf).split('\n')
@@ -675,17 +542,17 @@ class Screen:
                 target_col = min(cur_col, len(all_lines[cur_line + 1]))
                 new_pos = sum(len(all_lines[i]) + 1 for i in range(cur_line + 1)) + target_col
                 self._cursor_pos = new_pos
-                self._redraw_prompt_line(msg)
+                self._redraw_footer(msg)
             return
         if key == '\033[C':   # right
             if self._cursor_pos < len(self._input_buf):
                 self._cursor_pos += 1
-                self._redraw_prompt_line(msg)
+                self._redraw_footer(msg)
             return
         if key == '\033[D':   # left
             if self._cursor_pos > 0:
                 self._cursor_pos -= 1
-                self._redraw_prompt_line(msg)
+                self._redraw_footer(msg)
             return
 
         # ---- Home / End ----
@@ -694,11 +561,11 @@ class Screen:
             before = ''.join(self._input_buf[:self._cursor_pos])
             last_nl = before.rfind('\n')
             self._cursor_pos = last_nl + 1
-            self._redraw_prompt_line(msg)
+            self._redraw_footer(msg)
             return
         if key == '\x01':   # Ctrl-A — absolute beginning
             self._cursor_pos = 0
-            self._redraw_prompt_line(msg)
+            self._redraw_footer(msg)
             return
         # End: end of current line; Ctrl-E: absolute end
         if key in ('\033[F', '\033[4~', '\033OF'):
@@ -708,21 +575,21 @@ class Screen:
                 self._cursor_pos = len(self._input_buf)
             else:
                 self._cursor_pos += next_nl
-            self._redraw_prompt_line(msg)
+            self._redraw_footer(msg)
             return
         if key == '\x05':   # Ctrl-E — absolute end
             self._cursor_pos = len(self._input_buf)
-            self._redraw_prompt_line(msg)
+            self._redraw_footer(msg)
             return
 
         # ---- Ctrl-K (kill to end) ----
         if key == '\x0b':
             self._input_buf = self._input_buf[: self._cursor_pos]
-            self._redraw_prompt_line(msg)
+            self._redraw_footer(msg)
             return
 
-        # ---- Enter command mode on ':' when buffer is empty ----
-        if key == ':' and not self._input_buf:
+        # ---- Enter command mode on '/' when buffer is empty ----
+        if key == '/' and not self._input_buf:
             self._cmd_mode = True
             self._cmd_buf = []
             self._cmd_history_idx = -1
@@ -734,7 +601,7 @@ class Screen:
         if len(key) == 1 and ord(key) >= 32:
             self._input_buf.insert(self._cursor_pos, key)
             self._cursor_pos += 1
-            self._redraw_prompt_line(msg)
+            self._redraw_footer(msg)
 
     def _history_navigate(self, direction: int, msg: str) -> None:
         """direction: +1 = older, -1 = newer."""
@@ -743,54 +610,53 @@ class Screen:
             self._history_idx = new_idx
             self._input_buf = list(self._history[self._history_idx])
             self._cursor_pos = len(self._input_buf)
-            self._redraw_prompt_line(msg)
+            self._redraw_footer(msg)
         elif direction < 0 and self._history_idx > 0:
             self._history_idx -= 1
             self._input_buf = list(self._history[self._history_idx])
             self._cursor_pos = len(self._input_buf)
-            self._redraw_prompt_line(msg)
+            self._redraw_footer(msg)
         elif direction < 0 and self._history_idx == 0:
             self._history_idx = -1
             self._input_buf = []
             self._cursor_pos = 0
-            self._redraw_prompt_line(msg)
+            self._redraw_footer(msg)
 
     # ------------------------------------------------------------------ command mode
 
     def _update_cmd_status(self) -> None:
-        """Render the command buffer into the status row and place cursor there."""
+        """Render the command buffer into the footer status row."""
         cmd_text = ''.join(self._cmd_buf)
-        text = f':{cmd_text}'[: self._cols - 1]
-        sr = self._status_row()
-        col = len(text) + 1   # cursor column after the command text (1-indexed)
-        sys.stdout.write(
-            f'\033[{sr};1H\033[m\033[K'
-            f'\033[7m{text}\033[m'
-            f'\033[{sr};{col}H'
-        )
+        text = f'/{cmd_text}'[: self._cols - 1]
+        col = len(text)   # 0-indexed offset for cursor after the text
+        # Restore to anchor, clear to end, draw command in the status position
+        sys.stdout.write('\033[u\r\033[J')
+        sys.stdout.write(f'\n\033[7m{text}\033[K\033[m')
+        # Position cursor at end of command text
+        if col > 0:
+            sys.stdout.write(f'\r\033[{col}C')
+        else:
+            sys.stdout.write('\r')
         sys.stdout.flush()
 
     def _exit_cmd_mode(self) -> None:
         """Shared teardown when leaving command mode (ESC / backspace-on-empty)."""
         self._cmd_mode = False
         self._status_text = self._saved_status
-        self._redraw_status()
         if self._in_prompt:
-            self._redraw_prompt_line(self._current_prompt_msg)
+            self._redraw_footer(self._current_prompt_msg)
         sys.stdout.flush()
 
     def _handle_cmd_key(self, key: str) -> None:
-        """Handle a keypress while in vim-style command mode."""
+        """Handle a keypress while in command mode."""
         if key in ('\r', '\n'):
             cmd = ''.join(self._cmd_buf).strip()
             if cmd:
                 self._cmd_history.insert(0, cmd)
             self._cmd_mode = False
             self._status_text = self._saved_status
-            self._redraw_status()
-            if self._in_prompt:
-                self._redraw_prompt_line(self._current_prompt_msg)
-            sys.stdout.flush()
+            # Don't redraw the footer here — prompt() clears it via the
+            # _CommandException handler so the caller gets a clean terminal.
             raise _CommandException(cmd)
 
         if key == '\x7f':   # backspace
@@ -860,19 +726,21 @@ class Screen:
     def _on_resize(self, signum, frame) -> None:
         ts = shutil.get_terminal_size()
         self._rows, self._cols = ts.lines, ts.columns
-        self._rebuild_display_lines()
-        sys.stdout.write('\033[2J')
-        self._redraw_main_view()
         if self._in_prompt:
-            self._redraw_prompt_line(self._current_prompt_msg)
-        self._redraw_status()
-        sys.stdout.flush()
+            if self._cmd_mode:
+                self._update_cmd_status()
+            else:
+                self._redraw_footer(self._current_prompt_msg)
+            sys.stdout.flush()
 
     # ------------------------------------------------------------------ tools overlay
 
     def prompt_tools_overlay(self, tool_names: list[str], enabled: set) -> set:
         """
         Interactive tools toggle overlay — centered floating box.
+
+        Uses the alternate screen buffer for a clean canvas while the overlay
+        is active; restores the main screen (with conversation history) on exit.
 
         Navigation : j / k / arrows
         Toggle     : Space
@@ -949,6 +817,11 @@ class Screen:
 
         old_attrs    = termios.tcgetattr(self._tty_fd)
         orig_handler = signal.getsignal(signal.SIGWINCH)
+
+        # Enter alternate screen for a clean overlay canvas
+        sys.stdout.write('\033[?1049h\033[2J')
+        sys.stdout.flush()
+
         try:
             signal.signal(signal.SIGWINCH, _on_overlay_resize)
             tty.setraw(self._tty_fd)
@@ -1054,9 +927,8 @@ class Screen:
         finally:
             termios.tcsetattr(self._tty_fd, termios.TCSADRAIN, old_attrs)
             signal.signal(signal.SIGWINCH, orig_handler)
-            sys.stdout.write('\033[?25l\033[2J')
-            self._redraw_main_view()
-            self._redraw_status()
+            # Exit alternate screen (restores conversation history) and hide cursor
+            sys.stdout.write('\033[?1049l\033[?25l')
             sys.stdout.flush()
 
         return enabled
@@ -1075,7 +947,7 @@ class Screen:
         prev_lines: dict,
         first_draw: bool,
     ) -> None:
-        """Render the centered floating tools overlay on top of the conversation."""
+        """Render the centered floating tools overlay."""
         rows, cols = self._rows, self._cols
         n = len(tool_names)
 
@@ -1180,9 +1052,8 @@ class Screen:
         out: list[str] = []
 
         if first_draw:
-            # Full background paint on first open or after resize
+            # Full clear on first open or after resize (already in alternate screen)
             sys.stdout.write('\033[2J')
-            self._redraw_main_view()
             for row_off, (r, text) in new_lines.items():
                 out.append(f'\033[{r};{start_c}H{text}')
         else:
