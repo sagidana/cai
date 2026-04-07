@@ -123,10 +123,6 @@ class _SubmitException(Exception):
         self.value = value
 
 
-class _CommandException(Exception):
-    def __init__(self, value: str):
-        self.value = value
-
 
 # ---------------------------------------------------------------------------
 # Screen
@@ -166,12 +162,7 @@ class Screen:
         # Status bar text
         self._status_text: str = ''
 
-        # Vim-style command mode
-        self._cmd_mode: bool = False
-        self._cmd_buf: list[str] = []
-        self._cmd_history: list[str] = []
-        self._cmd_history_idx: int = -1
-        self._saved_status: str = ''
+        # Command completions (used for tab-completing /cmd inputs)
         self._cmd_completions: list[str] = []
 
         # Guard against double-close
@@ -260,7 +251,7 @@ class Screen:
     def set_status(self, text: str) -> None:
         """Update the status bar text.  Redraws the footer if currently prompting."""
         self._status_text = text
-        if self._in_prompt and not self._cmd_mode:
+        if self._in_prompt:
             with self._render_lock:
                 self._redraw_footer(self._current_prompt_msg)
                 sys.stdout.flush()
@@ -313,15 +304,6 @@ class Screen:
                     self._handle_key(key, msg)
                 except _SubmitException as e:
                     result = e.value
-                    break
-                except _CommandException as e:
-                    # Clear the footer and echo the command into the terminal
-                    # buffer so it becomes part of the permanent history.
-                    sys.stdout.write('\033[u\r\033[J')
-                    cmd_str = f'/{e.value}' if e.value else '/'
-                    sys.stdout.write(f'{self._META_STYLE}{cmd_str}{self._RESET}\r\n\r\n')
-                    sys.stdout.flush()
-                    result = f'/{e.value}'
                     break
                 sys.stdout.flush()
 
@@ -440,11 +422,6 @@ class Screen:
 
     def _handle_key(self, key: str, msg: str) -> None:
         """Dispatch one keypress.  Raises _SubmitException on Enter."""
-
-        # ---- Delegate to command mode ----
-        if self._cmd_mode:
-            self._handle_cmd_key(key)
-            return
 
         # ---- Submit (or line continuation with \) ----
         if key in ('\r', '\n'):
@@ -588,13 +565,9 @@ class Screen:
             self._redraw_footer(msg)
             return
 
-        # ---- Enter command mode on '/' when buffer is empty ----
-        if key == '/' and not self._input_buf:
-            self._cmd_mode = True
-            self._cmd_buf = []
-            self._cmd_history_idx = -1
-            self._saved_status = self._status_text
-            self._update_cmd_status()
+        # ---- Tab — complete /command when input starts with / ----
+        if key == '\t':
+            self._tab_complete(msg)
             return
 
         # ---- Printable character ----
@@ -622,94 +595,20 @@ class Screen:
             self._cursor_pos = 0
             self._redraw_footer(msg)
 
-    # ------------------------------------------------------------------ command mode
+    # ------------------------------------------------------------------ tab completion
 
-    def _update_cmd_status(self) -> None:
-        """Render the command buffer into the footer status row."""
-        cmd_text = ''.join(self._cmd_buf)
-        text = f'/{cmd_text}'[: self._cols - 1]
-        col = len(text)   # 0-indexed offset for cursor after the text
-        # Restore to anchor, clear to end, draw command in the status position
-        sys.stdout.write('\033[u\r\033[J')
-        sys.stdout.write(f'\n\033[7m{text}\033[K\033[m')
-        # Position cursor at end of command text
-        if col > 0:
-            sys.stdout.write(f'\r\033[{col}C')
-        else:
-            sys.stdout.write('\r')
-        sys.stdout.flush()
-
-    def _exit_cmd_mode(self) -> None:
-        """Shared teardown when leaving command mode (ESC / backspace-on-empty)."""
-        self._cmd_mode = False
-        self._status_text = self._saved_status
-        if self._in_prompt:
-            self._redraw_footer(self._current_prompt_msg)
-        sys.stdout.flush()
-
-    def _handle_cmd_key(self, key: str) -> None:
-        """Handle a keypress while in command mode."""
-        if key in ('\r', '\n'):
-            cmd = ''.join(self._cmd_buf).strip()
-            if cmd:
-                self._cmd_history.insert(0, cmd)
-            self._cmd_mode = False
-            self._status_text = self._saved_status
-            # Don't redraw the footer here — prompt() clears it via the
-            # _CommandException handler so the caller gets a clean terminal.
-            raise _CommandException(cmd)
-
-        if key == '\x7f':   # backspace
-            if self._cmd_buf:
-                self._cmd_buf.pop()
-                self._update_cmd_status()
-            else:
-                self._exit_cmd_mode()
+    def _tab_complete(self, msg: str) -> None:
+        """Tab-complete /command when the input buffer starts with '/'."""
+        buf_str = ''.join(self._input_buf)
+        if not buf_str.startswith('/'):
             return
-
-        if key == '\033':   # ESC — cancel
-            self._exit_cmd_mode()
-            return
-
-        if key == '\x03':   # Ctrl-C — cancel and propagate
-            self._exit_cmd_mode()
-            raise KeyboardInterrupt
-
-        if key == '\033[A':   # up — older history
-            self._cmd_history_navigate(1)
-            return
-        if key == '\033[B':   # down — newer history
-            self._cmd_history_navigate(-1)
-            return
-
-        if key == '\t':
-            self._cmd_tab_complete()
-            return
-
-        if len(key) == 1 and ord(key) >= 32:
-            self._cmd_buf.append(key)
-            self._update_cmd_status()
-
-    def _cmd_history_navigate(self, direction: int) -> None:
-        """direction: +1 = older, -1 = newer."""
-        new_idx = self._cmd_history_idx + direction
-        if direction > 0 and new_idx < len(self._cmd_history):
-            self._cmd_history_idx = new_idx
-            self._cmd_buf = list(self._cmd_history[self._cmd_history_idx])
-        elif direction < 0 and self._cmd_history_idx > 0:
-            self._cmd_history_idx -= 1
-            self._cmd_buf = list(self._cmd_history[self._cmd_history_idx])
-        elif direction < 0 and self._cmd_history_idx == 0:
-            self._cmd_history_idx = -1
-            self._cmd_buf = []
-        self._update_cmd_status()
-
-    def _cmd_tab_complete(self) -> None:
-        """Complete to the longest unambiguous prefix among available commands."""
-        current = ''.join(self._cmd_buf)
+        current = buf_str[1:]   # text after the leading /
         matches = [c for c in self._cmd_completions if c.startswith(current)]
         if len(matches) == 1:
-            self._cmd_buf = list(matches[0])
+            completed = matches[0]
+            self._input_buf = list(f'/{completed}')
+            self._cursor_pos = len(self._input_buf)
+            self._redraw_footer(msg)
         elif len(matches) > 1:
             common = matches[0]
             for m in matches[1:]:
@@ -718,8 +617,9 @@ class Screen:
                     i += 1
                 common = common[:i]
             if len(common) > len(current):
-                self._cmd_buf = list(common)
-        self._update_cmd_status()
+                self._input_buf = list(f'/{common}')
+                self._cursor_pos = len(self._input_buf)
+                self._redraw_footer(msg)
 
     # ------------------------------------------------------------------ resize
 
@@ -727,10 +627,7 @@ class Screen:
         ts = shutil.get_terminal_size()
         self._rows, self._cols = ts.lines, ts.columns
         if self._in_prompt:
-            if self._cmd_mode:
-                self._update_cmd_status()
-            else:
-                self._redraw_footer(self._current_prompt_msg)
+            self._redraw_footer(self._current_prompt_msg)
             sys.stdout.flush()
 
     # ------------------------------------------------------------------ tools overlay
