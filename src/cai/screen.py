@@ -162,6 +162,9 @@ class Screen:
         # Status bar text
         self._status_text: str = ''
 
+        # Number of rows pre-reserved below the footer anchor (updated as prompt grows)
+        self._footer_rows_reserved: int = 0
+
         # Command completions (used for tab-completing /cmd inputs)
         self._cmd_completions: list[str] = []
 
@@ -196,6 +199,20 @@ class Screen:
         Must be called only after \033[s has been written (done at the top of
         prompt() and whenever the footer is redrawn from scratch).
         """
+        # Ensure enough rows are reserved below the anchor for the current footer.
+        # status (1) + one row per prompt line.  When the prompt grows (backslash
+        # continuation, vim paste), extend the reservation and re-save the anchor.
+        buf_str = ''.join(self._input_buf)
+        n_prompt_lines = buf_str.count('\n') + 1
+        total_needed = 1 + n_prompt_lines   # status row + prompt rows
+        if total_needed > self._footer_rows_reserved:
+            # Go to current anchor, clear below, write enough newlines to push the
+            # terminal (scroll if necessary), then move back up and re-anchor.
+            sys.stdout.write('\033[u\r\033[J')
+            sys.stdout.write('\n' * total_needed + f'\033[{total_needed}A')
+            sys.stdout.write('\033[s')   # new anchor — now guaranteed space below
+            self._footer_rows_reserved = total_needed
+
         # Return to anchor (col 1 of the blank anchor line), clear to end
         sys.stdout.write('\033[u\r\033[J')
 
@@ -204,7 +221,6 @@ class Screen:
         sys.stdout.write(f'\n{self._STATUS_STYLE}{text}\033[K{self._RESET}')
 
         # Prompt line(s) — handle multi-line input (Alt-Enter / backslash)
-        buf_str = ''.join(self._input_buf)
         lines = buf_str.split('\n')
         chars_before = ''.join(self._input_buf[: self._cursor_pos])
         line_idx = chars_before.count('\n')   # which logical line the cursor is on
@@ -282,7 +298,8 @@ class Screen:
         # Without this, _redraw_footer's two \n characters would scroll the terminal
         # when the cursor is at or near the bottom row, invalidating the saved position
         # and causing a spurious scroll on every subsequent keypress.
-        FOOTER_ROWS = 2
+        FOOTER_ROWS = 2   # status line + one prompt line (minimum)
+        self._footer_rows_reserved = FOOTER_ROWS
         sys.stdout.write(f'\n' * FOOTER_ROWS + f'\033[{FOOTER_ROWS}A')
         # Save the footer anchor.  _redraw_footer uses \033[u to return here.
         sys.stdout.write('\033[s')
