@@ -171,6 +171,9 @@ class Screen:
         # Command completions (used for tab-completing /cmd inputs)
         self._cmd_completions: list[str] = []
 
+        # Index of the highlighted item in the inline slash-command overlay (-1 = none)
+        self._cmd_overlay_idx: int = -1
+
         # Guard against double-close
         self._closed: bool = False
 
@@ -217,7 +220,9 @@ class Screen:
 
         line_vrows = [_vrows(i, ln) for i, ln in enumerate(lines)]
         total_prompt_vrows = sum(line_vrows)
-        total_needed = 1 + total_prompt_vrows  # status row + all visual prompt rows
+        overlay_matches = self._get_overlay_matches(buf_str)
+        overlay_rows = len(overlay_matches)
+        total_needed = overlay_rows + 1 + total_prompt_vrows  # overlay + status + prompt rows
 
         if total_needed != self._footer_rows_reserved:
             sys.stdout.write('\033[u\r\033[J')   # go to old anchor, clear to end
@@ -251,9 +256,17 @@ class Screen:
         # Return to anchor (col 0), clear to end of screen
         sys.stdout.write('\033[u\r\033[J')
 
-        # Status line (one row below anchor)
+        # Inline slash-command overlay (drawn above the status line)
+        _OVERLAY_SEL   = '\033[1;38;5;45m'   # bold azure  — highlighted item
+        _OVERLAY_DIM   = '\033[2;37m'         # dim gray    — unselected item
+        for i, name in enumerate(overlay_matches):
+            style = _OVERLAY_SEL if i == self._cmd_overlay_idx else _OVERLAY_DIM
+            marker = '▶' if i == self._cmd_overlay_idx else ' '
+            sys.stdout.write(f'\r\n{style} {marker} /{name}\033[K{self._RESET}')
+
+        # Status line
         text = self._status_text[:cols - 1]
-        sys.stdout.write(f'\n{self._STATUS_STYLE}{text}\033[K{self._RESET}')
+        sys.stdout.write(f'\r\n{self._STATUS_STYLE}{text}\033[K{self._RESET}')
 
         # Prompt line(s) — handle multi-line input (Alt-Enter / backslash)
         for i, line in enumerate(lines):
@@ -279,9 +292,9 @@ class Screen:
         cursor_vrow = sum(line_vrows[:line_idx]) + visual_col_abs // cols
         cursor_col  = visual_col_abs % cols
 
-        # From the anchor: 1 row to the status line, 1 more to the first
-        # visual prompt row, then cursor_vrow additional rows.
-        rows_down = 2 + cursor_vrow
+        # From the anchor: overlay rows, then 1 to the status line, 1 more
+        # to the first visual prompt row, then cursor_vrow additional rows.
+        rows_down = overlay_rows + 2 + cursor_vrow
         sys.stdout.write('\033[u')
         if rows_down > 0:
             sys.stdout.write(f'\033[{rows_down}B')
@@ -489,6 +502,12 @@ class Screen:
                 self._input_buf[self._cursor_pos - 1] = '\n'
                 self._redraw_footer(msg)
                 return
+            # If an overlay item is selected, complete to it before submitting
+            _ov = self._get_overlay_matches(''.join(self._input_buf))
+            if 0 <= self._cmd_overlay_idx < len(_ov):
+                self._input_buf = list(f'/{_ov[self._cmd_overlay_idx]}')
+                self._cursor_pos = len(self._input_buf)
+                self._cmd_overlay_idx = -1
             result = ''.join(self._input_buf)
             if result.strip():
                 self._history.insert(0, result)
@@ -516,6 +535,7 @@ class Screen:
             if self._cursor_pos > 0:
                 del self._input_buf[self._cursor_pos - 1]
                 self._cursor_pos -= 1
+                self._cmd_overlay_idx = -1
                 self._redraw_footer(msg)
             return
 
@@ -528,6 +548,7 @@ class Screen:
             while self._cursor_pos > 0 and self._input_buf[self._cursor_pos - 1] not in ' \t\n':
                 del self._input_buf[self._cursor_pos - 1]
                 self._cursor_pos -= 1
+            self._cmd_overlay_idx = -1
             self._redraw_footer(msg)
             return
 
@@ -543,6 +564,7 @@ class Screen:
             if self._input_buf:
                 self._input_buf.clear()
                 self._cursor_pos = 0
+                self._cmd_overlay_idx = -1
                 self._redraw_footer(msg)
                 return
             raise KeyboardInterrupt
@@ -552,8 +574,20 @@ class Screen:
             self._open_in_vim(msg)
             return
 
+        # ---- Escape — deselect overlay item ----
+        if key == '\033':
+            if self._cmd_overlay_idx >= 0:
+                self._cmd_overlay_idx = -1
+                self._redraw_footer(msg)
+            return
+
         # ---- Arrow keys ----
         if key == '\033[A':   # up
+            _ov = self._get_overlay_matches(''.join(self._input_buf))
+            if _ov:
+                self._cmd_overlay_idx = (self._cmd_overlay_idx - 1) % len(_ov)
+                self._redraw_footer(msg)
+                return
             all_lines = ''.join(self._input_buf).split('\n')
             before = ''.join(self._input_buf[:self._cursor_pos])
             lines_before = before.split('\n')
@@ -568,6 +602,11 @@ class Screen:
                 self._redraw_footer(msg)
             return
         if key == '\033[B':   # down
+            _ov = self._get_overlay_matches(''.join(self._input_buf))
+            if _ov:
+                self._cmd_overlay_idx = (self._cmd_overlay_idx + 1) % len(_ov)
+                self._redraw_footer(msg)
+                return
             all_lines = ''.join(self._input_buf).split('\n')
             before = ''.join(self._input_buf[:self._cursor_pos])
             lines_before = before.split('\n')
@@ -634,6 +673,7 @@ class Screen:
         if len(key) == 1 and ord(key) >= 32:
             self._input_buf.insert(self._cursor_pos, key)
             self._cursor_pos += 1
+            self._cmd_overlay_idx = -1
             self._redraw_footer(msg)
 
     def _history_navigate(self, direction: int, msg: str) -> None:
@@ -664,10 +704,18 @@ class Screen:
             return
         current = buf_str[1:]   # text after the leading /
         matches = [c for c in self._cmd_completions if c.startswith(current)]
+        # If an overlay item is highlighted, complete to it directly
+        if 0 <= self._cmd_overlay_idx < len(matches):
+            self._input_buf = list(f'/{matches[self._cmd_overlay_idx]}')
+            self._cursor_pos = len(self._input_buf)
+            self._cmd_overlay_idx = -1
+            self._redraw_footer(msg)
+            return
         if len(matches) == 1:
             completed = matches[0]
             self._input_buf = list(f'/{completed}')
             self._cursor_pos = len(self._input_buf)
+            self._cmd_overlay_idx = -1
             self._redraw_footer(msg)
         elif len(matches) > 1:
             common = matches[0]
@@ -679,7 +727,15 @@ class Screen:
             if len(common) > len(current):
                 self._input_buf = list(f'/{common}')
                 self._cursor_pos = len(self._input_buf)
+                self._cmd_overlay_idx = -1
                 self._redraw_footer(msg)
+
+    def _get_overlay_matches(self, buf_str: str) -> list[str]:
+        """Return command names whose prefix matches the current /cmd input."""
+        if not buf_str.startswith('/') or '\n' in buf_str:
+            return []
+        prefix = buf_str[1:]
+        return [c for c in self._cmd_completions if c.startswith(prefix)]
 
     # ------------------------------------------------------------------ resize
 
