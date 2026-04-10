@@ -33,6 +33,8 @@ logging.basicConfig(
 )
 log = logging.getLogger("cai")
 
+_PROMPTS_DIR = os.path.join(os.path.dirname(__file__), "prompts")
+
 # ─── Diagnostic output (stderr, TTY-only) ────────────────────────────────────
 # Diagnostics are dim/faint so the final result is easy to spot.
 # When stderr is not a TTY (e.g. piped) all diagnostic output is suppressed.
@@ -180,6 +182,9 @@ def init():
     if 'ssl_verify' not in config:
         config['ssl_verify'] = True
         updated = True
+    if 'prompt_mode' not in config:
+        config['prompt_mode'] = 'local'
+        updated = True
     if updated:
         with open(config_path, "w") as f:
             json.dump(config, f, indent=2)
@@ -318,17 +323,35 @@ def _read_file_numbered(path):
         return "".join(f"{i + 1}: {line}" for i, line in enumerate(f))
 
 
-def _build_base_messages(args, stdin_content=None, always_agentic=False):
+def _load_cai_prompt():
+    """Load the cai system prompt from disk based on config prompt_mode.
+
+    Reads either prompts/local.md or prompts/sota.md from the package directory.
+    Falls back to the mid-tier agentic prompt if the file cannot be read.
+    """
+    mode = config.get('prompt_mode', 'local')
+    if mode not in ('local', 'sota'):
+        log.warning("_load_cai_prompt: unknown prompt_mode %r, falling back to 'local'", mode)
+        mode = 'local'
+    prompt_path = os.path.join(_PROMPTS_DIR, f"{mode}.md")
+    try:
+        with open(prompt_path) as f:
+            return f.read()
+    except OSError as e:
+        log.error("_load_cai_prompt: cannot read %s: %s", prompt_path, e)
+        return AGENTIC_SYSTEM_PROMPTS.get('mid')
+
+
+def _build_base_messages(args, stdin_content=None):
     """Build the initial messages list (system prompt, stdin, file, cursor)."""
     messages = []
 
     if args.system_prompt:
         messages.append({"role": "system", "content": args.system_prompt})
-    elif always_agentic or getattr(args, 'agentic', False):
-        profile = get_model_profile(args.model)
-        prompt_text = AGENTIC_SYSTEM_PROMPTS.get(profile['tier'], AGENTIC_SYSTEM_PROMPTS['mid'])
+    else:
+        prompt_text = _load_cai_prompt()
         messages.append({"role": "system", "content": prompt_text})
-        log.info("_build_base_messages: injected agentic system prompt (tier=%s)", profile['tier'])
+        log.info("_build_base_messages: injected cai system prompt (mode=%s)", config.get('prompt_mode', 'local'))
 
     line_by_line = getattr(args, 'line_by_line', False)
     if stdin_content is None and not line_by_line:
@@ -497,7 +520,7 @@ def action_interactive(args, available_tools, external_mcps):
     # Pre-capture piped stdin BEFORE Screen (tty.setraw) takes over keyboard input
     stdin_content = read_stdin_if_available()
 
-    messages = _build_base_messages(args, stdin_content=stdin_content, always_agentic=True)
+    messages = _build_base_messages(args, stdin_content=stdin_content)
 
     screen = Screen()
     screen.set_cmd_completions(["compact", "tools", "clear", "context"])

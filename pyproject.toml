@@ -20,3 +20,6 @@ cai = "cai.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+cai = ["prompts/*.md"]
