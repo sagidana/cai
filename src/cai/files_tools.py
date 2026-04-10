@@ -8,6 +8,46 @@ from cai.utils import safe_path
 
 def register(mcp):
     @mcp.tool()
+    def search(pattern: str, path: str = ".", file_glob: str = "") -> str:
+        """Search for a regex pattern across files using ripgrep (rg), returning results in
+        vimgrep format: one match per line as  <file>:<line>:<col>:<matched line text>.
+
+        This is the right tool when you need to locate where something is defined or used —
+        for example, finding a function definition, tracing where a variable is referenced,
+        auditing log messages, or searching for a string across a large codebase. It is fast
+        (ripgrep-backed), unicode-aware, and automatically skips binary files, hidden files,
+        and paths listed in .gitignore.
+
+        Args:
+            pattern:   Regular expression to search for (ripgrep / Rust regex syntax).
+                       Examples: "def train", "TODO|FIXME", r"class\\w+Model".
+            path:      Directory or file to search in. Defaults to "." (current working dir).
+            file_glob: Optional glob to restrict which files are searched, e.g. "*.py",
+                       "**/*.{ts,tsx}", "src/**/*.rs". Leave empty to search all files.
+
+        Returns:
+            One match per line in vimgrep format: filepath:line:col:text
+            Returns "No matches found." when the pattern does not match anything.
+            Returns an error message prefixed with "Error:" if rg is unavailable or fails.
+        """
+        try:
+            safe = safe_path(path)
+        except ValueError as e:
+            return str(e)
+        cmd = ["rg", "--vimgrep", pattern]
+        if file_glob:
+            cmd += ["--glob", file_glob]
+        cmd.append(safe)
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            output = result.stdout.strip()
+            if result.returncode not in (0, 1):
+                return f"Error: {result.stderr.strip() or 'rg exited with code ' + str(result.returncode)}"
+            return output if output else "No matches found."
+        except FileNotFoundError:
+            return "Error: ripgrep (rg) is not installed or not on PATH."
+
+    @mcp.tool()
     def read_file(file_path: str, line_start: int = None, line_end: int = None) -> str:
         """Read the contents of a file and return them as text.
 
@@ -65,7 +105,6 @@ def register(mcp):
             return "".join(lines[start_idx:end_idx])
         except (IOError, OSError) as e:
             return f"Error: {e}"
-
 
     @mcp.tool()
     def list_files(path: str = ".", pattern: str = "") -> str:
@@ -135,46 +174,6 @@ def register(mcp):
                     queue.append(full)
 
         return "\n".join(entries) if entries else "(empty)"
-
-    @mcp.tool()
-    def search(pattern: str, path: str = ".", file_glob: str = "") -> str:
-        """Search for a regex pattern across files using ripgrep (rg), returning results in
-        vimgrep format: one match per line as  <file>:<line>:<col>:<matched line text>.
-
-        This is the right tool when you need to locate where something is defined or used —
-        for example, finding a function definition, tracing where a variable is referenced,
-        auditing log messages, or searching for a string across a large codebase. It is fast
-        (ripgrep-backed), unicode-aware, and automatically skips binary files, hidden files,
-        and paths listed in .gitignore.
-
-        Args:
-            pattern:   Regular expression to search for (ripgrep / Rust regex syntax).
-                       Examples: "def train", "TODO|FIXME", r"class\\w+Model".
-            path:      Directory or file to search in. Defaults to "." (current working dir).
-            file_glob: Optional glob to restrict which files are searched, e.g. "*.py",
-                       "**/*.{ts,tsx}", "src/**/*.rs". Leave empty to search all files.
-
-        Returns:
-            One match per line in vimgrep format: filepath:line:col:text
-            Returns "No matches found." when the pattern does not match anything.
-            Returns an error message prefixed with "Error:" if rg is unavailable or fails.
-        """
-        try:
-            safe = safe_path(path)
-        except ValueError as e:
-            return str(e)
-        cmd = ["rg", "--vimgrep", pattern]
-        if file_glob:
-            cmd += ["--glob", file_glob]
-        cmd.append(safe)
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            output = result.stdout.strip()
-            if result.returncode not in (0, 1):
-                return f"Error: {result.stderr.strip() or 'rg exited with code ' + str(result.returncode)}"
-            return output if output else "No matches found."
-        except FileNotFoundError:
-            return "Error: ripgrep (rg) is not installed or not on PATH."
 
     @mcp.tool()
     def create_file(file_path: str, content: str) -> str:
@@ -276,6 +275,26 @@ def register(mcp):
         return f"Moved {src_path} -> {dst_rel}"
 
     @mcp.tool()
+    def edit_file(file_path: str, old_text: str, new_text: str) -> str:
+        """Replace the first occurrence of old_text with new_text in a file.
+
+        file_path must be relative to (or inside) the working directory;
+        paths that escape it are rejected.
+        """
+        try:
+            safe = safe_path(file_path)
+        except ValueError as e:
+            return str(e)
+        with open(safe, 'r') as f:
+            original = f.read()
+        if old_text not in original:
+            return f"Error: old_text not found in {file_path}"
+        updated = original.replace(old_text, new_text, 1)
+        with open(safe, 'w') as f:
+            f.write(updated)
+        return f"Replaced 1 occurrence in {file_path}"
+
+    @mcp.tool()
     def create_directory(dir_path: str) -> str:
         """Create a directory and any missing parent directories along the path.
 
@@ -350,26 +369,6 @@ def register(mcp):
         shutil.move(safe_src, safe_dst)
         dst_rel = os.path.relpath(real_dst, os.path.realpath("."))
         return f"Moved {src_path} -> {dst_rel}"
-
-    @mcp.tool()
-    def edit_file(file_path: str, old_text: str, new_text: str) -> str:
-        """Replace the first occurrence of old_text with new_text in a file.
-
-        file_path must be relative to (or inside) the working directory;
-        paths that escape it are rejected.
-        """
-        try:
-            safe = safe_path(file_path)
-        except ValueError as e:
-            return str(e)
-        with open(safe, 'r') as f:
-            original = f.read()
-        if old_text not in original:
-            return f"Error: old_text not found in {file_path}"
-        updated = original.replace(old_text, new_text, 1)
-        with open(safe, 'w') as f:
-            f.write(updated)
-        return f"Replaced 1 occurrence in {file_path}"
 
 
 if __name__ == "__main__":
