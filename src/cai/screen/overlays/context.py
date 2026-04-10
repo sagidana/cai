@@ -101,12 +101,12 @@ def draw_context_overlay(ctx: _OverlayCtx, rows: int, cols: int) -> None:
     prefix_w = 1 + idx_w + 2 + role_w + 2 + pct_w + 2
 
     overhead  = 4
-    max_box_h = max(overhead + 1, int(rows * 0.85))
-    visible_n = max(1, min(nm, max_box_h - overhead))
+    max_box_h = max(overhead + 1, int(rows * 0.95))
+    visible_n = max_box_h - overhead
     box_h     = visible_n + overhead
 
     max_inner_w = max(prefix_w + 10, int(cols * 0.95) - 2)
-    inner_w     = max(prefix_w + 10, min(max_inner_w, cols - 4))
+    inner_w     = max_inner_w
     box_w       = inner_w + 2
 
     start_r = max(1, (rows - box_h) // 2 + 1)

@@ -138,15 +138,12 @@ def draw_tools_overlay(
     """Render the centered floating tools overlay (pure draw, no event loop)."""
     n = len(tool_names)
 
-    max_name_len = max((len(nm) for nm in tool_names), default=10)
-    content_w   = max_name_len + 8
-    max_inner_w = max(20, int(cols * 0.85) - 2)
-    inner_w     = max(20, min(content_w, max_inner_w))
-    box_w       = inner_w + 2
+    inner_w   = max(20, int(cols * 0.95) - 2)
+    box_w     = inner_w + 2
 
     overhead  = 4
-    max_box_h = max(overhead + 1, int(rows * 0.85))
-    visible_n = max(1, min(n, max_box_h - overhead))
+    max_box_h = max(overhead + 1, int(rows * 0.95))
+    visible_n = max_box_h - overhead
     box_h     = visible_n + overhead
 
     start_r = max(1, (rows - box_h) // 2 + 1)
@@ -409,12 +406,12 @@ def _handle_normal_key(
 
     elif key == KEY_CTRL_U:
         overhead = 4
-        vis  = max(1, min(n, max(5, int(rows * 0.85)) - overhead))
+        vis  = max(5, int(rows * 0.95)) - overhead
         selected_idx = max(0, selected_idx - max(1, vis // 2))
 
     elif key == KEY_CTRL_D:
         overhead = 4
-        vis  = max(1, min(n, max(5, int(rows * 0.85)) - overhead))
+        vis  = max(5, int(rows * 0.95)) - overhead
         selected_idx = min(n - 1, selected_idx + max(1, vis // 2))
 
     return (done, selected_idx, search_mode, search_direction, search_buf,
