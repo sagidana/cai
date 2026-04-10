@@ -21,6 +21,7 @@ def register(mcp):
         Args:
             pattern:   Regular expression to search for (ripgrep / Rust regex syntax).
                        Examples: "def train", "TODO|FIXME", r"class\\w+Model".
+                       Notes: if parenthesis are needed add a backslash before them ("\\(") as they are regex primitives.
             path:      Directory or file to search in. Defaults to "." (current working dir).
             file_glob: Optional glob to restrict which files are searched, e.g. "*.py",
                        "**/*.{ts,tsx}", "src/**/*.rs". Leave empty to search all files.

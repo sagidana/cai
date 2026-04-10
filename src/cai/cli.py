@@ -644,6 +644,67 @@ def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_c
         active_str = ', '.join(args.skill) if args.skill else 'none'
         screen.write(f"\033[2;37m[skills set to: {active_str}]\033[m\n")
         status_callback("ready")
+    elif cmd.startswith("save"):
+        path = cmd[len("save"):].strip()
+        if not path:
+            screen.write(f"\033[2;37m[usage: /save <path>]\033[m\n")
+        else:
+            import json as _json
+            payload = {
+                "version": 1,
+                "messages": messages,
+                "settings": {
+                    "selected_tools": sorted(getattr(args, 'selected_tools', set()) or []),
+                    "skills": list(getattr(args, 'skill', []) or []),
+                },
+            }
+            try:
+                with open(path, 'w') as _f:
+                    _json.dump(payload, _f, indent=2)
+                screen.write(f"\033[2;37m[saved to {path}]\033[m\n")
+            except OSError as _e:
+                screen.write(f"\033[1;31m[save error] {_e}\033[m\n")
+    elif cmd.startswith("load"):
+        path = cmd[len("load"):].strip()
+        if not path:
+            screen.write(f"\033[2;37m[usage: /load <path>]\033[m\n")
+        else:
+            import json as _json
+            try:
+                with open(path) as _f:
+                    payload = _json.load(_f)
+                # Restore messages
+                messages[:] = payload.get("messages", [])
+                settings = payload.get("settings", {})
+                # Restore tools
+                loaded_tools = set(settings.get("selected_tools", []))
+                args.selected_tools = loaded_tools
+                args._manual_selected_tools = set(loaded_tools)
+                # Restore skills and rebuild system prompt
+                loaded_skills = settings.get("skills", [])
+                args.skill = loaded_skills
+                skill_tools, skill_prompts = _load_skills(args.skill)
+                args.selected_tools |= skill_tools
+                task_mode = getattr(args, 'mode', 'research')
+                new_system = _assemble_system_prompt(task_mode, skill_prompts)
+                if messages and messages[0].get('role') == 'system':
+                    messages[0]['content'] = new_system
+                else:
+                    messages.insert(0, {"role": "system", "content": new_system})
+                screen.write(f"\033[2;37m[loaded from {path} — {len(messages)} messages, "
+                             f"{len(args.selected_tools)} tools, "
+                             f"skills: {', '.join(args.skill) or 'none'}]\033[m\n")
+                _chars = sum(len(str(m.get('content', ''))) for m in messages)
+                _rough_tok = _chars // 4
+                _profile = get_model_profile(args.model)
+                _ctx_limit = _profile.get('context', 0)
+                if _ctx_limit:
+                    last_ctx[0] = f"ctx {_rough_tok / _ctx_limit:.0%} (~{_rough_tok}/{_ctx_limit})"
+                else:
+                    last_ctx[0] = ""
+                status_callback("ready")
+            except (OSError, ValueError, KeyError) as _e:
+                screen.write(f"\033[1;31m[load error] {_e}\033[m\n")
     else:
         screen.write(f"\033[2;37m[unknown command: {cmd}]\033[m\n")
 
@@ -664,7 +725,7 @@ def action_interactive(args, available_tools, external_mcps):
 
     screen = Screen()
     _skill_cmds = [f"skill {n}" for n in _list_skill_names()] + ["skill", "skill off"]
-    screen.set_cmd_completions(["compact", "tools", "clear", "context"] + _skill_cmds)
+    screen.set_cmd_completions(["compact", "tools", "clear", "context", "save", "load"] + _skill_cmds)
 
     last_ctx = [""]
 
