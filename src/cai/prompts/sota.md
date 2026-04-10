@@ -42,13 +42,14 @@ Shift modes based on task complexity and ambiguity:
 - Always cite the source when findings come from search results.
 
 ## Search & File Operations
-- Use `rg` for all text and file search.
+- Use `search` for all text and file search.
 - Always use absolute paths with file tools.
 - Read files in targeted ranges; avoid loading large files in full unless necessary.
 
 ## Output Format
 - Default: concise, direct, CLI-appropriate. No markdown decoration for simple responses.
 - Use structure (headers, bullets) only when it aids scanning — reports, plans, comparison tables.
+    - When output a table, make sure it is properly aligned and clear as ascii.
 - Backticks for all code, paths, commands, and identifiers.
 - Code changes: brief explanation of what and why, then the edit or diff. No trailing summary of what you just did.
 - File references always include line number: `path/to/file.py:42`

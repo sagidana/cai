@@ -323,23 +323,43 @@ def _read_file_numbered(path):
         return "".join(f"{i + 1}: {line}" for i, line in enumerate(f))
 
 
-def _load_cai_prompt():
+_MODE_BLOCKS = {
+    'research': (
+        "## Current Task Mode: Research\n"
+        "Your primary focus is investigation and analysis. Prioritize forming "
+        "hypotheses, gathering evidence, and stating confidence levels. "
+        "Treat development steps as secondary unless explicitly needed.\n"
+    ),
+    'dev': (
+        "## Current Task Mode: Development\n"
+        "Your primary focus is implementation and planning. Prioritize reading "
+        "existing code, making targeted edits, and producing a clear plan before "
+        "building. Treat research steps as secondary unless explicitly needed.\n"
+    ),
+}
+
+
+def _load_cai_prompt(task_mode=None):
     """Load the cai system prompt from disk based on config prompt_mode.
 
-    Reads either prompts/local.md or prompts/sota.md from the package directory.
+    Reads either prompts/local.md or prompts/sota.md from the package directory,
+    then prepends the task-mode focus block if task_mode is set.
     Falls back to the mid-tier agentic prompt if the file cannot be read.
     """
-    mode = config.get('prompt_mode', 'local')
-    if mode not in ('local', 'sota'):
-        log.warning("_load_cai_prompt: unknown prompt_mode %r, falling back to 'local'", mode)
-        mode = 'local'
-    prompt_path = os.path.join(_PROMPTS_DIR, f"{mode}.md")
+    prompt_mode = config.get('prompt_mode', 'local')
+    if prompt_mode not in ('local', 'sota'):
+        log.warning("_load_cai_prompt: unknown prompt_mode %r, falling back to 'local'", prompt_mode)
+        prompt_mode = 'local'
+    prompt_path = os.path.join(_PROMPTS_DIR, f"{prompt_mode}.md")
     try:
         with open(prompt_path) as f:
-            return f.read()
+            text = f.read()
     except OSError as e:
         log.error("_load_cai_prompt: cannot read %s: %s", prompt_path, e)
-        return AGENTIC_SYSTEM_PROMPTS.get('mid')
+        text = AGENTIC_SYSTEM_PROMPTS.get('mid')
+    if task_mode and task_mode in _MODE_BLOCKS:
+        text = _MODE_BLOCKS[task_mode] + "\n" + text
+    return text
 
 
 def _build_base_messages(args, stdin_content=None):
@@ -349,9 +369,11 @@ def _build_base_messages(args, stdin_content=None):
     if args.system_prompt:
         messages.append({"role": "system", "content": args.system_prompt})
     else:
-        prompt_text = _load_cai_prompt()
+        task_mode = getattr(args, 'mode', 'research')
+        prompt_text = _load_cai_prompt(task_mode=task_mode)
         messages.append({"role": "system", "content": prompt_text})
-        log.info("_build_base_messages: injected cai system prompt (mode=%s)", config.get('prompt_mode', 'local'))
+        log.info("_build_base_messages: injected cai system prompt (prompt_mode=%s, task_mode=%s)",
+                 config.get('prompt_mode', 'local'), task_mode)
 
     line_by_line = getattr(args, 'line_by_line', False)
     if stdin_content is None and not line_by_line:
@@ -643,6 +665,8 @@ def main():
                         help="the system prompt to send to the LLM.")
     parser.add_argument("--system-prompt-file",
                         help="path to a file whose contents are used as the system prompt.")
+    parser.add_argument("--mode", choices=list(_MODE_BLOCKS.keys()), default='research',
+                        help="task-focus hint prepended to the system prompt (default: research).")
     parser.add_argument("--file",
                         help="file path to include in the LLM context.")
     parser.add_argument("--cursor",
