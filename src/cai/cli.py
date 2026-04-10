@@ -55,7 +55,14 @@ def _diag(text, end='\n', ensure_newline=True):
     if not _STDERR_TTY:
         return
     prefix = ('' if _at_bol else '\n') if ensure_newline else ''
-    sys.stderr.write(f"{prefix}{_DIM}{text}{_RESET}{end}")
+    raw = f"{prefix}{_DIM}{text}{_RESET}{end}"
+    # Normalise \n → \r\n so lines reset to column 1 in both cooked and raw
+    # terminal modes.  The input listener puts the terminal in raw mode during
+    # LLM streaming; without \r, bare \n is a pure line-feed that does not
+    # return the cursor to column 1, causing each reasoning line to indent
+    # further to the right.  An extra \r is harmless in cooked mode.
+    raw = raw.replace('\r\n', '\n').replace('\n', '\r\n')
+    sys.stderr.write(raw)
     sys.stderr.flush()
     _at_bol = end.endswith('\n') if end else False
 
