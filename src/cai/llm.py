@@ -391,7 +391,7 @@ def enforce_strict_format(call_fn, strict_format, messages=None, max_attempts=4)
 # ---------------------------------------------------------------------------
 # LLM turn runners
 # ---------------------------------------------------------------------------
-def _run_nonstreaming_turn(messages, args, included_tools, stream_callback=None, tool_choice="auto", interrupt_event=None):
+def _run_nonstreaming_turn(messages, args, included_tools, stream_callback=None, tool_choice="auto", interrupt_event=None, reasoning_callback=None):
     """Single non-streaming LLM call. Returns (content, reasoning, tool_calls, usage)."""
     _pre_format_len = len(messages)
     result = enforce_strict_format(lambda: openai_api.chat(messages,
@@ -410,11 +410,11 @@ def _run_nonstreaming_turn(messages, args, included_tools, stream_callback=None,
     content, reasoning, tool_calls, usage = result
     return content or "", reasoning or "", tool_calls, usage
 
-def _run_streaming_turn(messages, args, included_tools, stream_callback, tool_choice="auto", interrupt_event=None):
+def _run_streaming_turn(messages, args, included_tools, stream_callback, tool_choice="auto", interrupt_event=None, reasoning_callback=None):
     """Single streaming LLM call. Returns (accumulated_text, reasoning, tool_calls, usage)."""
     accumulated = []
     reasoning_chunks = []
-    reasoning_newline_pending = False  # need a newline on stderr before content starts
+    reasoning_newline_pending = False  # need a newline before content starts
     last_tool_calls = None
     usage = {}
     for chunk, reasoning_chunk, tool_calls, usage in openai_api.chat_stream(messages,
@@ -425,11 +425,17 @@ def _run_streaming_turn(messages, args, included_tools, stream_callback, tool_ch
             break
         if reasoning_chunk:
             reasoning_chunks.append(reasoning_chunk)
-            _diag(reasoning_chunk, end="", ensure_newline=not reasoning_newline_pending)
+            if reasoning_callback:
+                reasoning_callback(reasoning_chunk)
+            else:
+                _diag(reasoning_chunk, end="", ensure_newline=not reasoning_newline_pending)
             reasoning_newline_pending = True
         if chunk:
             if reasoning_newline_pending:
-                _diag("")   # close the reasoning line before content starts
+                if reasoning_callback:
+                    reasoning_callback(None)  # signal end of reasoning
+                else:
+                    _diag("")   # close the reasoning line before content starts
                 reasoning_newline_pending = False
             accumulated.append(chunk)
             if stream_callback:
@@ -437,7 +443,10 @@ def _run_streaming_turn(messages, args, included_tools, stream_callback, tool_ch
         if tool_calls:
             last_tool_calls = tool_calls
     if reasoning_newline_pending:
-        _diag("")   # ensure we end on a new line even if no content followed
+        if reasoning_callback:
+            reasoning_callback(None)
+        else:
+            _diag("")   # ensure we end on a new line even if no content followed
     return "".join(accumulated), "".join(reasoning_chunks), last_tool_calls, usage
 
 
@@ -540,7 +549,8 @@ def call_llm(messages,
              status_callback=None,
              tool_callback=None,
              ctx_callback=None,
-             interrupt_event=None):
+             interrupt_event=None,
+             reasoning_callback=None):
     # Build the tool list actually sent to the LLM:
     # only internal tools the user has selected, plus all external MCP tools.
     selected_tool_names = getattr(args, 'selected_tools', set())
@@ -596,15 +606,20 @@ def call_llm(messages,
                                                          included_tools,
                                                          stream_callback,
                                                          tool_choice=tool_choice,
-                                                         interrupt_event=interrupt_event)
+                                                         interrupt_event=interrupt_event,
+                                                         reasoning_callback=reasoning_callback)
         if reasoning:
             _cai_logger.log(2, "REASONING")
             _cai_logger.log(3, reasoning)
 
             if not stream_callback:
-                # Streaming already emitted reasoning live via _diag(); for
-                # non-streaming emit the full block now, before content appears.
-                _diag("[thinking]\n{}".format(reasoning))
+                # Streaming already emitted reasoning live; for non-streaming
+                # emit the full block now, before content appears.
+                if reasoning_callback:
+                    reasoning_callback("[thinking]\n" + reasoning)
+                    reasoning_callback(None)
+                else:
+                    _diag("[thinking]\n{}".format(reasoning))
         log.info("call_llm: turn=%d tokens prompt=%s completion=%s total=%s",
                  turn,
                  usage.get('prompt_tokens'),

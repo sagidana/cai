@@ -507,6 +507,21 @@ def action_interactive(args, available_tools, external_mcps):
     def stream_cb(chunk):
         screen.write(chunk)
 
+    _reasoning_active = [False]
+
+    def reasoning_cb(chunk):
+        if chunk is None:
+            # End of reasoning — restore LLM style
+            if _reasoning_active[0]:
+                screen.write(f"\n{_RESET}{_LLM_STYLE}")
+                _reasoning_active[0] = False
+        else:
+            if not _reasoning_active[0]:
+                # First reasoning chunk — switch to meta (gray) style
+                screen.write(f"\n{_META_STYLE}")
+                _reasoning_active[0] = True
+            screen.write(chunk)
+
     def tool_cb(line, error=False):
         style = _ERROR_STYLE if error else _META_STYLE
         screen.write(f"{style}{line}{_RESET}{_LLM_STYLE}")
@@ -545,7 +560,8 @@ def action_interactive(args, available_tools, external_mcps):
                                     status_callback=status_callback,
                                     tool_callback=tool_cb,
                                     ctx_callback=ctx_cb,
-                                    interrupt_event=screen._interrupt_event)
+                                    interrupt_event=screen._interrupt_event,
+                                    reasoning_callback=reasoning_cb)
                 _cai_logger.pop_nest(1)
                 if screen._interrupt_event.is_set():
                     screen.write(f"\n{_RESET}{_META_STYLE}[interrupted]{_RESET}\n\n")
