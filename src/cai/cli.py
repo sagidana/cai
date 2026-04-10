@@ -579,6 +579,8 @@ def main():
                         help="the prompt to send to the LLM.")
     parser.add_argument("--system-prompt",
                         help="the system prompt to send to the LLM.")
+    parser.add_argument("--system-prompt-file",
+                        help="path to a file whose contents are used as the system prompt.")
     parser.add_argument("--file",
                         help="file path to include in the LLM context.")
     parser.add_argument("--cursor",
@@ -631,6 +633,14 @@ def main():
         if args.prompt:
             parser.error("cannot use both -p/--prompt and trailing words after --")
         args.prompt = " ".join(args.prompt_words)
+    if args.system_prompt_file:
+        if args.system_prompt:
+            parser.error("--system-prompt and --system-prompt-file are mutually exclusive.")
+        try:
+            with open(args.system_prompt_file) as f:
+                args.system_prompt = f.read()
+        except OSError as e:
+            parser.error(f"cannot read --system-prompt-file: {e}")
     if args.model is None:
         args.model = config.get('model', "arcee-ai/trinity-mini:free")
 
