@@ -64,12 +64,28 @@ def history_navigate(
     return history_idx, input_buf, cursor_pos
 
 
+def _prefix_matches(prefix: str, completions: list) -> list:
+    """Space-aware prefix matching for /commands.
+
+    Without a space in the prefix (e.g. "skill") only top-level commands are
+    shown — completions that contain a space are hidden so sub-commands don't
+    flood the overlay until the user has committed to a command word.
+
+    With a space in the prefix (e.g. "skill ") the space acts as a delimiter
+    that opts into sub-command matching, so only completions that start with
+    the full prefix (including the space) are returned.
+    """
+    if ' ' in prefix:
+        return [c for c in completions if c.startswith(prefix)]
+    return [c for c in completions if c.startswith(prefix) and ' ' not in c]
+
+
 def get_overlay_matches(buf_str: str, completions: list) -> list:
     """Return command names whose prefix matches the current /cmd input."""
     if not buf_str.startswith('/') or '\n' in buf_str:
         return []
     prefix = buf_str[1:]
-    return [c for c in completions if c.startswith(prefix)]
+    return _prefix_matches(prefix, completions)
 
 
 def tab_complete(
@@ -81,7 +97,7 @@ def tab_complete(
     if not buf_str.startswith('/'):
         return None, overlay_idx
     current = buf_str[1:]
-    matches = [c for c in completions if c.startswith(current)]
+    matches = _prefix_matches(current, completions)
 
     if 0 <= overlay_idx < len(matches):
         return f'/{matches[overlay_idx]}', -1
