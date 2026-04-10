@@ -466,7 +466,18 @@ def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_c
         args.selected_tools = new_selected
         status_callback("ready")
     elif cmd == "context":
-        screen.prompt_context_overlay(messages)
+        # Extract the last known prompt_tokens and context_size from the
+        # status-bar string (e.g. "ctx 45% (57600/128000)") so the overlay
+        # can show live usage and scale the estimate as messages are edited.
+        _ctx_m = re.search(r'\((\d+)/(\d+)\)', last_ctx[0])
+        _prompt_tok  = int(_ctx_m.group(1)) if _ctx_m else 0
+        _ctx_size    = int(_ctx_m.group(2)) if _ctx_m else 0
+        _, _new_tok  = screen.prompt_context_overlay(
+            messages, context_size=_ctx_size, prompt_tokens=_prompt_tok
+        )
+        if _new_tok and _ctx_size:
+            _pct        = f"{_new_tok / _ctx_size:.0%}"
+            last_ctx[0] = f"ctx {_pct} ({_new_tok}/{_ctx_size})"
         status_callback("ready")
     elif cmd == "":
         pass  # empty command, do nothing

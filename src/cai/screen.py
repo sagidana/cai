@@ -1038,12 +1038,18 @@ class Screen:
 
     # ------------------------------------------------------------------ context overlay
 
-    def prompt_context_overlay(self, messages: list) -> list:
+    def prompt_context_overlay(
+        self,
+        messages: list,
+        context_size: int = 0,
+        prompt_tokens: int = 0,
+    ) -> tuple:
         """
         Interactive context viewer/editor overlay.
 
         Shows all messages with index, role, % of total context, and a
-        content preview — one message per line.
+        content preview — one message per line.  The title shows overall
+        context usage; it updates live as messages are pruned or edited.
 
         Navigation : j / k / arrows, Ctrl-U / Ctrl-D, g (gg) / G
         Search     : /pattern or ?pattern  then n / N to cycle
@@ -1052,9 +1058,12 @@ class Screen:
         Edit       : Enter — open the full message content in nvim; any
                              saved changes are written back into messages[]
         Close      : ESC or q
+
+        Returns (messages, new_prompt_tokens_estimate).
+        new_prompt_tokens_estimate is 0 when no token baseline was provided.
         """
         if not messages:
-            return messages
+            return messages, 0
 
         import json as _json
 
@@ -1134,12 +1143,28 @@ class Screen:
                 search_match_idx = -1
                 selected_idx = pre_search_idx
 
+        # ── Token estimation (char-ratio scaling) ─────────────────────────
+        # We don't have a tokeniser, so we scale prompt_tokens proportionally
+        # to the change in total character count.  base_chars is fixed at
+        # overlay-open time; _tokens_est[0] tracks the running estimate.
+        base_chars     = sum(len(_msg_text(m)) for m in messages) or 1
+        _tokens_est    = [prompt_tokens]
+
+        def _recompute_tokens() -> None:
+            if not prompt_tokens or not base_chars:
+                return
+            new_chars = sum(len(_msg_text(m)) for m in messages) or 1
+            _tokens_est[0] = max(0, round(prompt_tokens * new_chars / base_chars))
+            _prev_lines.clear()
+            _first_draw[0] = True
+
         def _redraw() -> None:
             self._draw_context_overlay(
                 messages, selected_idx,
                 search_pattern, search_matches, search_match_idx,
                 search_mode, search_buf, search_direction,
                 _prev_lines, _first_draw[0],
+                context_size, _tokens_est[0],
             )
             _first_draw[0] = False
 
@@ -1183,8 +1208,7 @@ class Screen:
                 sys.stdout.write('\033[?1049h\033[2J')
                 sys.stdout.flush()
                 tty.setraw(self._tty_fd)
-                _prev_lines.clear()
-                _first_draw[0] = True
+                _recompute_tokens()   # updates estimate + triggers full redraw
 
         old_attrs    = termios.tcgetattr(self._tty_fd)
         orig_handler = signal.getsignal(signal.SIGWINCH)
@@ -1277,8 +1301,7 @@ class Screen:
                     selected_idx = search_matches[search_match_idx]
                 elif key == 'p':
                     messages[selected_idx]['content'] = '[pruned by user]'
-                    _prev_lines.clear()
-                    _first_draw[0] = True
+                    _recompute_tokens()
                 elif key in ('\r', '\n'):
                     _edit_in_nvim(selected_idx)
                 else:
@@ -1299,7 +1322,7 @@ class Screen:
             sys.stdout.write('\033[?1049l\033[?25l')
             sys.stdout.flush()
 
-        return messages
+        return messages, _tokens_est[0]
 
     def _draw_context_overlay(
         self,
@@ -1313,6 +1336,8 @@ class Screen:
         search_direction: int,
         prev_lines: dict,
         first_draw: bool,
+        context_size: int = 0,
+        prompt_tokens_est: int = 0,
     ) -> None:
         """Render the centered floating context overlay."""
         import json as _json
@@ -1373,10 +1398,16 @@ class Screen:
         VL = '│'; ML, MR = '├', '┤'
         h_line = H * inner_w
 
-        # Title in top border
-        title    = '  Context  '
-        pad_l    = (inner_w - len(title)) // 2
-        pad_r    = inner_w - len(title) - pad_l
+        # Title in top border — include live context-usage stats when available
+        if context_size and prompt_tokens_est:
+            pct       = prompt_tokens_est / context_size * 100
+            ctx_info  = f'{pct:.0f}% ({prompt_tokens_est}/{context_size})'
+            title     = f'  Context  {ctx_info}  '
+        else:
+            title     = '  Context  '
+        title = title[:inner_w]          # guard against very narrow terminals
+        pad_l = (inner_w - len(title)) // 2
+        pad_r = inner_w - len(title) - pad_l
         title_border = f'{TL}{H * pad_l}{title}{H * pad_r}{TR}'
 
         dir_char = '/' if search_direction == 1 else '?'
