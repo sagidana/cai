@@ -1035,3 +1035,457 @@ class Screen:
 
         sys.stdout.write(''.join(out))
         sys.stdout.flush()
+
+    # ------------------------------------------------------------------ context overlay
+
+    def prompt_context_overlay(self, messages: list) -> list:
+        """
+        Interactive context viewer/editor overlay.
+
+        Shows all messages with index, role, % of total context, and a
+        content preview — one message per line.
+
+        Navigation : j / k / arrows, Ctrl-U / Ctrl-D, g (gg) / G
+        Search     : /pattern or ?pattern  then n / N to cycle
+        Prune      : p — replace the selected message's content with a
+                         placeholder string (keeps the message slot)
+        Edit       : Enter — open the full message content in nvim; any
+                             saved changes are written back into messages[]
+        Close      : ESC or q
+        """
+        if not messages:
+            return messages
+
+        import json as _json
+
+        n = len(messages)
+        selected_idx = 0
+
+        search_mode      = False
+        search_direction = 1
+        search_buf: list[str] = []
+        search_pattern   = ''
+        search_matches: list[int] = []
+        search_match_idx = -1
+        pre_search_idx   = 0
+
+        _resize_pending = [False]
+        _prev_lines: dict[int, str] = {}
+        _first_draw = [True]
+
+        def _on_overlay_resize(signum, frame):
+            ts = shutil.get_terminal_size()
+            self._rows, self._cols = ts.lines, ts.columns
+            _resize_pending[0] = True
+            _first_draw[0]     = True
+
+        def _msg_text(msg) -> str:
+            content  = msg.get('content', '')
+            tc_parts = []
+            for tc in (msg.get('tool_calls') or []):
+                name = tc.get('function', {}).get('name', '?')
+                args = tc.get('function', {}).get('arguments', '')
+                tc_parts.append(f'{name}({args})')
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, list):
+                text = _json.dumps(content, indent=2)
+            else:
+                text = str(content) if content is not None else ''
+            if tc_parts:
+                tc_str = ' | '.join(tc_parts)
+                return f'[{tc_str}] {text}' if text else f'[{tc_str}]'
+            return text
+
+        def _find_matches(pattern: str) -> list[int]:
+            if not pattern:
+                return []
+            try:
+                rx = re.compile(pattern, re.IGNORECASE)
+            except re.error:
+                rx = re.compile(re.escape(pattern), re.IGNORECASE)
+            results = []
+            for i, msg in enumerate(messages):
+                if rx.search(msg.get('role', '')) or rx.search(_msg_text(msg)):
+                    results.append(i)
+            return results
+
+        def _nearest_fwd(matches: list[int], from_idx: int) -> int:
+            for i, m in enumerate(matches):
+                if m >= from_idx:
+                    return i
+            return 0
+
+        def _nearest_bwd(matches: list[int], from_idx: int) -> int:
+            for i in range(len(matches) - 1, -1, -1):
+                if matches[i] <= from_idx:
+                    return i
+            return len(matches) - 1
+
+        def _sync_cursor_to_search() -> None:
+            nonlocal selected_idx, search_match_idx
+            if search_matches:
+                if search_direction == 1:
+                    search_match_idx = _nearest_fwd(search_matches, pre_search_idx)
+                else:
+                    search_match_idx = _nearest_bwd(search_matches, pre_search_idx)
+                selected_idx = search_matches[search_match_idx]
+            else:
+                search_match_idx = -1
+                selected_idx = pre_search_idx
+
+        def _redraw() -> None:
+            self._draw_context_overlay(
+                messages, selected_idx,
+                search_pattern, search_matches, search_match_idx,
+                search_mode, search_buf, search_direction,
+                _prev_lines, _first_draw[0],
+            )
+            _first_draw[0] = False
+
+        def _edit_in_nvim(idx: int) -> None:
+            """Open message[idx] content in nvim; write back changes on exit."""
+            import subprocess
+            import tempfile
+
+            msg     = messages[idx]
+            content = msg.get('content', '')
+            is_json = not isinstance(content, str)
+            text    = _json.dumps(content, indent=2) if is_json else (content or '')
+
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+                f.write(text)
+                tmp = f.name
+            try:
+                # Hand full terminal control to nvim
+                sys.stdout.write('\033[?1049l\033[?25h')
+                sys.stdout.flush()
+                termios.tcsetattr(self._tty_fd, termios.TCSADRAIN, self._cooked_attrs)
+
+                subprocess.run(['nvim', tmp])
+
+                with open(tmp, 'r') as f:
+                    new_text = f.read()
+
+                if is_json:
+                    try:
+                        messages[idx]['content'] = _json.loads(new_text)
+                    except Exception:
+                        messages[idx]['content'] = new_text
+                else:
+                    messages[idx]['content'] = new_text
+            finally:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                # Restore overlay: alternate screen + raw mode
+                sys.stdout.write('\033[?1049h\033[2J')
+                sys.stdout.flush()
+                tty.setraw(self._tty_fd)
+                _prev_lines.clear()
+                _first_draw[0] = True
+
+        old_attrs    = termios.tcgetattr(self._tty_fd)
+        orig_handler = signal.getsignal(signal.SIGWINCH)
+
+        sys.stdout.write('\033[?1049h\033[2J')
+        sys.stdout.flush()
+
+        try:
+            signal.signal(signal.SIGWINCH, _on_overlay_resize)
+            tty.setraw(self._tty_fd)
+            _redraw()
+
+            prev_key = ''
+            while True:
+                if _resize_pending[0]:
+                    _resize_pending[0] = False
+                    _redraw()
+
+                key = self._read_key()
+
+                # ── Search input mode ────────────────────────────────────
+                if search_mode:
+                    if key in ('\r', '\n'):
+                        search_mode = False
+                    elif key == '\033':
+                        search_mode      = False
+                        selected_idx     = pre_search_idx
+                        search_pattern   = ''
+                        search_buf       = []
+                        search_matches   = []
+                        search_match_idx = -1
+                    elif key == '\x7f':
+                        if search_buf:
+                            search_buf.pop()
+                            search_pattern   = ''.join(search_buf)
+                            search_matches   = _find_matches(search_pattern)
+                            _sync_cursor_to_search()
+                        else:
+                            search_mode      = False
+                            selected_idx     = pre_search_idx
+                            search_pattern   = ''
+                            search_matches   = []
+                            search_match_idx = -1
+                    elif len(key) == 1 and ord(key) >= 32:
+                        search_buf.append(key)
+                        search_pattern = ''.join(search_buf)
+                        search_matches = _find_matches(search_pattern)
+                        _sync_cursor_to_search()
+                    _redraw()
+                    continue
+
+                # ── Normal navigation mode ───────────────────────────────
+                if key in ('\033', 'q', '\x03'):
+                    break
+                elif key in ('\033[A', 'k'):
+                    selected_idx = max(0, selected_idx - 1)
+                elif key in ('\033[B', 'j'):
+                    selected_idx = min(n - 1, selected_idx + 1)
+                elif key == 'G':
+                    selected_idx = n - 1
+                elif key == 'g' and prev_key == 'g':
+                    selected_idx = 0
+                elif key == '/':
+                    search_mode      = True
+                    search_direction = 1
+                    search_buf       = []
+                    search_pattern   = ''
+                    search_matches   = []
+                    search_match_idx = -1
+                    pre_search_idx   = selected_idx
+                elif key == '?':
+                    search_mode      = True
+                    search_direction = -1
+                    search_buf       = []
+                    search_pattern   = ''
+                    search_matches   = []
+                    search_match_idx = -1
+                    pre_search_idx   = selected_idx
+                elif key == 'n' and search_matches:
+                    if search_direction == 1:
+                        search_match_idx = (search_match_idx + 1) % len(search_matches)
+                    else:
+                        search_match_idx = (search_match_idx - 1) % len(search_matches)
+                    selected_idx = search_matches[search_match_idx]
+                elif key == 'N' and search_matches:
+                    if search_direction == 1:
+                        search_match_idx = (search_match_idx - 1) % len(search_matches)
+                    else:
+                        search_match_idx = (search_match_idx + 1) % len(search_matches)
+                    selected_idx = search_matches[search_match_idx]
+                elif key == 'p':
+                    messages[selected_idx]['content'] = '[pruned by user]'
+                    _prev_lines.clear()
+                    _first_draw[0] = True
+                elif key in ('\r', '\n'):
+                    _edit_in_nvim(selected_idx)
+                else:
+                    _overhead = 4
+                    _vis  = max(1, min(n, max(5, int(self._rows * 0.85)) - _overhead))
+                    _half = max(1, _vis // 2)
+                    if key == '\x15':
+                        selected_idx = max(0, selected_idx - _half)
+                    elif key == '\x04':
+                        selected_idx = min(n - 1, selected_idx + _half)
+
+                prev_key = key
+                _redraw()
+
+        finally:
+            termios.tcsetattr(self._tty_fd, termios.TCSADRAIN, old_attrs)
+            signal.signal(signal.SIGWINCH, orig_handler)
+            sys.stdout.write('\033[?1049l\033[?25l')
+            sys.stdout.flush()
+
+        return messages
+
+    def _draw_context_overlay(
+        self,
+        messages: list,
+        selected_idx: int,
+        search_pattern: str,
+        search_matches: list[int],
+        search_match_idx: int,
+        search_mode: bool,
+        search_buf: list[str],
+        search_direction: int,
+        prev_lines: dict,
+        first_draw: bool,
+    ) -> None:
+        """Render the centered floating context overlay."""
+        import json as _json
+
+        rows, cols = self._rows, self._cols
+        n = len(messages)
+
+        # ── Column layout ─────────────────────────────────────────────────
+        # " idx  role       pct%   content... "
+        idx_w  = max(2, len(str(n)))   # e.g. 2 for ≤99 messages
+        role_w = 9                      # "assistant" = 9 chars
+        pct_w  = 6                      # "100.0%" = 6 chars
+        # Total fixed prefix per row: 1(sp) + idx_w + 2(sp) + role_w + 2(sp) + pct_w + 2(sp)
+        prefix_w = 1 + idx_w + 2 + role_w + 2 + pct_w + 2
+
+        # ── Box dimensions ────────────────────────────────────────────────
+        overhead  = 4   # top border + mid separator + status bar + bottom border
+        max_box_h = max(overhead + 1, int(rows * 0.85))
+        visible_n = max(1, min(n, max_box_h - overhead))
+        box_h     = visible_n + overhead
+
+        max_inner_w = max(prefix_w + 10, int(cols * 0.95) - 2)
+        inner_w     = max(prefix_w + 10, min(max_inner_w, cols - 4))
+        box_w       = inner_w + 2
+
+        start_r = max(1, (rows - box_h) // 2 + 1)
+        start_c = max(1, (cols - box_w) // 2 + 1)
+
+        # ── Scroll window ─────────────────────────────────────────────────
+        scroll = max(0, min(
+            selected_idx - visible_n + 1 if selected_idx >= visible_n else 0,
+            n - visible_n,
+        ))
+
+        # ── Total chars (for % calculation) ───────────────────────────────
+        def _text(msg) -> str:
+            content  = msg.get('content', '')
+            tc_parts = []
+            for tc in (msg.get('tool_calls') or []):
+                name = tc.get('function', {}).get('name', '?')
+                args = tc.get('function', {}).get('arguments', '')
+                tc_parts.append(f'{name}({args})')
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, list):
+                text = _json.dumps(content)
+            else:
+                text = str(content) if content is not None else ''
+            if tc_parts:
+                tc_str = ' | '.join(tc_parts)
+                return f'[{tc_str}] {text}' if text else f'[{tc_str}]'
+            return text
+
+        total_chars = sum(len(_text(m)) for m in messages) or 1
+
+        # ── Box drawing chars ─────────────────────────────────────────────
+        H  = '─'; TL, TR = '┌', '┐'; BL, BR = '└', '┘'
+        VL = '│'; ML, MR = '├', '┤'
+        h_line = H * inner_w
+
+        # Title in top border
+        title    = '  Context  '
+        pad_l    = (inner_w - len(title)) // 2
+        pad_r    = inner_w - len(title) - pad_l
+        title_border = f'{TL}{H * pad_l}{title}{H * pad_r}{TR}'
+
+        dir_char = '/' if search_direction == 1 else '?'
+
+        # ── Collect new line content ───────────────────────────────────────
+        new_lines: dict[int, tuple[int, str]] = {}
+
+        def put(row_off: int, text: str) -> None:
+            r = start_r + row_off
+            if 1 <= r <= rows:
+                new_lines[row_off] = (r, text)
+
+        put(0, title_border)
+
+        content_w = max(4, inner_w - prefix_w)
+
+        _ROLE_COLOR = {
+            'system':    '\033[35m',
+            'user':      '\033[32m',
+            'assistant': '\033[36m',
+            'tool':      '\033[33m',
+        }
+
+        for i in range(visible_n):
+            ai = i + scroll
+            if ai >= n:
+                put(1 + i, f'{VL}{" " * inner_w}{VL}')
+                continue
+
+            msg     = messages[ai]
+            role    = msg.get('role', '?')
+            raw     = _text(msg)
+            size    = len(raw)
+            pct     = size / total_chars * 100
+
+            idx_str  = str(ai + 1).rjust(idx_w)
+            role_str = role[:role_w].ljust(role_w)
+            pct_str  = f'{pct:5.1f}%'
+            preview  = _ansi_strip(raw.replace('\n', ' ').replace('\r', ' '))
+            preview  = preview[:content_w]
+
+            raw_line = f' {idx_str}  {role_str}  {pct_str}  {preview}'
+            cell     = raw_line[:inner_w].ljust(inner_w)
+
+            is_sel   = (ai == selected_idx)
+            is_match = bool(search_matches) and (ai in search_matches)
+
+            if is_sel and is_match:
+                styled = f'\033[7;33m{cell}\033[m'
+            elif is_sel:
+                styled = f'\033[7m{cell}\033[m'
+            elif is_match:
+                styled = f'\033[33m{cell}\033[m'
+            elif role in _ROLE_COLOR:
+                styled = f'{_ROLE_COLOR[role]}{cell}\033[m'
+            else:
+                styled = cell
+
+            put(1 + i, f'{VL}{styled}{VL}')
+
+        put(1 + visible_n, f'{ML}{h_line}{MR}')
+
+        # ── Status / search bar ───────────────────────────────────────────
+        if search_mode:
+            search_text = ''.join(search_buf)
+            m_info = (
+                f' [{search_match_idx + 1}/{len(search_matches)}]' if search_matches
+                else (' [no match]' if search_text else '')
+            )
+            raw_status  = f' {dir_char}{search_text}{m_info}'
+            status_cell = raw_status[:inner_w].ljust(inner_w)
+            put(1 + visible_n + 1, f'{VL}\033[7m{status_cell}\033[m{VL}')
+        else:
+            count_str = f' {selected_idx + 1}/{n}'
+            hints     = '  j/k /:search  p:prune  ↵:nvim  ESC:close'
+            if search_pattern:
+                m_label    = f' [{search_match_idx + 1}/{len(search_matches)}]' if search_matches else ''
+                count_str += f'   {dir_char}{search_pattern}{m_label}'
+            if len(count_str) + len(hints) <= inner_w:
+                count_str += hints
+            status_cell = count_str[:inner_w].ljust(inner_w)
+            put(1 + visible_n + 1, f'{VL}{status_cell}{VL}')
+
+        put(1 + visible_n + 2, f'{BL}{h_line}{BR}')
+
+        # ── Emit only changed rows ────────────────────────────────────────
+        out: list[str] = []
+        if first_draw:
+            sys.stdout.write('\033[2J')
+            for row_off, (r, text) in new_lines.items():
+                out.append(f'\033[{r};{start_c}H{text}')
+        else:
+            for row_off, (r, text) in new_lines.items():
+                if prev_lines.get(row_off) != text:
+                    out.append(f'\033[{r};{start_c}H{text}')
+
+        # ── Cursor ────────────────────────────────────────────────────────
+        if search_mode:
+            search_text = ''.join(search_buf)
+            cursor_col  = start_c + 1 + 1 + 1 + len(search_text)
+            cursor_row  = start_r + 1 + visible_n + 1
+            out.append(f'\033[?25h\033[{cursor_row};{cursor_col}H')
+        else:
+            out.append('\033[?25l')
+
+        prev_lines.clear()
+        for row_off, (r, text) in new_lines.items():
+            prev_lines[row_off] = text
+
+        sys.stdout.write(''.join(out))
+        sys.stdout.flush()
+        sys.stdout.flush()

@@ -465,6 +465,9 @@ def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_c
         new_selected = screen.prompt_tools_overlay(tool_names, args.selected_tools)
         args.selected_tools = new_selected
         status_callback("ready")
+    elif cmd == "context":
+        screen.prompt_context_overlay(messages)
+        status_callback("ready")
     elif cmd == "":
         pass  # empty command, do nothing
     else:
@@ -486,7 +489,7 @@ def action_interactive(args, available_tools, external_mcps):
     messages = _build_base_messages(args, stdin_content=stdin_content, always_agentic=True)
 
     screen = Screen()
-    screen.set_cmd_completions(["compact", "tools", "clear"])
+    screen.set_cmd_completions(["compact", "tools", "clear", "context"])
 
     last_ctx = [""]
 
