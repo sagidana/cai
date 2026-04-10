@@ -453,7 +453,52 @@ def _run_streaming_turn(messages, args, included_tools, stream_callback, tool_ch
 # ---------------------------------------------------------------------------
 # Context management
 # ---------------------------------------------------------------------------
+
+# Observation masking: replace old tool results with a placeholder (no LLM call).
+# Fires first at the lower threshold.
+OBSERVATION_MASK_THRESHOLDS = {'small': 0.45, 'mid': 0.60, 'large': 0.65}
+OBSERVATION_MASK_KEEP = 3  # number of recent tool results to keep verbatim
+
+# LLM compaction: summarise middle turns into a memory message.
+# Fires second at the higher threshold, after masking has already been applied.
 CONTEXT_BUDGET_THRESHOLDS = {'small': 0.60, 'mid': 0.75, 'large': 0.80}
+
+
+def _apply_observation_mask(messages):
+    """Replace content of older tool results with a short placeholder.
+
+    Keeps the most recent OBSERVATION_MASK_KEEP tool messages verbatim and
+    replaces the content of older ones in-place. No LLM call needed.
+    Returns the number of messages masked.
+    """
+    keep = config.get('observation_mask_keep', OBSERVATION_MASK_KEEP) if config else OBSERVATION_MASK_KEEP
+
+    # Find tool messages that haven't already been masked
+    tool_indices = [
+        i for i, m in enumerate(messages)
+        if m.get('role') == 'tool'
+        and not str(m.get('content', '')).startswith('[result omitted')
+    ]
+
+    to_mask = tool_indices[:-keep] if len(tool_indices) > keep else []
+    if not to_mask:
+        log.info("observation_mask: nothing to mask (%d tool msgs, keep=%d)", len(tool_indices), keep)
+        return 0
+
+    chars_freed = 0
+    for i in to_mask:
+        content = messages[i].get('content', '')
+        if isinstance(content, str) and len(content) > 100:
+            chars_freed += len(content)
+            messages[i] = dict(messages[i])  # avoid mutating shared refs
+            messages[i]['content'] = f'[result omitted — {len(content)} chars]'
+
+    log.info("observation_mask: masked %d tool results, freed ~%d chars (~%d tokens)",
+             len(to_mask), chars_freed, chars_freed // _CHARS_PER_TOKEN)
+    _cai_logger.log(2, "MASK replaced {} tool results with placeholders ({} chars freed)".format(
+        len(to_mask), chars_freed))
+    return len(to_mask)
+
 
 def _compact_messages(messages, model):
     """Summarize middle turns into a memory message to free up context space."""
@@ -493,21 +538,41 @@ def _compact_messages(messages, model):
     _cai_logger.log(2, "TRIM done — replaced {} messages with 1 [memory] entry ({} chars)\n{}".format(
         len(compactable), len(summary), summary))
 
+
 def _check_context_budget(messages, usage, profile, args, status_callback=None):
-    """Compact messages if prompt token usage exceeds the tier threshold."""
+    """Apply observation masking and/or LLM compaction based on context budget thresholds.
+
+    Two independent thresholds (both configurable):
+      observation_mask_pct  — lower threshold: mask old tool results (no LLM call)
+      context_budget_pct    — higher threshold: LLM-summarise middle turns as fallback
+    Both can fire in the same turn; masking always runs first.
+    """
     prompt_tokens = usage.get('prompt_tokens', 0)
     context_limit = profile.get('context', 16000)
     if not prompt_tokens or not context_limit:
         return
 
     budget_pct = prompt_tokens / context_limit
-    default_threshold = CONTEXT_BUDGET_THRESHOLDS.get(profile['tier'], 0.75)
-    threshold = config.get('context_budget_pct', default_threshold) if config else default_threshold
 
-    if budget_pct >= threshold:
+    default_mask_threshold = OBSERVATION_MASK_THRESHOLDS.get(profile['tier'], 0.60)
+    default_compact_threshold = CONTEXT_BUDGET_THRESHOLDS.get(profile['tier'], 0.75)
+    mask_threshold = config.get('observation_mask_pct', default_mask_threshold) if config else default_mask_threshold
+    compact_threshold = config.get('context_budget_pct', default_compact_threshold) if config else default_compact_threshold
+
+    if budget_pct >= mask_threshold:
+        log.warning("context budget: %.0f%% used (%d/%d tokens), applying observation mask",
+                    budget_pct * 100, prompt_tokens, context_limit)
+        msg = f"[context {budget_pct:.0%} >= {mask_threshold:.0%}] masking old tool results..."
+        if status_callback:
+            status_callback(msg)
+        else:
+            _diag(f"\n{msg}")
+        _apply_observation_mask(messages)
+
+    if budget_pct >= compact_threshold:
         log.warning("context budget: %.0f%% used (%d/%d tokens), compacting",
                     budget_pct * 100, prompt_tokens, context_limit)
-        msg = f"[context {budget_pct:.0%} >= {threshold:.0%}] compacting..."
+        msg = f"[context {budget_pct:.0%} >= {compact_threshold:.0%}] compacting..."
         if status_callback:
             status_callback(msg)
         else:
@@ -627,9 +692,9 @@ def call_llm(messages,
                  usage.get('total_tokens'))
 
         prompt_tokens = usage.get('prompt_tokens', 0)
-        pct = f"{prompt_tokens / profile['context']:.0%}" if profile['context'] else "?"
-        ctx_str = f"ctx {pct} ({prompt_tokens}/{profile['context']})"
-        if ctx_callback:
+        if prompt_tokens and ctx_callback:
+            pct = f"{prompt_tokens / profile['context']:.0%}" if profile['context'] else "?"
+            ctx_str = f"ctx {pct} ({prompt_tokens}/{profile['context']})"
             ctx_callback(ctx_str)
 
         if not tool_calls:

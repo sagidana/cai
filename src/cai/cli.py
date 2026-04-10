@@ -156,8 +156,10 @@ def init():
         default_config = {
             "base_url": "https://openrouter.ai/api/v1",
             "model": "arcee-ai/trinity-mini:free",
+            "observation_mask_pct": 0.60,
+            "observation_mask_keep": 3,
             "context_budget_pct": 0.75,
-            "tool_result_max_chars": 8000,
+            "tool_result_max_chars": 40000,
             "ssl_verify": True,
             "model_profiles": {k: dict(v) for k, v in MODEL_PROFILES.items()}
         }
