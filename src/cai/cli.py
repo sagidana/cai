@@ -34,6 +34,8 @@ logging.basicConfig(
 log = logging.getLogger("cai")
 
 _PROMPTS_DIR = os.path.join(os.path.dirname(__file__), "prompts")
+_SKILLS_DIR  = os.path.join(os.path.dirname(__file__), "skills")
+_USER_SKILLS_DIR = os.path.join(os.path.expanduser("~/.config/cai"), "skills")
 
 # ─── Diagnostic output (stderr, TTY-only) ────────────────────────────────────
 # Diagnostics are dim/faint so the final result is easy to spot.
@@ -73,6 +75,11 @@ def _note_output(text):
     global _at_bol
     if text:
         _at_bol = text.endswith('\n')
+
+def _skills_completer(prefix, **kwargs):
+    """Completer for --skill: returns skill names matching the prefix."""
+    return [n for n in _list_skill_names() if n.startswith(prefix)]
+
 
 def _tools_completer(prefix, **kwargs):
     """Completer for --tools: file paths for external MCPs, tool names for internal."""
@@ -323,6 +330,74 @@ def _read_file_numbered(path):
         return "".join(f"{i + 1}: {line}" for i, line in enumerate(f))
 
 
+def _list_skill_names():
+    """Return sorted list of available skill names (built-in + user)."""
+    names = set()
+    for d in (_SKILLS_DIR, _USER_SKILLS_DIR):
+        if os.path.isdir(d):
+            for f in os.listdir(d):
+                if f.endswith('.md'):
+                    names.add(f[:-3])
+    return sorted(names)
+
+
+def _parse_skill_file(text):
+    """Parse a skill markdown file into (tools: set[str], prompt: str).
+
+    Format:
+        tools: tool_a, tool_b
+        ---
+        ## Skill: Name
+        ...prompt body...
+
+    Everything before the first '---' line is metadata (key: value).
+    Everything after is the prompt body. If no '---' is present the whole
+    file is treated as the prompt body with no tool declarations.
+    """
+    tools: set[str] = set()
+    if '\n---\n' in text:
+        header, _, body = text.partition('\n---\n')
+        for line in header.splitlines():
+            if ':' not in line:
+                continue
+            key, _, val = line.partition(':')
+            if key.strip().lower() == 'tools':
+                tools = {t.strip() for t in val.split(',') if t.strip()}
+        return tools, body.strip()
+    return tools, text.strip()
+
+
+def _load_skills(names):
+    """Load and parse skill files by name.
+
+    Search order per name: user skills dir first, then built-in package dir.
+    Returns (all_tools: set[str], prompts: list[str]).
+    Unknown skill names are logged as warnings and skipped.
+    """
+    all_tools: set[str] = set()
+    prompts: list[str] = []
+    for name in names:
+        candidates = [
+            os.path.join(_USER_SKILLS_DIR, f"{name}.md"),
+            os.path.join(_SKILLS_DIR, f"{name}.md"),
+        ]
+        for path in candidates:
+            try:
+                with open(path) as f:
+                    tools, prompt = _parse_skill_file(f.read())
+                all_tools |= tools
+                if prompt:
+                    prompts.append(prompt)
+                log.info("_load_skills: loaded %r from %s (tools=%s)", name, path, tools)
+                break
+            except OSError:
+                continue
+        else:
+            log.warning("_load_skills: skill %r not found in %s or %s",
+                        name, _USER_SKILLS_DIR, _SKILLS_DIR)
+    return all_tools, prompts
+
+
 _MODE_BLOCKS = {
     'research': (
         "## Current Task Mode: Research\n"
@@ -339,12 +414,13 @@ _MODE_BLOCKS = {
 }
 
 
-def _load_cai_prompt(task_mode=None):
-    """Load the cai system prompt from disk based on config prompt_mode.
+def _load_cai_prompt():
+    """Load the base cai system prompt from disk based on config prompt_mode.
 
-    Reads either prompts/local.md or prompts/sota.md from the package directory,
-    then prepends the task-mode focus block if task_mode is set.
+    Reads either prompts/local.md or prompts/sota.md from the package directory.
     Falls back to the mid-tier agentic prompt if the file cannot be read.
+    Mode and skill blocks are assembled by the caller so they appear after the
+    base prompt (recency bias — more specific instructions carry more weight).
     """
     prompt_mode = config.get('prompt_mode', 'local')
     if prompt_mode not in ('local', 'sota'):
@@ -353,13 +429,23 @@ def _load_cai_prompt(task_mode=None):
     prompt_path = os.path.join(_PROMPTS_DIR, f"{prompt_mode}.md")
     try:
         with open(prompt_path) as f:
-            text = f.read()
+            return f.read()
     except OSError as e:
         log.error("_load_cai_prompt: cannot read %s: %s", prompt_path, e)
-        text = AGENTIC_SYSTEM_PROMPTS.get('mid')
+        return AGENTIC_SYSTEM_PROMPTS.get('mid')
+
+
+def _assemble_system_prompt(task_mode, skill_prompts):
+    """Assemble the full system prompt in specificity order.
+
+    Order: base → mode block → skill prompts
+    Most specific instructions last so they take precedence via recency bias.
+    """
+    parts = [_load_cai_prompt()]
     if task_mode and task_mode in _MODE_BLOCKS:
-        text = _MODE_BLOCKS[task_mode] + "\n" + text
-    return text
+        parts.append(_MODE_BLOCKS[task_mode])
+    parts.extend(skill_prompts)
+    return "\n\n".join(parts)
 
 
 def _build_base_messages(args, stdin_content=None):
@@ -369,11 +455,16 @@ def _build_base_messages(args, stdin_content=None):
     if args.system_prompt:
         messages.append({"role": "system", "content": args.system_prompt})
     else:
+        skill_names = getattr(args, 'skill', []) or []
+        skill_tools, skill_prompts = _load_skills(skill_names)
+        if skill_tools:
+            args.selected_tools |= skill_tools
+
         task_mode = getattr(args, 'mode', 'research')
-        prompt_text = _load_cai_prompt(task_mode=task_mode)
-        messages.append({"role": "system", "content": prompt_text})
-        log.info("_build_base_messages: injected cai system prompt (prompt_mode=%s, task_mode=%s)",
-                 config.get('prompt_mode', 'local'), task_mode)
+        messages.append({"role": "system", "content": _assemble_system_prompt(task_mode, skill_prompts)})
+        log.info("_build_base_messages: system prompt assembled "
+                 "(prompt_mode=%s, task_mode=%s, skills=%s)",
+                 config.get('prompt_mode', 'local'), task_mode, skill_names)
 
     line_by_line = getattr(args, 'line_by_line', False)
     if stdin_content is None and not line_by_line:
@@ -509,6 +600,7 @@ def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_c
                       if t.get('function', {}).get('name')]
         new_selected = screen.prompt_tools_overlay(tool_names, args.selected_tools)
         args.selected_tools = new_selected
+        args._manual_selected_tools = set(new_selected)
         status_callback("ready")
     elif cmd == "context":
         # Extract the last known prompt_tokens and context_size from the
@@ -524,8 +616,34 @@ def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_c
             _pct        = f"{_new_tok / _ctx_size:.0%}"
             last_ctx[0] = f"ctx {_pct} ({_new_tok}/{_ctx_size})"
         status_callback("ready")
-    elif cmd == "":
-        pass  # empty command, do nothing
+    elif cmd == "" or cmd == "skill":
+        # /skill with no args → show active skills
+        active = getattr(args, 'skill', []) or []
+        available = _list_skill_names()
+        screen.write(f"\033[2;37m[active skills: {', '.join(active) or 'none'} | "
+                     f"available: {', '.join(available)}]\033[m\n")
+    elif cmd.startswith("skill "):
+        skill_args = cmd[len("skill "):].split()
+        if skill_args == ["off"]:
+            args.skill = []
+        else:
+            args.skill = skill_args
+        # Reset to manual /tools selection if the user made one, otherwise
+        # fall back to the CLI snapshot — then layer skill tools on top.
+        manual = getattr(args, '_manual_selected_tools', None)
+        args.selected_tools = set(manual) if manual is not None else set(getattr(args, '_base_selected_tools', set()))
+        skill_tools, skill_prompts = _load_skills(args.skill)
+        args.selected_tools |= skill_tools
+        # Rebuild system message in-place.
+        task_mode = getattr(args, 'mode', 'research')
+        new_system = _assemble_system_prompt(task_mode, skill_prompts)
+        if messages and messages[0].get('role') == 'system':
+            messages[0]['content'] = new_system
+        else:
+            messages.insert(0, {"role": "system", "content": new_system})
+        active_str = ', '.join(args.skill) if args.skill else 'none'
+        screen.write(f"\033[2;37m[skills set to: {active_str}]\033[m\n")
+        status_callback("ready")
     else:
         screen.write(f"\033[2;37m[unknown command: {cmd}]\033[m\n")
 
@@ -545,7 +663,8 @@ def action_interactive(args, available_tools, external_mcps):
     messages = _build_base_messages(args, stdin_content=stdin_content)
 
     screen = Screen()
-    screen.set_cmd_completions(["compact", "tools", "clear", "context"])
+    _skill_cmds = [f"skill {n}" for n in _list_skill_names()] + ["skill", "skill off"]
+    screen.set_cmd_completions(["compact", "tools", "clear", "context"] + _skill_cmds)
 
     last_ctx = [""]
 
@@ -667,6 +786,9 @@ def main():
                         help="path to a file whose contents are used as the system prompt.")
     parser.add_argument("--mode", choices=list(_MODE_BLOCKS.keys()), default='research',
                         help="task-focus hint prepended to the system prompt (default: research).")
+    skill_arg = parser.add_argument("--skill", nargs='+', default=[], metavar='SKILL',
+                        help=f"activate one or more skills (available: {', '.join(_list_skill_names())}).")
+    skill_arg.completer = _skills_completer
     parser.add_argument("--file",
                         help="file path to include in the LLM context.")
     parser.add_argument("--cursor",
@@ -742,6 +864,8 @@ def main():
         else:
             log.info("main: enabling internal tool %s", entry)
             args.selected_tools.add(entry)
+    # Snapshot tools before skill injection so /skill can reset cleanly.
+    args._base_selected_tools = frozenset(args.selected_tools)
 
     if args.interactive:
         if args.line_by_line or args.oneline:
