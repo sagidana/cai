@@ -19,6 +19,10 @@ from .ansi import (
     CUR_SHOW, CUR_HIDE, CUR_SAVE, CUR_RESTORE,
     CURSOR_BAR, CURSOR_RESET,
     ERASE_TO_END,
+    KEY_BACKSPACE, KEY_ESC, KEY_ENTER, KEY_ALT_ENTER,
+    KEY_CTRL_W, KEY_CTRL_BACKSPACE, KEY_ALT_BACKSPACE, KEY_DEL,
+    KEY_CTRL_C, KEY_CTRL_V, KEY_CTRL_A, KEY_CTRL_E, KEY_CTRL_K, KEY_TAB,
+    KEY_UP, KEY_DOWN, KEY_RIGHT, KEY_LEFT, KEY_HOME, KEY_END,
 )
 from .state import _SubmitException
 from .footer import redraw_footer, handle_resize
@@ -261,17 +265,17 @@ class Screen:
     def _handle_key(self, key: str, msg: str) -> None:
         """Dispatch one keypress. Raises _SubmitException on Enter."""
 
-        if key in ('\r', '\n'):
+        if key in KEY_ENTER:
             self._handle_submit(msg)
             return
 
-        if key in ('\033\r', '\033\n'):
+        if key in KEY_ALT_ENTER:
             self._input_buf.insert(self._cursor_pos, '\n')
             self._cursor_pos += 1
             self._redraw_footer(msg)
             return
 
-        if key == '\x7f':   # Backspace
+        if key == KEY_BACKSPACE:
             if self._cursor_pos > 0:
                 del self._input_buf[self._cursor_pos - 1]
                 self._cursor_pos -= 1
@@ -279,7 +283,7 @@ class Screen:
                 self._redraw_footer(msg)
             return
 
-        if key in ('\x17', '\x08', '\033\x7f'):   # Ctrl-W / Ctrl-Backspace
+        if key in (KEY_CTRL_W, KEY_CTRL_BACKSPACE, KEY_ALT_BACKSPACE):
             self._input_buf, self._cursor_pos = delete_word_before(
                 self._input_buf, self._cursor_pos
             )
@@ -287,13 +291,13 @@ class Screen:
             self._redraw_footer(msg)
             return
 
-        if key == '\033[3~':   # Forward delete
+        if key == KEY_DEL:
             if self._cursor_pos < len(self._input_buf):
                 del self._input_buf[self._cursor_pos]
                 self._redraw_footer(msg)
             return
 
-        if key == '\x03':   # Ctrl-C
+        if key == KEY_CTRL_C:
             if self._input_buf:
                 self._input_buf.clear()
                 self._cursor_pos = 0
@@ -302,7 +306,7 @@ class Screen:
                 return
             raise KeyboardInterrupt
 
-        if key == '\x16':   # Ctrl-V — open in vim
+        if key == KEY_CTRL_V:   # open in vim
             new_buf = open_in_vim(self._tty_fd, self._cooked_attrs, self._input_buf)
             self._input_buf  = new_buf
             self._cursor_pos = len(new_buf)
@@ -310,44 +314,44 @@ class Screen:
             sys.stdout.flush()
             return
 
-        if key == '\033':   # Escape — deselect overlay item
+        if key == KEY_ESC:   # Escape — deselect overlay item
             if self._cmd_overlay_idx >= 0:
                 self._cmd_overlay_idx = -1
                 self._redraw_footer(msg)
             return
 
-        if key == '\033[A':   # Arrow up
+        if key == KEY_UP:
             self._handle_arrow_up(msg)
             return
 
-        if key == '\033[B':   # Arrow down
+        if key == KEY_DOWN:
             self._handle_arrow_down(msg)
             return
 
-        if key == '\033[C':   # Arrow right
+        if key == KEY_RIGHT:
             if self._cursor_pos < len(self._input_buf):
                 self._cursor_pos += 1
                 self._redraw_footer(msg)
             return
 
-        if key == '\033[D':   # Arrow left
+        if key == KEY_LEFT:
             if self._cursor_pos > 0:
                 self._cursor_pos -= 1
                 self._redraw_footer(msg)
             return
 
-        if key in ('\033[H', '\033[1~', '\033OH'):   # Home
+        if key in KEY_HOME:
             before = ''.join(self._input_buf[:self._cursor_pos])
             self._cursor_pos = before.rfind('\n') + 1
             self._redraw_footer(msg)
             return
 
-        if key == '\x01':   # Ctrl-A — absolute beginning
+        if key == KEY_CTRL_A:   # absolute beginning
             self._cursor_pos = 0
             self._redraw_footer(msg)
             return
 
-        if key in ('\033[F', '\033[4~', '\033OF'):   # End
+        if key in KEY_END:
             rest = ''.join(self._input_buf[self._cursor_pos:])
             next_nl = rest.find('\n')
             self._cursor_pos = (len(self._input_buf) if next_nl == -1
@@ -355,17 +359,17 @@ class Screen:
             self._redraw_footer(msg)
             return
 
-        if key == '\x05':   # Ctrl-E — absolute end
+        if key == KEY_CTRL_E:   # absolute end
             self._cursor_pos = len(self._input_buf)
             self._redraw_footer(msg)
             return
 
-        if key == '\x0b':   # Ctrl-K — kill to end
+        if key == KEY_CTRL_K:   # kill to end
             self._input_buf = self._input_buf[:self._cursor_pos]
             self._redraw_footer(msg)
             return
 
-        if key == '\t':   # Tab
+        if key == KEY_TAB:
             self._tab_complete(msg)
             return
 

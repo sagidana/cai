@@ -7,7 +7,7 @@ import tempfile
 import termios
 import tty
 
-from .ansi import KEY_CTRL_C
+from .ansi import KEY_CTRL_C, CUR_SHOW
 
 
 def read_key(tty_fd: int) -> str:
@@ -116,7 +116,7 @@ def open_in_vim(tty_fd: int, cooked_attrs, buf: list) -> list:
     try:
         termios.tcsetattr(tty_fd, termios.TCSADRAIN, cooked_attrs)
         import sys
-        sys.stdout.write('\033[?25h')
+        sys.stdout.write(CUR_SHOW)
         sys.stdout.flush()
         subprocess.run(['nvim', tmp])
         tty.setraw(tty_fd)

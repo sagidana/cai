@@ -13,6 +13,8 @@ from ..ansi import (
     ERASE_SCREEN,
     SGR_RESET, SGR_REVERSE, SGR_YELLOW, SGR_REVERSE_YELLOW,
     cur_move,
+    KEY_BACKSPACE, KEY_ESC, KEY_ENTER, KEY_CTRL_C,
+    KEY_CTRL_D, KEY_CTRL_U, KEY_UP, KEY_DOWN,
 )
 from ..input import read_key
 
@@ -313,14 +315,14 @@ def _handle_search_key(
     search_match_idx, pre_search_idx, search_direction,
 ) -> tuple:
     """Handle one key in search input mode. Returns updated search state tuple."""
-    if key in ('\r', '\n'):
+    if key in KEY_ENTER:
         return (False, selected_idx, search_pattern, search_buf,
                 search_matches, search_match_idx)
 
-    if key == '\033':
+    if key == KEY_ESC:
         return (False, pre_search_idx, '', [],  [], -1)
 
-    if key == '\x7f':
+    if key == KEY_BACKSPACE:
         if search_buf:
             search_buf = search_buf[:-1]
             search_pattern = ''.join(search_buf)
@@ -364,13 +366,13 @@ def _handle_normal_key(
     search_buf: list = []
     pre_search_idx = selected_idx
 
-    if key in ('\033', '\r', '\n', '\x03'):
+    if key in (KEY_ESC, *KEY_ENTER, KEY_CTRL_C):
         done = True
 
-    elif key in ('\033[A', 'k'):
+    elif key in (KEY_UP, 'k'):
         selected_idx = max(0, selected_idx - 1)
 
-    elif key in ('\033[B', 'j'):
+    elif key in (KEY_DOWN, 'j'):
         selected_idx = min(n - 1, selected_idx + 1)
 
     elif key == ' ':
@@ -405,12 +407,12 @@ def _handle_normal_key(
     elif key == 'g' and prev_key == 'g':
         selected_idx = 0
 
-    elif key == '\x15':   # Ctrl-U
+    elif key == KEY_CTRL_U:
         overhead = 4
         vis  = max(1, min(n, max(5, int(rows * 0.85)) - overhead))
         selected_idx = max(0, selected_idx - max(1, vis // 2))
 
-    elif key == '\x04':   # Ctrl-D
+    elif key == KEY_CTRL_D:
         overhead = 4
         vis  = max(1, min(n, max(5, int(rows * 0.85)) - overhead))
         selected_idx = min(n - 1, selected_idx + max(1, vis // 2))

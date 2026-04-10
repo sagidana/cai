@@ -17,6 +17,8 @@ from ..ansi import (
     SGR_RESET, SGR_REVERSE, SGR_YELLOW, SGR_REVERSE_YELLOW,
     SGR_GREEN, SGR_CYAN, SGR_MAGENTA,
     cur_move,
+    KEY_BACKSPACE, KEY_ESC, KEY_ENTER, KEY_CTRL_C,
+    KEY_CTRL_D, KEY_CTRL_U, KEY_UP, KEY_DOWN,
 )
 from ..state import (
     _OverlayCtx,
@@ -224,7 +226,7 @@ def overlay_redraw(ctx: _OverlayCtx, rows: int, cols: int) -> None:
 
 def overlay_filter_key(ctx: _OverlayCtx, key: str) -> None:
     """Handle one keypress while the filter prompt is open."""
-    if key in ('\r', '\n'):
+    if key in KEY_ENTER:
         pat = ''.join(ctx.filter_buf)
         if pat and (not ctx.filter_history or ctx.filter_history[0] != pat):
             ctx.filter_history.insert(0, pat)
@@ -234,13 +236,13 @@ def overlay_filter_key(ctx: _OverlayCtx, key: str) -> None:
         ctx.first_draw         = True
         return
 
-    if key == '\033':
+    if key == KEY_ESC:
         ctx.filter_mode        = False
         ctx.filter_history_pos = -1
         ctx.filter_buf[:]      = list(ctx.filter_pattern)
         return
 
-    if key == '\x7f':
+    if key == KEY_BACKSPACE:
         if ctx.filter_buf:
             ctx.filter_buf.pop()
             ctx.filter_history_pos = -1
@@ -250,13 +252,13 @@ def overlay_filter_key(ctx: _OverlayCtx, key: str) -> None:
             ctx.filter_buf[:]      = list(ctx.filter_pattern)
         return
 
-    if key == '\033[A' and ctx.filter_history:   # up → older history entry
+    if key == KEY_UP and ctx.filter_history:   # up → older history entry
         ctx.filter_history_pos = min(
             ctx.filter_history_pos + 1, len(ctx.filter_history) - 1)
         ctx.filter_buf[:] = list(ctx.filter_history[ctx.filter_history_pos])
         return
 
-    if key == '\033[B':   # down → newer history entry
+    if key == KEY_DOWN:   # down → newer history entry
         if ctx.filter_history_pos > 0:
             ctx.filter_history_pos -= 1
             ctx.filter_buf[:] = list(ctx.filter_history[ctx.filter_history_pos])
@@ -272,11 +274,11 @@ def overlay_filter_key(ctx: _OverlayCtx, key: str) -> None:
 
 def overlay_search_key(ctx: _OverlayCtx, key: str) -> None:
     """Handle one keypress while the search prompt is open."""
-    if key in ('\r', '\n'):
+    if key in KEY_ENTER:
         ctx.search_mode = False
         return
 
-    if key == '\033':
+    if key == KEY_ESC:
         ctx.search_mode      = False
         ctx.selected_idx     = ctx.pre_search_idx
         ctx.search_pattern   = ''
@@ -285,7 +287,7 @@ def overlay_search_key(ctx: _OverlayCtx, key: str) -> None:
         ctx.search_match_idx = -1
         return
 
-    if key == '\x7f':
+    if key == KEY_BACKSPACE:
         if ctx.search_buf:
             ctx.search_buf.pop()
             ctx.search_pattern = ''.join(ctx.search_buf)
@@ -321,17 +323,17 @@ def overlay_nav_key(
     sel  = ctx.selected_idx
     pk   = ctx.prev_key
 
-    if key in ('\033[A', 'k'):
+    if key in (KEY_UP, 'k'):
         ctx.selected_idx = max(0, sel - 1)
-    elif key in ('\033[B', 'j'):
+    elif key in (KEY_DOWN, 'j'):
         ctx.selected_idx = min(nv - 1, sel + 1)
     elif key == 'G':
         ctx.selected_idx = nv - 1
     elif key == 'g' and pk == 'g':
         ctx.selected_idx = 0
-    elif key == '\x15':
+    elif key == KEY_CTRL_U:
         ctx.selected_idx = max(0, sel - half)
-    elif key == '\x04':
+    elif key == KEY_CTRL_D:
         ctx.selected_idx = min(nv - 1, sel + half)
     # vim scroll-align — no-op when already at first entry
     elif key == 'z' and pk == 'z' and sel > 0:
@@ -363,7 +365,7 @@ def overlay_nav_key(
     elif key == 'p':
         ctx.messages[ctx.view[sel]]['content'] = '[pruned by user]'
         _overlay_recompute_tokens(ctx)
-    elif key in ('\r', '\n'):
+    elif key in KEY_ENTER:
         overlay_edit_in_nvim(ctx, sel, tty_fd, cooked_attrs)
 
 
@@ -462,7 +464,7 @@ def prompt_context_overlay(
                 overlay_redraw(ctx, screen._rows, screen._cols)
                 continue
 
-            if key in ('\033', 'q', '\x03'):
+            if key in (KEY_ESC, 'q', KEY_CTRL_C):
                 break
 
             overlay_nav_key(ctx, key, screen._rows, screen._tty_fd, screen._cooked_attrs)

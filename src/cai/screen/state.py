@@ -84,9 +84,9 @@ def _overlay_visible_n(ctx: _OverlayCtx, rows: int) -> int:
 
 
 def _overlay_parse_filter(raw: str) -> tuple:
-    """Parse a filter pattern for optional field flags (~t type, ~c content)."""
-    if raw.startswith('~t '):
-        return ('type', raw[3:].strip())
+    """Parse a filter pattern for optional field flags (~r role, ~c content)."""
+    if raw.startswith('~r '):
+        return ('role', raw[3:].strip())
     if raw.startswith('~c '):
         return ('content', raw[3:].strip())
     return ('all', raw)
@@ -112,7 +112,7 @@ def _overlay_apply_filter(ctx: _OverlayCtx, pattern: str) -> None:
 
         if rx is None:
             ctx.view = list(range(len(ctx.messages)))
-        elif field == 'type':
+        elif field == 'role':
             ctx.view = [
                 i for i, msg in enumerate(ctx.messages)
                 if rx.search(msg.get('role', ''))
