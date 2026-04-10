@@ -266,6 +266,28 @@ def _registry_write(data: dict) -> None:
         json.dump(data, f, indent=2)
 
 
+def _registry_purge_dead() -> None:
+    """Remove hooks whose worker process has exited without an explicit unhook."""
+    reg = _registry_read()
+    if not reg:
+        return
+    cleaned = {}
+    for hid, entry in reg.items():
+        pid = entry.get("pid")
+        status = entry.get("status", "unknown")
+        if status == "active" and pid:
+            try:
+                os.kill(pid, 0)  # signal 0 = existence check only
+                cleaned[hid] = entry  # still alive — keep
+            except ProcessLookupError:
+                pass  # dead without unhook — drop it
+            except PermissionError:
+                cleaned[hid] = entry  # exists but not ours — keep
+        # already-stopped entries are never written back (purge them too)
+    if len(cleaned) != len(reg):
+        _registry_write(cleaned)
+
+
 def _frida_attach(package: str, serial: str):
     """Attach to a running app and return (device, session). Raises on failure.
 
@@ -745,6 +767,7 @@ def register(mcp):
         Returns:
             Multi-line status string containing hook_id, or "Error: ..." on failure.
         """
+        _registry_purge_dead()
         hook_id = str(uuid.uuid4())[:8]
         os.makedirs(LOG_DIR, exist_ok=True)
         log_file = os.path.join(LOG_DIR, f"{hook_id}.jsonl")
@@ -804,14 +827,12 @@ def register(mcp):
         Returns:
             Status string, or "Error: ..." on failure.
         """
+        _registry_purge_dead()
         reg = _registry_read()
         if hook_id not in reg:
             return f"Error: unknown hook_id {hook_id!r}"
 
         entry = reg[hook_id]
-        if entry.get("status") == "stopped":
-            return f"Hook {hook_id} is already stopped."
-
         pid = entry.get("pid")
         if pid:
             try:
@@ -821,8 +842,7 @@ def register(mcp):
             except Exception as e:
                 return f"Error: could not signal worker (pid {pid}): {e}"
 
-        entry["status"] = "stopped"
-        reg[hook_id] = entry
+        del reg[hook_id]
         _registry_write(reg)
         return f"Hook {hook_id} stopped (pid {pid} sent SIGTERM)."
 
@@ -846,6 +866,7 @@ def register(mcp):
         Returns:
             Newline-separated JSON log entries, "(no new events)", or "Error: ...".
         """
+        _registry_purge_dead()
         reg = _registry_read()
         if hook_id not in reg:
             return f"Error: unknown hook_id {hook_id!r}"
@@ -882,30 +903,20 @@ def register(mcp):
             A human-readable list of hooks with hook_id, status, package,
             class.method, and PID — or "(no hooks registered)" if empty.
         """
+        _registry_purge_dead()
         reg = _registry_read()
         if not reg:
             return "(no hooks registered)"
 
         lines = []
-        dirty = False
         for hid, entry in reg.items():
             pid = entry.get("pid")
             status = entry.get("status", "unknown")
-            if status == "active" and pid:
-                try:
-                    os.kill(pid, 0)  # signal 0 = existence check only
-                except ProcessLookupError:
-                    status = "dead (worker exited)"
-                    entry["status"] = status
-                    dirty = True
             lines.append(
                 f"[{hid}] {status:<22}  pid={pid:<8}  "
                 f"{entry.get('package','?')}  "
                 f"{entry.get('class','?')}.{entry.get('method','?')}"
             )
-
-        if dirty:
-            _registry_write(reg)
 
         return "\n".join(lines)
 
