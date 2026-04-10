@@ -164,6 +164,9 @@ class Screen:
 
         # Number of rows pre-reserved below the footer anchor (updated as prompt grows)
         self._footer_rows_reserved: int = 0
+        # Rows scrolled off the top of the screen during footer expansion.
+        # Tracked so shrinking can restore them with \033M (Reverse Index).
+        self._scroll_debt: int = 0
 
         # Command completions (used for tab-completing /cmd inputs)
         self._cmd_completions: list[str] = []
@@ -199,32 +202,60 @@ class Screen:
         Must be called only after \033[s has been written (done at the top of
         prompt() and whenever the footer is redrawn from scratch).
         """
-        # Ensure enough rows are reserved below the anchor for the current footer.
-        # status (1) + one row per prompt line.  When the prompt grows (backslash
-        # continuation, vim paste), extend the reservation and re-save the anchor.
         buf_str = ''.join(self._input_buf)
-        n_prompt_lines = buf_str.count('\n') + 1
-        total_needed = 1 + n_prompt_lines   # status row + prompt rows
-        if total_needed > self._footer_rows_reserved:
-            # Go to current anchor, clear below, write enough newlines to push the
-            # terminal (scroll if necessary), then move back up and re-anchor.
-            sys.stdout.write('\033[u\r\033[J')
-            sys.stdout.write('\n' * total_needed + f'\033[{total_needed}A')
-            sys.stdout.write('\033[s')   # new anchor — now guaranteed space below
+        lines = buf_str.split('\n')
+        cols = max(1, self._cols)
+
+        # Visual (terminal-wrapped) row count for each logical line.
+        # A line whose prefix+content exceeds the terminal width wraps onto
+        # additional rows; we must reserve those rows or the terminal will
+        # scroll when we draw them, invalidating the saved anchor position.
+        def _vrows(i: int, line: str) -> int:
+            plen = len(msg if i == 0 else self._CONT_PREFIX)
+            total = plen + len(line)
+            return max(1, (total + cols - 1) // cols)
+
+        line_vrows = [_vrows(i, ln) for i, ln in enumerate(lines)]
+        total_prompt_vrows = sum(line_vrows)
+        total_needed = 1 + total_prompt_vrows  # status row + all visual prompt rows
+
+        if total_needed != self._footer_rows_reserved:
+            sys.stdout.write('\033[u\r\033[J')   # go to old anchor, clear to end
+            if total_needed > self._footer_rows_reserved:
+                # Expand: write newlines to push space (may scroll the terminal),
+                # then move back up and re-anchor.  Each row that scrolls off the
+                # top is recorded so we can restore it on shrink.
+                diff = total_needed - self._footer_rows_reserved
+                self._scroll_debt += diff
+                sys.stdout.write('\n' * total_needed + f'\033[{total_needed}A')
+            else:
+                # Shrink: slide the anchor DOWN and restore any rows that were
+                # previously scrolled off the top.
+                shrink = self._footer_rows_reserved - total_needed
+                # How many scrollback lines we can actually restore
+                restore = min(shrink, self._scroll_debt)
+                self._scroll_debt -= restore
+                if restore > 0:
+                    # \033M (Reverse Index) at the top of the screen scrolls the
+                    # display DOWN by one row, pulling one line back from the
+                    # terminal's scrollback buffer.  Repeat for each row to restore.
+                    sys.stdout.write('\033[H')          # move to top-left (row 0)
+                    sys.stdout.write('\033M' * restore) # restore `restore` rows
+                # Move cursor from the old anchor position down to the new anchor.
+                # \033[u returns to the saved (old) anchor; \033[{N}B moves down.
+                sys.stdout.write('\033[u')
+                sys.stdout.write(f'\033[{shrink}B')
+            sys.stdout.write('\033[s')   # re-anchor at the updated position
             self._footer_rows_reserved = total_needed
 
-        # Return to anchor (col 1 of the blank anchor line), clear to end
+        # Return to anchor (col 0), clear to end of screen
         sys.stdout.write('\033[u\r\033[J')
 
-        # Status line (one line below anchor)
-        text = self._status_text[: self._cols - 1]
+        # Status line (one row below anchor)
+        text = self._status_text[:cols - 1]
         sys.stdout.write(f'\n{self._STATUS_STYLE}{text}\033[K{self._RESET}')
 
         # Prompt line(s) — handle multi-line input (Alt-Enter / backslash)
-        lines = buf_str.split('\n')
-        chars_before = ''.join(self._input_buf[: self._cursor_pos])
-        line_idx = chars_before.count('\n')   # which logical line the cursor is on
-
         for i, line in enumerate(lines):
             prefix = msg if i == 0 else self._CONT_PREFIX
             # Use \r\n, not bare \n: in raw mode \n is a pure line-feed that
@@ -232,19 +263,30 @@ class Screen:
             # at whatever column the status text ended at.
             sys.stdout.write(f'\r\n{prefix}{line}')
 
-        # Move cursor to the correct line and column
-        # After printing all lines the cursor is on the last line.
-        # Move up if the edit cursor is on an earlier line.
-        lines_below_cursor = len(lines) - 1 - line_idx
-        if lines_below_cursor > 0:
-            sys.stdout.write(f'\033[{lines_below_cursor}A')
-
+        # ── cursor positioning ────────────────────────────────────────────
+        # Navigate from the anchor to the cursor's visual row and column.
+        # This is done by returning to the anchor (col 0, known position) and
+        # then moving down/right — avoiding the edge-case ambiguity of computing
+        # rows_up from the end of the drawn content when text exactly fills a row.
+        chars_before = ''.join(self._input_buf[:self._cursor_pos])
+        line_idx = chars_before.count('\n')   # which logical line the cursor is on
         last_nl = chars_before.rfind('\n')
         cursor_in_line = len(chars_before) - last_nl - 1
-        prefix = msg if line_idx == 0 else self._CONT_PREFIX
-        col = len(prefix) + cursor_in_line   # 0-indexed offset from col 1
-        if col > 0:
-            sys.stdout.write(f'\r\033[{col}C')
+        prefix_len = len(msg if line_idx == 0 else self._CONT_PREFIX)
+        visual_col_abs = prefix_len + cursor_in_line
+
+        # Visual row of cursor (0-indexed) within the prompt area
+        cursor_vrow = sum(line_vrows[:line_idx]) + visual_col_abs // cols
+        cursor_col  = visual_col_abs % cols
+
+        # From the anchor: 1 row to the status line, 1 more to the first
+        # visual prompt row, then cursor_vrow additional rows.
+        rows_down = 2 + cursor_vrow
+        sys.stdout.write('\033[u')
+        if rows_down > 0:
+            sys.stdout.write(f'\033[{rows_down}B')
+        if cursor_col > 0:
+            sys.stdout.write(f'\r\033[{cursor_col}C')
         else:
             sys.stdout.write('\r')
 
@@ -300,6 +342,7 @@ class Screen:
         # and causing a spurious scroll on every subsequent keypress.
         FOOTER_ROWS = 2   # status line + one prompt line (minimum)
         self._footer_rows_reserved = FOOTER_ROWS
+        self._scroll_debt = 0
         sys.stdout.write(f'\n' * FOOTER_ROWS + f'\033[{FOOTER_ROWS}A')
         # Save the footer anchor.  _redraw_footer uses \033[u to return here.
         sys.stdout.write('\033[s')
