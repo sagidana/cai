@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import shutil
 import subprocess
 
 from cai.utils import safe_path
@@ -232,6 +233,125 @@ def register(mcp):
         return f"Removed {file_path}"
 
     @mcp.tool()
+    def move_file(src_path: str, dst_path: str) -> str:
+        """Move a file to a new location within the working directory.
+
+        Unlike rename_file, this tool is intended for moving a file to a
+        different directory rather than just renaming it in place, though it
+        handles both cases. The destination may be either the full target path
+        or a destination directory — if dst_path is an existing directory the
+        file is placed inside it keeping its original name.
+
+        Both src_path and dst_path must be relative to (or inside) the working
+        directory; paths that escape it are rejected.
+        Parent directories of dst_path are created automatically.
+
+        Args:
+            src_path: Path to the file to move.
+            dst_path: Destination path (file path or existing directory).
+
+        Returns:
+            Confirmation string on success, or an error string starting with
+            "Error:" on failure.
+
+        Examples:
+            move_file("src/foo.py", "lib/foo.py")      → moves and keeps name
+            move_file("src/foo.py", "lib/")            → moves into lib/ dir
+        """
+        try:
+            safe_src = safe_path(src_path)
+            safe_dst = safe_path(dst_path)
+        except ValueError as e:
+            return str(e)
+        if not os.path.exists(safe_src):
+            return f"Error: source not found: {src_path}"
+        if os.path.isdir(safe_src):
+            return f"Error: {src_path!r} is a directory, not a file — use move_directory instead"
+        # If dst is an existing directory, place the file inside it
+        if os.path.isdir(safe_dst):
+            safe_dst = os.path.join(safe_dst, os.path.basename(safe_src))
+        os.makedirs(os.path.dirname(safe_dst), exist_ok=True)
+        shutil.move(safe_src, safe_dst)
+        dst_rel = os.path.relpath(safe_dst, os.path.realpath("."))
+        return f"Moved {src_path} -> {dst_rel}"
+
+    @mcp.tool()
+    def create_directory(dir_path: str) -> str:
+        """Create a directory and any missing parent directories along the path.
+
+        Behaves like 'mkdir -p': if the directory (or any intermediate
+        directories) already exists, no error is raised.
+
+        dir_path must be relative to (or inside) the working directory;
+        paths that escape it are rejected.
+
+        Args:
+            dir_path: Path of the directory to create (e.g. "src/utils/helpers").
+
+        Returns:
+            Confirmation string on success, or an error string starting with
+            "Error:" on failure.
+
+        Examples:
+            create_directory("data")              → creates data/
+            create_directory("a/b/c")             → creates a/, a/b/, a/b/c/
+            create_directory("existing/dir")      → already exists, still ok
+        """
+        try:
+            safe = safe_path(dir_path)
+        except ValueError as e:
+            return str(e)
+        already_existed = os.path.isdir(safe)
+        os.makedirs(safe, exist_ok=True)
+        if already_existed:
+            return f"Directory already exists: {dir_path}"
+        return f"Created directory {dir_path}"
+
+    @mcp.tool()
+    def move_directory(src_path: str, dst_path: str) -> str:
+        """Move a directory to a new location within the working directory.
+
+        If dst_path does not exist the directory is moved/renamed to that path.
+        If dst_path is an existing directory the source directory is placed
+        inside it (standard shell 'mv' behaviour).
+
+        Both src_path and dst_path must be relative to (or inside) the working
+        directory; paths that escape it are rejected.
+        Parent directories of dst_path are created automatically.
+
+        Args:
+            src_path: Path to the directory to move.
+            dst_path: Destination path (new name or existing parent directory).
+
+        Returns:
+            Confirmation string on success, or an error string starting with
+            "Error:" on failure.
+
+        Examples:
+            move_directory("old_name", "new_name")     → renames in place
+            move_directory("src/utils", "lib/utils")   → moves to new location
+            move_directory("src/utils", "lib/")        → places inside lib/
+        """
+        try:
+            safe_src = safe_path(src_path)
+            safe_dst = safe_path(dst_path)
+        except ValueError as e:
+            return str(e)
+        if not os.path.exists(safe_src):
+            return f"Error: source not found: {src_path}"
+        if not os.path.isdir(safe_src):
+            return f"Error: {src_path!r} is not a directory — use move_file instead"
+        # Prevent moving a directory into itself or a subdirectory of itself
+        real_src = os.path.realpath(safe_src)
+        real_dst = os.path.realpath(safe_dst)
+        if real_dst == real_src or real_dst.startswith(real_src + os.sep):
+            return f"Error: cannot move {src_path!r} into itself"
+        os.makedirs(os.path.dirname(safe_dst), exist_ok=True)
+        shutil.move(safe_src, safe_dst)
+        dst_rel = os.path.relpath(real_dst, os.path.realpath("."))
+        return f"Moved {src_path} -> {dst_rel}"
+
+    @mcp.tool()
     def edit_file(file_path: str, old_text: str, new_text: str) -> str:
         """Replace the first occurrence of old_text with new_text in a file.
 
@@ -343,6 +463,48 @@ if __name__ == "__main__":
 
         r = T["remove_file"](f"{rel}/renamed.txt")
         check("remove_file missing", r.startswith("Error:"), r)
+
+        # create_directory
+        r = T["create_directory"](f"{rel}/new_dir/sub/deep")
+        check("create_directory nested", "Created directory" in r, r)
+        check("create_directory exists on disk", os.path.isdir(f"{tmp}/new_dir/sub/deep"))
+
+        r = T["create_directory"](f"{rel}/new_dir/sub/deep")
+        check("create_directory already exists", "already exists" in r, r)
+
+        # move_file
+        T["create_file"](f"{rel}/move_src.txt", "moving")
+        r = T["move_file"](f"{rel}/move_src.txt", f"{rel}/moved_dst.txt")
+        check("move_file", "Moved" in r, r)
+        check("move_file src gone", not os.path.exists(f"{tmp}/move_src.txt"))
+        check("move_file dst exists", os.path.exists(f"{tmp}/moved_dst.txt"))
+
+        # move_file into existing directory
+        r = T["move_file"](f"{rel}/moved_dst.txt", f"{rel}/new_dir")
+        check("move_file into dir", "Moved" in r, r)
+        check("move_file into dir result", os.path.exists(f"{tmp}/new_dir/moved_dst.txt"))
+
+        # move_file missing source
+        r = T["move_file"](f"{rel}/ghost.txt", f"{rel}/x.txt")
+        check("move_file missing src", r.startswith("Error:"), r)
+
+        # move_directory
+        os.makedirs(f"{tmp}/dir_a/nested", exist_ok=True)
+        T["create_file"](f"{rel}/dir_a/nested/file.txt", "hello")
+        r = T["move_directory"](f"{rel}/dir_a", f"{rel}/dir_b")
+        check("move_directory", "Moved" in r, r)
+        check("move_directory src gone", not os.path.exists(f"{tmp}/dir_a"))
+        check("move_directory dst exists", os.path.isdir(f"{tmp}/dir_b"))
+        check("move_directory contents preserved", os.path.exists(f"{tmp}/dir_b/nested/file.txt"))
+
+        # move_directory into itself
+        os.makedirs(f"{tmp}/dir_c", exist_ok=True)
+        r = T["move_directory"](f"{rel}/dir_c", f"{rel}/dir_c/sub")
+        check("move_directory into itself rejected", r.startswith("Error:"), r)
+
+        # move_directory missing source
+        r = T["move_directory"](f"{rel}/no_such_dir", f"{rel}/wherever")
+        check("move_directory missing src", r.startswith("Error:"), r)
 
         # safe_path rejection
         r = T["read_file"]("../../etc/passwd")
