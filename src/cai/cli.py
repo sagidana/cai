@@ -444,6 +444,8 @@ def _build_base_messages(args, stdin_content=None):
 
     if args.system_prompt:
         messages.append({"role": "system", "content": args.system_prompt})
+    elif getattr(args, 'naked', False):
+        log.info("_build_base_messages: --naked mode, skipping default system prompt")
     else:
         skill_names = getattr(args, 'skill', []) or []
         skill_tools, skill_prompts = _load_skills(skill_names)
@@ -902,6 +904,8 @@ def main():
                         help="prompt words after -- (alternative to -p)")
     parser.add_argument('--harness', default=None,
                         help="path to a .harness.cai orchestration file.")
+    parser.add_argument('--naked', action='store_true',
+                        help="do not prepend any default system prompts. overridden by --system-prompt / --system-prompt-file.")
     parser.add_argument('--logger', action='store_true',
                         help="launch the interactive hierarchical log viewer (reads /tmp/cai/cai.log).")
 
