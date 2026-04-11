@@ -651,24 +651,23 @@ def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_c
                 screen.write(f"\033[2;37m[saved to {path}]\033[m\n")
             except OSError as _e:
                 screen.write(f"\033[1;31m[save error] {_e}\033[m\n")
-    elif cmd == "model" or cmd.startswith("model "):
-        model_name = cmd[len("model"):].strip()
-        if not model_name:
-            live_models = None
-            if _llm.openai_api is not None:
-                try:
-                    live_models = _llm.openai_api.get_models()
-                except Exception:
-                    pass
-            if live_models is not None:
-                screen.write(f"\033[2;37m[current model: {args.model} | "
-                             f"available: {', '.join(sorted(live_models))}]\033[m\n")
+    elif cmd == "model":
+        live_models = None
+        if _llm.openai_api is not None:
+            try:
+                live_models = _llm.openai_api.get_models()
+            except Exception:
+                pass
+        if not live_models:
+            screen.write(f"\033[2;37m[current model: {args.model} | no models available]\033[m\n")
+        else:
+            picked = screen.prompt_model_overlay(live_models)
+            if picked:
+                args.model = picked
+                screen.write(f"\033[2;37m[model set to: {args.model}]\033[m\n")
+                status_callback("ready")
             else:
                 screen.write(f"\033[2;37m[current model: {args.model}]\033[m\n")
-        else:
-            args.model = model_name
-            screen.write(f"\033[2;37m[model set to: {args.model}]\033[m\n")
-            status_callback("ready")
     elif cmd.startswith("load"):
         path = cmd[len("load"):].strip()
         if not path:
@@ -735,8 +734,7 @@ def action_interactive(args, available_tools):
             _live_models = _llm.openai_api.get_models() or []
         except Exception:
             pass
-    _model_cmds = ["model"] + [f"model {m}" for m in sorted(_live_models)]
-    screen.set_cmd_completions(["compact", "tools", "clear", "context", "save", "load"] + _skill_cmds + _model_cmds)
+    screen.set_cmd_completions(["compact", "tools", "clear", "context", "save", "load", "model"] + _skill_cmds)
 
     last_ctx = [""]
 

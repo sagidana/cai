@@ -33,6 +33,7 @@ from .input import (
 )
 from .overlays.tools import prompt_tools_overlay as _tools_overlay
 from .overlays.context import prompt_context_overlay as _ctx_overlay
+from .overlays.model import prompt_model_overlay as _model_overlay
 
 
 class Screen:
@@ -134,7 +135,16 @@ class Screen:
         FOOTER_ROWS = 2
         self._footer_rows_reserved = FOOTER_ROWS
         self._scroll_debt = 0
-        sys.stdout.write(f'\n' * FOOTER_ROWS + f'\033[{FOOTER_ROWS}A')
+        # Move to terminal bottom first so the newlines always cause FOOTER_ROWS
+        # actual scrolls, guaranteeing anchor = rows - FOOTER_ROWS.  Without
+        # this, if the cursor is above the bottom (e.g. early in a session with
+        # little output) the newlines produce no scroll, scroll_debt gets
+        # over-counted on the first overlay expansion, and \033M restoration
+        # later pulls arbitrary old content (including old status lines) from
+        # scrollback rather than the lines genuinely pushed there by the footer.
+        sys.stdout.write(f'\033[{self._rows}B')   # move to bottom (capped, no scroll)
+        sys.stdout.write(f'\n' * FOOTER_ROWS)      # scroll FOOTER_ROWS lines into scrollback
+        sys.stdout.write(f'\033[{FOOTER_ROWS}A')   # back up to anchor row
         sys.stdout.write(CUR_SAVE)
         sys.stdout.flush()
 
@@ -190,6 +200,10 @@ class Screen:
     ) -> tuple:
         """Interactive context viewer/editor. See overlays/context.py for docs."""
         return _ctx_overlay(self, messages, context_size, prompt_tokens)
+
+    def prompt_model_overlay(self, models: list) -> 'str | None':
+        """Interactive model picker. Returns selected model name or None."""
+        return _model_overlay(self, models)
 
     # ── Streaming listener ────────────────────────────────────────────────────
 
