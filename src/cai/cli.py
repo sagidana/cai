@@ -853,7 +853,9 @@ def main():
     parser.add_argument("-i", "--interactive", action="store_true",
                         help="open a persistent TUI session; implies --agentic. Ctrl-C or Ctrl-D to exit.")
     parser.add_argument("--max-turns", type=int, default=None,
-                        help="max tool-call turns in agentic mode (default: 5/10/20 by model tier).")
+                        help="max tool-call turns in agentic mode (default: unlimited).")
+    parser.add_argument("--disable-stuck-detection", action="store_true", default=False,
+                        help="disable the stuck-detection heuristic that warns the model when it repeats the same tool call.")
     tools_arg = parser.add_argument('-t',
                         '--tools',
                         nargs='+',
