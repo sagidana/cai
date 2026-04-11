@@ -406,7 +406,7 @@ class Screen:
 
     def _handle_arrow_up(self, msg: str) -> None:
         matches = get_overlay_matches(''.join(self._input_buf), self._cmd_completions)
-        if matches:
+        if matches and self._history_idx < 0:
             self._cmd_overlay_idx = (self._cmd_overlay_idx - 1) % len(matches)
             self._redraw_footer(msg)
             return
@@ -431,7 +431,7 @@ class Screen:
 
     def _handle_arrow_down(self, msg: str) -> None:
         matches = get_overlay_matches(''.join(self._input_buf), self._cmd_completions)
-        if matches:
+        if matches and self._history_idx < 0:
             self._cmd_overlay_idx = (self._cmd_overlay_idx + 1) % len(matches)
             self._redraw_footer(msg)
             return
