@@ -163,6 +163,7 @@ def init():
             "context_budget_pct": 0.75,
             "tool_result_max_chars": 40000,
             "ssl_verify": True,
+            "stuck_detection": False,
             "model_profiles": {k: dict(v) for k, v in MODEL_PROFILES.items()}
         }
         with open(config_path, "w") as f:
@@ -184,6 +185,9 @@ def init():
         updated = True
     if 'prompt_mode' not in config:
         config['prompt_mode'] = 'local'
+        updated = True
+    if 'stuck_detection' not in config:
+        config['stuck_detection'] = False
         updated = True
     if updated:
         with open(config_path, "w") as f:
@@ -856,8 +860,6 @@ def main():
                         help="open a persistent TUI session; implies --agentic. Ctrl-C or Ctrl-D to exit.")
     parser.add_argument("--max-turns", type=int, default=None,
                         help="max tool-call turns in agentic mode (default: unlimited).")
-    parser.add_argument("--disable-stuck-detection", action="store_true", default=False,
-                        help="disable the stuck-detection heuristic that warns the model when it repeats the same tool call.")
     tools_arg = parser.add_argument('-t',
                         '--tools',
                         nargs='+',

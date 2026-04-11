@@ -725,7 +725,7 @@ def call_llm(messages,
             tool_callback("\n")
 
         # _warn_if_stuck may append a [USER] warning into messages
-        if not getattr(args, 'disable_stuck_detection', False):
+        if config.get('stuck_detection', False):
             _warn_if_stuck(tool_calls, call_history, messages)
 
         # _check_context_budget may compact (replace) messages
