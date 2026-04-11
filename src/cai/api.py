@@ -41,6 +41,14 @@ class OpenAiApi:
         self.api_key = api_key
         self.ssl_verify = ssl_verify
 
+    def get_models(self):
+        url = f"{self.base_url}/models"
+        headers = {'Authorization': f"Bearer {self.api_key}"}
+        r = requests.get(url, headers=headers, verify=self.ssl_verify)
+        if r.status_code != 200:
+            return None
+        return [m.get('id') for m in r.json().get('data', [])]
+
     def chat(self, messages, model, system_prompt=None, tools=None, tool_choice="auto"):
         url = f"{self.base_url}/chat/completions"
         headers = {}
