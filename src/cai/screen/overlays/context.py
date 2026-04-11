@@ -22,7 +22,7 @@ from ..ansi import (
 )
 from ..state import (
     _OverlayCtx,
-    _overlay_msg_text, _overlay_visible_n,
+    _overlay_msg_text,
     _overlay_find_matches, _overlay_sync_search_cursor,
     _overlay_apply_filter, _overlay_recompute_tokens,
 )
@@ -321,7 +321,10 @@ def overlay_nav_key(
     if nv == 0:
         return
 
-    vis  = _overlay_visible_n(ctx, rows)
+    # Match the visible_n formula used in draw_context_overlay exactly.
+    overhead  = 4
+    max_box_h = max(overhead + 1, int(rows * 0.95))
+    vis       = max_box_h - overhead
     half = max(1, vis // 2)
     sel  = ctx.selected_idx
     pk   = ctx.prev_key
@@ -338,13 +341,17 @@ def overlay_nav_key(
         ctx.selected_idx = max(0, sel - half)
     elif key == KEY_CTRL_D:
         ctx.selected_idx = min(nv - 1, sel + half)
-    # vim scroll-align — no-op when already at first entry
-    elif key == 'z' and pk == 'z' and sel > 0:
-        ctx.forced_scroll = max(0, sel - vis // 2)
-    elif key == 't' and pk == 'z' and sel > 0:
-        ctx.forced_scroll = sel
-    elif key == 'b' and pk == 'z' and sel > 0:
-        ctx.forced_scroll = max(0, sel - vis + 1)
+    # vim scroll-align: set ctx.scroll directly so the draw function uses the
+    # exact same visible_n and no forced_scroll clearing logic is needed.
+    elif key == 'z' and pk == 'z':
+        ctx.scroll = max(0, sel - vis // 2)
+        ctx.forced_scroll = None
+    elif key == 't' and pk == 'z':
+        ctx.scroll = sel
+        ctx.forced_scroll = None
+    elif key == 'b' and pk == 'z':
+        ctx.scroll = max(0, sel - vis + 1)
+        ctx.forced_scroll = None
     elif key == 'f':
         ctx.filter_mode        = True
         ctx.filter_history_pos = -1
