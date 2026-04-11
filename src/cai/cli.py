@@ -758,6 +758,8 @@ def action_interactive(args, available_tools):
             if pending_input is not None:
                 user_input = pending_input
                 pending_input = None
+                if user_input.strip():
+                    screen._history.insert(0, user_input)
                 screen.write(f"{Screen._USER_STYLE}> {user_input}{Screen._RESET}\n\n")
             else:
                 user_input = screen.prompt("> ")

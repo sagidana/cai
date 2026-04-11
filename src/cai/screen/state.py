@@ -19,7 +19,7 @@ class _OverlayCtx:
         'search_pattern', 'search_matches', 'search_match_idx', 'pre_search_idx',
         'filter_mode', 'filter_buf', 'filter_pattern',
         'filter_history', 'filter_history_pos',
-        'forced_scroll', 'prev_key',
+        'scroll', 'forced_scroll', 'prev_key',
         'resize_pending', 'prev_lines', 'first_draw',
         'context_size', 'base_chars', 'prompt_tokens', 'tokens_est',
     )
@@ -43,6 +43,7 @@ class _OverlayCtx:
         self.filter_history: list[str] = []
         self.filter_history_pos = -1
 
+        self.scroll: int = 0
         self.forced_scroll: 'int | None' = None
         self.prev_key  = ''
 
@@ -129,6 +130,7 @@ def _overlay_apply_filter(ctx: _OverlayCtx, pattern: str) -> None:
             ]
 
     ctx.selected_idx     = 0
+    ctx.scroll           = 0
     ctx.search_matches   = _overlay_find_matches(ctx)
     ctx.search_match_idx = -1
 

@@ -121,10 +121,13 @@ def draw_context_overlay(ctx: _OverlayCtx, rows: int, cols: int) -> None:
         if not (scroll <= ctx.selected_idx < scroll + visible_n):
             ctx.forced_scroll = None
     if ctx.forced_scroll is None:
-        scroll = max(0, min(
-            ctx.selected_idx - visible_n + 1 if ctx.selected_idx >= visible_n else 0,
-            nv - visible_n,
-        ))
+        # Adjust scroll only enough to keep cursor inside the visible window;
+        # otherwise keep the current scroll position so the cursor moves freely.
+        scroll = ctx.scroll
+        scroll = max(scroll, ctx.selected_idx - visible_n + 1)  # cursor below window
+        scroll = min(scroll, ctx.selected_idx)                   # cursor above window
+        scroll = max(0, min(scroll, max(0, nv - visible_n)))     # clamp to valid range
+        ctx.scroll = scroll
 
     total_chars = sum(len(_overlay_msg_text(m)) for m in messages) or 1
     content_w   = max(4, inner_w - prefix_w)
