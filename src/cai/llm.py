@@ -693,6 +693,9 @@ def call_llm(messages,
             _cai_logger.pop_nest(1)              # pop before early return
             return content
 
+        if content and stream_callback:
+            stream_callback('\n')
+
         if not getattr(args, 'oneline', False):
             def _fmt_call(c):
                 name = c.get('function', {}).get('name', '?')
