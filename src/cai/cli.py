@@ -903,6 +903,7 @@ def main():
         args.model = config.get('model', "arcee-ai/trinity-mini:free")
 
     import cai.tools as _cai_tools
+    _tools_before_mcp = {t['function']['name'] for t in available_tools}
     for cmd_str in args.mcp:
         cmd_str = cmd_str.strip().rstrip(',')
         if not cmd_str:
@@ -912,6 +913,7 @@ def main():
     if args.mcp:
         # Refresh available_tools now that additional servers are registered.
         available_tools = _cai_tools.get_all_tools()
+        _mcp_tools = {t['function']['name'] for t in available_tools} - _tools_before_mcp
 
     args.selected_tools = set()
     for entry in args.tools:
@@ -920,6 +922,10 @@ def main():
             continue
         log.info("main: enabling tool %s", entry)
         args.selected_tools.add(entry)
+    # Auto-select tools from user-provided --mcp servers.
+    if args.mcp:
+        args.selected_tools |= _mcp_tools
+        log.info("main: auto-selected %d MCP tools: %s", len(_mcp_tools), sorted(_mcp_tools))
     # Snapshot tools before skill injection so /skill can reset cleanly.
     args._base_selected_tools = frozenset(args.selected_tools)
 
