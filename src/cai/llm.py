@@ -228,16 +228,19 @@ def handle_tool_calls(tool_calls, messages, call_content, allowed_tool_names,
         call_name = call_function.get('name')
         arguments = call_function.get('arguments') or ''
 
-        # Log the dispatch before execution so failures are visible in order
+        # Log the dispatch before execution so call/result appear paired
         try:
             parsed_args = json.loads(arguments) if arguments else {}
             args_preview = ', '.join(
-                "{}={}".format(k, json.dumps(v))
+                "{}={}".format(k, json.dumps(v)[:80])
                 for k, v in parsed_args.items()
             )
         except Exception:
             args_preview = arguments
         _cai_logger.log(2, "TOOL CALL {}({})".format(call_name, args_preview))
+
+        if tool_callback:
+            tool_callback(f"-> {call_name}({args_preview})\n")
 
         result = _execute_tool(call_name, arguments, allowed_tool_names,
                                usage=usage, profile=profile)
@@ -713,12 +716,7 @@ def call_llm(messages,
             tool_calls_fmt = [_fmt_call(c) for c in tool_calls]
             status = f"[turn {turns_label}] {', '.join(tool_calls_fmt)}"
             _emit_status(status, status_callback)
-            if tool_callback:
-                for fmt in tool_calls_fmt:
-                    tool_callback(f"-> {fmt}\n")
 
-        # handle_tool_calls appends assistant + tool messages and logs each
-        # dispatch/result event at the point of append.
         handle_tool_calls(tool_calls, messages, content, allowed_tool_names,
                           tool_callback=tool_callback, usage=usage, profile=profile)
         if tool_callback:
