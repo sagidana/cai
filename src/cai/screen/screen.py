@@ -5,6 +5,7 @@ scroll back through conversation history.  The only managed region is a
 two-line footer (status + prompt) redrawn via a saved-cursor anchor.
 """
 
+import os
 import select
 import shutil
 import signal
@@ -50,6 +51,9 @@ class Screen:
     _RESET        = SGR_RESET
     _STATUS_STYLE = SGR_AZURE_ON_DGRAY
 
+    _HISTORY_FILE = os.path.join(os.path.expanduser('~'), '.config', 'cai', '.prompts_history')
+    _HISTORY_MAX = 1000
+
     def __init__(self):
         ts = shutil.get_terminal_size()
         self._rows: int = ts.lines
@@ -57,7 +61,7 @@ class Screen:
 
         self._input_buf: list[str] = []
         self._cursor_pos: int = 0
-        self._history: list[str] = []
+        self._history: list[str] = self._load_history()
         self._history_idx: int = -1
         self._in_prompt: bool = False
         self._current_prompt_msg: str = '> '
@@ -85,6 +89,31 @@ class Screen:
         sys.stdout.flush()
 
         signal.signal(signal.SIGWINCH, self._on_resize)
+
+    # ── History persistence ────────────────────────────────────────────────────
+
+    @classmethod
+    def _load_history(cls) -> list[str]:
+        """Load prompt history from disk. Returns most-recent-first list."""
+        try:
+            with open(cls._HISTORY_FILE, 'r') as f:
+                lines = [l.rstrip('\n') for l in f if l.strip()]
+            # File stores oldest-first; reverse so index 0 = most recent
+            lines.reverse()
+            return lines[:cls._HISTORY_MAX]
+        except FileNotFoundError:
+            return []
+        except OSError:
+            return []
+
+    def _save_history_entry(self, entry: str) -> None:
+        """Append a single entry to the history file on disk."""
+        try:
+            os.makedirs(os.path.dirname(self._HISTORY_FILE), exist_ok=True)
+            with open(self._HISTORY_FILE, 'a') as f:
+                f.write(entry + '\n')
+        except OSError:
+            pass
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -408,6 +437,7 @@ class Screen:
         result = ''.join(self._input_buf)
         if result.strip():
             self._history.insert(0, result)
+            self._save_history_entry(result)
         # Erase footer; write permanent user-turn output
         sys.stdout.write(f'{CUR_RESTORE}\r{ERASE_TO_END}')
         for i, line in enumerate(result.split('\n')):
