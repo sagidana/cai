@@ -181,9 +181,9 @@ class Screen:
 
     # ── Overlay entry points ──────────────────────────────────────────────────
 
-    def prompt_tools_overlay(self, tool_names: list[str], enabled: set) -> set:
+    def prompt_tools_overlay(self, tool_entries: list, enabled: set) -> set:
         """Interactive tools toggle overlay. See overlays/tools.py for docs."""
-        return _tools_overlay(self, tool_names, enabled)
+        return _tools_overlay(self, tool_entries, enabled)
 
     def prompt_context_overlay(
         self, messages: list, context_size: int = 0, prompt_tokens: int = 0

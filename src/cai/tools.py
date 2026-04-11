@@ -3,9 +3,11 @@ import subprocess
 import sys
 import json
 import os
+import re
 import logging
 import threading
 import atexit
+import shlex
 
 logging.basicConfig(
     filename="/tmp/cai.log",
@@ -14,11 +16,17 @@ logging.basicConfig(
 )
 log = logging.getLogger("cai.tools")
 
-# Guards creation of singleton connections
-_registry_lock = threading.Lock()
-_internal_conn = None
-_external_conns = {}  # server_path -> MCPServerConnection
+# The internal MCP server command — treated exactly like any external server.
+INTERNAL_SERVER = f"{sys.executable} -m cai.tools"
 
+# ── Registry ──────────────────────────────────────────────────────────────────
+_registry_lock = threading.Lock()
+_servers: dict = {}        # cmd_str -> MCPServerConnection
+_server_labels: dict = {}  # cmd_str -> label string
+_dispatch: dict = {}       # prefixed_name -> (cmd_str, original_name)
+
+
+# ── Connection ────────────────────────────────────────────────────────────────
 
 class MCPServerConnection:
     def __init__(self, cmd):
@@ -44,7 +52,6 @@ class MCPServerConnection:
             "capabilities": {},
             "clientInfo": {"name": "cai-client", "version": "1.0"}
         })
-        # Send initialized notification (no response expected)
         self._process.stdin.write(json.dumps({
             "jsonrpc": "2.0", "method": "notifications/initialized"
         }) + "\n")
@@ -79,87 +86,103 @@ class MCPServerConnection:
             log.info("MCPServerConnection terminated: %s", self._cmd)
 
 
-def _get_internal_conn():
-    global _internal_conn
-    if _internal_conn is None:
+# ── Label derivation ──────────────────────────────────────────────────────────
+
+def _derive_label(cmd_str: str) -> str:
+    """Derive a short human-readable label from an MCP server command string."""
+    if cmd_str == INTERNAL_SERVER:
+        return "cai"
+    parts = shlex.split(cmd_str)
+    if not parts:
+        return "mcp"
+    exe = os.path.basename(parts[0])
+    # If the executable is an interpreter, use the next argument as the target
+    if exe in ('python', 'python3', 'node', 'npx', 'uvx', 'deno', 'bun') and len(parts) > 1:
+        target = parts[1]
+    else:
+        target = parts[0]
+    # For npm scoped packages like @scope/package-name, take after the last /
+    if '/' in target and os.sep not in target:
+        target = target.rsplit('/', 1)[1]
+    # Strip file extension and take basename
+    target = os.path.splitext(os.path.basename(target))[0]
+    # Sanitize: replace anything not alphanumeric or underscore with underscore
+    target = re.sub(r'[^a-zA-Z0-9_]', '_', target).strip('_')
+    return target or "mcp"
+
+
+# ── Public API ────────────────────────────────────────────────────────────────
+
+def register_server(cmd_str: str, label: str = None) -> None:
+    """Register and start an MCP server. Idempotent — safe to call multiple times."""
+    if cmd_str not in _servers:
         with _registry_lock:
-            if _internal_conn is None:
-                _internal_conn = MCPServerConnection(
-                    [sys.executable, "-m", "cai.tools"]
-                )
-    return _internal_conn
+            if cmd_str not in _servers:
+                _servers[cmd_str] = MCPServerConnection(shlex.split(cmd_str))
+                _server_labels[cmd_str] = label or _derive_label(cmd_str)
+                log.info("register_server: %r -> label=%r", cmd_str, _server_labels[cmd_str])
 
 
-def _get_external_conn(server_path):
-    if server_path not in _external_conns:
-        with _registry_lock:
-            if server_path not in _external_conns:
-                _external_conns[server_path] = MCPServerConnection(
-                    ["python", server_path]
-                )
-    return _external_conns[server_path]
+def get_all_tools() -> list:
+    """Return the unified OpenAI-format tool list from all registered servers.
 
+    Tool names are prefixed as ``{label}__{original_name}`` to avoid
+    cross-server collisions.  Also rebuilds the internal dispatch table used
+    by call_tool().
+    """
+    global _dispatch
+    new_dispatch = {}
+    openai_tools = []
 
-def call_tool(tool_name, arguments):
-    log.info("call_tool: %s %s", tool_name, arguments)
-    try:
-        conn = _get_internal_conn()
-        response = conn.call("tools/call", {"name": tool_name, "arguments": arguments})
-        return response.get("result", {}).get("content", [{}])[0].get("text")
-    except Exception as e:
-        log.error("call_tool exception: %s", e)
+    for cmd_str, conn in _servers.items():
+        label = _server_labels[cmd_str]
+        try:
+            response = conn.call("tools/list", {})
+            mcp_tools = response.get("result", {}).get("tools", [])
+        except Exception as e:
+            log.error("get_all_tools: failed listing tools for %r: %s", cmd_str, e)
+            mcp_tools = []
 
-
-def get_tools():
-    try:
-        conn = _get_internal_conn()
-        response = conn.call("tools/list", {})
-        mcp_tools = response.get("result", {}).get("tools", [])
-        return [
-            {
+        for tool in mcp_tools:
+            original_name = tool["name"]
+            prefixed_name = f"{label}__{original_name}"
+            new_dispatch[prefixed_name] = (cmd_str, original_name)
+            openai_tools.append({
                 "type": "function",
                 "function": {
-                    "name": tool["name"],
+                    "name": prefixed_name,
                     "description": tool["description"],
                     "parameters": tool["inputSchema"]
                 }
-            }
-            for tool in mcp_tools
-        ]
-    except Exception as e:
-        log.error("get_tools exception: %s", e)
-        return []
+            })
+
+    _dispatch = new_dispatch
+    log.info("get_all_tools: %d tools from %d servers", len(openai_tools), len(_servers))
+    return openai_tools
 
 
-def call_external_tool(server_path, tool_name, arguments):
-    log.info("call_external_tool: %s %s %s", server_path, tool_name, arguments)
+def call_tool(prefixed_name: str, arguments: dict):
+    """Call a tool by its prefixed name, dispatching to the correct MCP server."""
+    log.info("call_tool: %s %s", prefixed_name, arguments)
+    entry = _dispatch.get(prefixed_name)
+    if entry is None:
+        log.error("call_tool: unknown tool %r", prefixed_name)
+        return f"Error: unknown tool '{prefixed_name}'"
+    cmd_str, original_name = entry
+    conn = _servers[cmd_str]
     try:
-        conn = _get_external_conn(server_path)
-        response = conn.call("tools/call", {"name": tool_name, "arguments": arguments})
+        response = conn.call("tools/call", {"name": original_name, "arguments": arguments})
         return response.get("result", {}).get("content", [{}])[0].get("text")
     except Exception as e:
-        log.error("call_external_tool exception: %s", e)
+        log.error("call_tool exception for %r: %s", prefixed_name, e)
 
 
-def get_external_tools(server_path):
-    try:
-        conn = _get_external_conn(server_path)
-        response = conn.call("tools/list", {})
-        mcp_tools = response.get("result", {}).get("tools", [])
-        return [
-            {
-                "type": "function",
-                "function": {
-                    "name": tool["name"],
-                    "description": tool["description"],
-                    "parameters": tool["inputSchema"]
-                }
-            }
-            for tool in mcp_tools
-        ]
-    except Exception as e:
-        log.error("get_external_tools exception: %s", e)
-        return []
+def get_tool_entries() -> list:
+    """Return [(prefixed_name, label), ...] for all registered tools — used by the /tools UI."""
+    return [
+        (prefixed_name, _server_labels[_dispatch[prefixed_name][0]])
+        for prefixed_name in _dispatch
+    ]
 
 
 if __name__ == '__main__':

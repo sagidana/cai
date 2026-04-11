@@ -11,7 +11,7 @@
 - **`--harness`** — Run a `.harness.cai` orchestration file: multi-block agentic pipelines with control flow (labels, gotos, conditionals, loops, for-each sub-harnesses).
 - **`--logger`** — Launch the interactive hierarchical log viewer TUI (tails `/tmp/cai/cai.log`).
 - **`--force-tools`** — Require the LLM to use a tool at least once (sets `tool_choice=required`).
-- **MCP tool support** — Pass external MCP server scripts via `-t`; the LLM can call their tools automatically.
+- **MCP tool support** — Add any MCP server via `--mcp <command>`; tools from all servers are unified under a prefixed namespace (e.g. `cai__generic_linux_command`, `myserver__scan_target`). The built-in server is always registered automatically.
 - **Model profiles** — Built-in capability map (context window, tier, tool-calling) for 20+ models; user-overridable.
 - **Context budget management** — Automatically compacts conversation history when the context window fills up.
 - **Stuck detection** — Injects a warning if the LLM keeps calling the same tool with the same arguments.
@@ -92,16 +92,19 @@ cai --interactive
 cai --interactive --file ./src/cai/cli.py -p "Walk me through this file"
 ```
 
-### Use a custom MCP tool server
+### Use an external MCP server
 
 ```bash
-cai -t /path/to/my_mcp_server.py -p "Use the custom tool to do X"
+cai --mcp "python /path/to/my_mcp_server.py" -p "Use the custom tool to do X"
+cai --mcp "npx @modelcontextprotocol/server-filesystem /" -p "List the project files"
+cai --mcp "uvx mcp-server-git" -p "Summarise recent commits"
 ```
 
-### Use an internal named tool
+### Use internal named tools
 
 ```bash
-cai -t fetch_codebase_metadata -p "Map the entire codebase"
+cai -t cai__generic_linux_command -p "Check disk usage"
+cai -t cai__fetch_codebase_metadata -p "Map the entire codebase"
 ```
 
 ### Process multiple lines in parallel (batch mode)
@@ -176,7 +179,8 @@ cai --oneline -p "Summarize this function in one sentence" --file ./cli.py
 | `--max-turns N` | Max tool-call turns (default: tier-based 5/10/20) |
 | `--file` | Include a file in context |
 | `--cursor file:line:col` | Cursor-aware generation |
-| `-t` | MCP tool server path or internal tool name |
+| `-t` | Internal tool names to enable (prefixed, e.g. `cai__generic_linux_command`) |
+| `--mcp CMD` | Shell command to launch an external MCP server |
 | `--line-by-line` | Process each line independently |
 | `--cores N` | Parallel threads for batch processing |
 | `--strict-format json\|regex:<pattern>\|regex-each-line:<pattern>` | Force output format |
@@ -236,7 +240,7 @@ cai --interactive --model "openai/gpt-4o" -p "Let's review this PR" --file ./dif
 
 Tab completion is available in command mode.
 
-**Tools overlay** (`:tools`): A floating panel listing all available tools. Navigate with `j`/`k` or arrow keys, toggle with Space. Search forward with `/pattern` or backward with `?pattern`; use `n`/`N` to cycle matches. Press Enter or ESC to close.
+**Tools overlay** (`:tools`): A floating panel listing all available tools from all registered MCP servers. Each row shows the tool name and its server origin (e.g. `[cai]`, `[python]`). Navigate with `j`/`k` or arrow keys, toggle with Space. Search forward with `/pattern` or backward with `?pattern`; use `n`/`N` to cycle matches. Press Enter or ESC to close.
 
 **Interactive mode always uses agentic tool-calling.** Tool calls and results are shown inline in dim gray.
 
@@ -276,7 +280,7 @@ label:               # jump target (bare word followed by colon)
     --name "x"                          # required: block identifier for branching
     --enrich full                       # required: none | result-only | full
     --prepend-user-prompt               # prepend the user's task to this block's prompt
-    --tools read, list_files            # internal tool names (comma or space separated)
+    --tools cai__read_file, cai__list_files  # prefixed tool names (comma or space separated)
     --model gpt-4o                      # override model for this block
     --max-turns 100                     # override max tool-call turns
     --strict-format "regex:^(ok|retry)$"  # enforce output format
@@ -447,19 +451,33 @@ Ctrl-C during batch mode cancels all pending tasks gracefully.
 
 ## MCP Tools
 
-Pass one or more MCP server scripts with `-t`. The LLM can call their tools automatically during a session:
+All tools — built-in and external — are managed through a unified MCP server registry. The built-in server is always registered automatically. Add external servers with `--mcp`:
 
 ```bash
-cai -p "Use this tool" -t /path/to/mcp_server.py
+# Single external server
+cai --mcp "python /path/to/mcp_server.py" -p "Use this tool"
+
+# Multiple servers at once
+cai --mcp "python server_a.py" "npx @modelcontextprotocol/server-filesystem /" \
+    -p "Combine results from both tools"
 ```
 
-Internal tool names (non-path values) are also accepted to enable built-in tools:
+Tool names are automatically prefixed with a short server label to prevent collisions:
+
+| Server command | Label | Example tool name |
+|---|---|---|
+| *(built-in)* | `cai` | `cai__generic_linux_command` |
+| `python server.py` | `server` | `server__my_tool` |
+| `npx @scope/my-server` | `my-server` | `my-server__fetch` |
+| `uvx mcp-server-git` | `mcp-server-git` | `mcp-server-git__log` |
+
+Enable specific tools via `-t` using the prefixed name:
 
 ```bash
-cai -p "Inspect the project" -t fetch_codebase_metadata
+cai -t cai__generic_linux_command -p "Check disk usage"
 ```
 
-Tab completion for `-t` completes both file paths and internal tool names.
+The `:tools` overlay in interactive mode shows all tools from all servers, with origin labels.
 
 ---
 

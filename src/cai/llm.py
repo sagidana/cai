@@ -13,7 +13,6 @@ log = logging.getLogger("cai")
 config = {}
 openai_api = None
 call_tool = None
-call_external_tool = None
 
 def _noop_diag(*args, **kwargs):
     pass
@@ -21,13 +20,12 @@ def _noop_diag(*args, **kwargs):
 _diag = _noop_diag
 
 
-def setup(cfg, api, ct, cet, diag_fn=None):
+def setup(cfg, api, ct, diag_fn=None):
     """Initialise llm module state. Called once from cli.init()."""
-    global config, openai_api, call_tool, call_external_tool, _diag
+    global config, openai_api, call_tool, _diag
     config = cfg
     openai_api = api
     call_tool = ct
-    call_external_tool = cet
     if diag_fn is not None:
         _diag = diag_fn
 
@@ -187,7 +185,7 @@ def trim_tool_result(result, usage=None, profile=None, max_chars=None):
 # ---------------------------------------------------------------------------
 # Tool execution
 # ---------------------------------------------------------------------------
-def _execute_tool(call_name, arguments, allowed_tool_names, external_mcps, usage=None, profile=None):
+def _execute_tool(call_name, arguments, allowed_tool_names, usage=None, profile=None):
     """Validate and run a single tool call. Always returns a result string.
 
     allowed_tool_names is the set of tool names actually sent to the LLM for
@@ -205,16 +203,7 @@ def _execute_tool(call_name, arguments, allowed_tool_names, external_mcps, usage
         return f"Error: tool '{call_name}' received invalid JSON arguments: {e}. Raw arguments: {arguments!r}"
 
     try:
-        for mcp_path in external_mcps:
-            for tool in external_mcps[mcp_path]:
-                if tool.get('function', {}).get('name') == call_name:
-                    log.info("tool call: %s (external, mcp=%s) args=%s", call_name, mcp_path, call_args)
-                    result = call_external_tool(mcp_path, call_name, call_args)
-                    if result is None:
-                        return f"Error: tool '{call_name}' returned no result"
-                    log.info("tool call: %s -> result length=%d", call_name, len(result))
-                    return trim_tool_result(result, usage=usage, profile=profile)
-        log.info("tool call: %s (internal) args=%s", call_name, call_args)
+        log.info("tool call: %s args=%s", call_name, call_args)
         result = call_tool(call_name, call_args)
     except Exception as e:
         log.error("tool call: %s raised: %s", call_name, e)
@@ -227,7 +216,7 @@ def _execute_tool(call_name, arguments, allowed_tool_names, external_mcps, usage
     return trim_tool_result(result, usage=usage, profile=profile)
 
 
-def handle_tool_calls(tool_calls, messages, call_content, allowed_tool_names, external_mcps,
+def handle_tool_calls(tool_calls, messages, call_content, allowed_tool_names,
                       tool_callback=None, usage=None, profile=None):
     log.info("handle_tool_calls: dispatching %d tool call(s)", len(tool_calls))
     for call in tool_calls:
@@ -250,7 +239,7 @@ def handle_tool_calls(tool_calls, messages, call_content, allowed_tool_names, ex
             args_preview = arguments
         _cai_logger.log(2, "TOOL CALL {}({})".format(call_name, args_preview))
 
-        result = _execute_tool(call_name, arguments, allowed_tool_names, external_mcps,
+        result = _execute_tool(call_name, arguments, allowed_tool_names,
                                usage=usage, profile=profile)
 
         if result.startswith("Error:"):
@@ -608,22 +597,19 @@ def _emit_status(text, status_callback):
 def call_llm(messages,
              args,
              available_tools,
-             external_mcps,
              stream_callback=None,
              status_callback=None,
              tool_callback=None,
              ctx_callback=None,
              interrupt_event=None,
              reasoning_callback=None):
-    # Build the tool list actually sent to the LLM:
-    # only internal tools the user has selected, plus all external MCP tools.
+    # Build the tool list sent to the LLM — only tools the user has selected.
+    # available_tools is the unified list (all servers, prefixed names).
     selected_tool_names = getattr(args, 'selected_tools', set())
     included_tools = [
         tool for tool in available_tools
         if tool.get('function', {}).get('name') in selected_tool_names
     ]
-    for mcp_path in external_mcps:
-        included_tools.extend(external_mcps[mcp_path])
 
     # Names the LLM was given — used to gate execution in _execute_tool.
     allowed_tool_names = {t.get('function', {}).get('name') for t in included_tools}
@@ -726,7 +712,7 @@ def call_llm(messages,
 
         # handle_tool_calls appends assistant + tool messages and logs each
         # dispatch/result event at the point of append.
-        handle_tool_calls(tool_calls, messages, content, allowed_tool_names, external_mcps,
+        handle_tool_calls(tool_calls, messages, content, allowed_tool_names,
                           tool_callback=tool_callback, usage=usage, profile=profile)
         if tool_callback:
             tool_callback("\n")

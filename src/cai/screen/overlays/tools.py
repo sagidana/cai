@@ -21,14 +21,15 @@ from ..input import read_key
 
 # ── Search helpers ────────────────────────────────────────────────────────────
 
-def _find_matches(tool_names: list, pattern: str) -> list:
+def _find_matches(tool_entries: list, pattern: str) -> list:
+    """Search over tool names (first element of each entry tuple)."""
     if not pattern:
         return []
     try:
         rx = re.compile(pattern, re.IGNORECASE)
     except re.error:
         rx = re.compile(re.escape(pattern), re.IGNORECASE)
-    return [i for i, nm in enumerate(tool_names) if rx.search(nm)]
+    return [i for i, (nm, _origin) in enumerate(tool_entries) if rx.search(nm)]
 
 
 def _nearest_fwd(matches: list, from_idx: int) -> int:
@@ -45,7 +46,7 @@ def _nearest_bwd(matches: list, from_idx: int) -> int:
     return len(matches) - 1
 
 
-def _sync_cursor(tool_names, selected_idx, pre_search_idx, search_direction,
+def _sync_cursor(selected_idx, pre_search_idx, search_direction,
                  search_matches) -> tuple:
     """Return (new_selected_idx, new_search_match_idx)."""
     if not search_matches:
@@ -123,7 +124,7 @@ def _emit_diff(new_lines: dict, prev_lines: dict, start_c: int, first_draw: bool
 def draw_tools_overlay(
     rows: int,
     cols: int,
-    tool_names: list,
+    tool_entries: list,
     enabled: set,
     selected_idx: int,
     search_pattern: str,
@@ -136,7 +137,7 @@ def draw_tools_overlay(
     first_draw: bool,
 ) -> None:
     """Render the centered floating tools overlay (pure draw, no event loop)."""
-    n = len(tool_names)
+    n = len(tool_entries)
 
     inner_w   = max(20, int(cols * 0.95) - 2)
     box_w     = inner_w + 2
@@ -172,11 +173,14 @@ def draw_tools_overlay(
         if ai >= n:
             put(1 + i, f'{VL}{" " * inner_w}{VL}')
             continue
-        nm         = tool_names[ai]
+        nm, origin = tool_entries[ai]
         check      = '[x]' if nm in enabled else '[ ]'
-        max_nm_len = inner_w - 7
-        display    = nm[:max_nm_len] if len(nm) > max_nm_len else nm
-        raw_line   = f'  {check} {display}'
+        origin_tag = f'[{origin}]'
+        # prefix "  [x] " = 6 chars, gap between name and tag = 2, tag itself
+        max_nm_len = max(1, inner_w - 6 - 2 - len(origin_tag))
+        nm_display = nm[:max_nm_len] if len(nm) > max_nm_len else nm
+        nm_padded  = nm_display.ljust(max_nm_len)
+        raw_line   = f'  {check} {nm_padded}  {origin_tag}'
         cell       = raw_line[:inner_w].ljust(inner_w)
         is_sel     = (ai == selected_idx)
         is_match   = bool(search_matches) and (ai in search_matches)
@@ -184,6 +188,7 @@ def draw_tools_overlay(
 
     put(1 + visible_n, f'{ML}{h_line}{MR}')
 
+    tool_names = [nm for nm, _ in tool_entries]
     enabled_count = sum(1 for nm in tool_names if nm in enabled)
     raw_status = _build_status(
         search_mode, search_buf, search_direction,
@@ -214,9 +219,12 @@ def draw_tools_overlay(
 
 # ── Event loop ────────────────────────────────────────────────────────────────
 
-def prompt_tools_overlay(screen, tool_names: list, enabled: set) -> set:
+def prompt_tools_overlay(screen, tool_entries: list, enabled: set) -> set:
     """
     Interactive tools toggle overlay.
+
+    tool_entries : list of (name, origin_label) tuples
+    enabled      : set of currently enabled tool names
 
     Navigation : j / k / arrows / Ctrl-U / Ctrl-D / gg / G
     Toggle     : Space
@@ -224,7 +232,7 @@ def prompt_tools_overlay(screen, tool_names: list, enabled: set) -> set:
     Search bwd : ?pattern  then N / n to cycle
     Close      : ESC or Enter
     """
-    if not tool_names:
+    if not tool_entries:
         return set(enabled)
 
     enabled = set(enabled)
@@ -249,7 +257,7 @@ def prompt_tools_overlay(screen, tool_names: list, enabled: set) -> set:
     def _redraw():
         draw_tools_overlay(
             screen._rows, screen._cols,
-            tool_names, enabled, selected_idx,
+            tool_entries, enabled, selected_idx,
             search_pattern, search_matches, search_match_idx,
             search_mode, search_buf, search_direction,
             prev_lines, first_draw[0],
@@ -277,7 +285,7 @@ def prompt_tools_overlay(screen, tool_names: list, enabled: set) -> set:
             if search_mode:
                 search_mode, selected_idx, search_pattern, search_buf, \
                     search_matches, search_match_idx = _handle_search_key(
-                        key, tool_names, search_mode, selected_idx,
+                        key, tool_entries, search_mode, selected_idx,
                         search_pattern, search_buf, search_matches,
                         search_match_idx, pre_search_idx, search_direction,
                     )
@@ -287,7 +295,7 @@ def prompt_tools_overlay(screen, tool_names: list, enabled: set) -> set:
             done, selected_idx, search_mode, search_direction, search_buf, \
                 search_pattern, search_matches, search_match_idx, \
                 pre_search_idx = _handle_normal_key(
-                    key, prev_key, tool_names, enabled,
+                    key, prev_key, tool_entries, enabled,
                     selected_idx, search_matches, search_match_idx,
                     search_direction, search_pattern,
                     screen._rows,
@@ -307,7 +315,7 @@ def prompt_tools_overlay(screen, tool_names: list, enabled: set) -> set:
 
 
 def _handle_search_key(
-    key, tool_names, search_mode, selected_idx,
+    key, tool_entries, search_mode, selected_idx,
     search_pattern, search_buf, search_matches,
     search_match_idx, pre_search_idx, search_direction,
 ) -> tuple:
@@ -323,9 +331,9 @@ def _handle_search_key(
         if search_buf:
             search_buf = search_buf[:-1]
             search_pattern = ''.join(search_buf)
-            search_matches = _find_matches(tool_names, search_pattern)
+            search_matches = _find_matches(tool_entries, search_pattern)
             selected_idx, search_match_idx = _sync_cursor(
-                tool_names, selected_idx, pre_search_idx,
+                selected_idx, pre_search_idx,
                 search_direction, search_matches,
             )
         else:
@@ -336,9 +344,9 @@ def _handle_search_key(
     if len(key) == 1 and ord(key) >= 32:
         search_buf = search_buf + [key]
         search_pattern = ''.join(search_buf)
-        search_matches = _find_matches(tool_names, search_pattern)
+        search_matches = _find_matches(tool_entries, search_pattern)
         selected_idx, search_match_idx = _sync_cursor(
-            tool_names, selected_idx, pre_search_idx,
+            selected_idx, pre_search_idx,
             search_direction, search_matches,
         )
 
@@ -347,7 +355,7 @@ def _handle_search_key(
 
 
 def _handle_normal_key(
-    key, prev_key, tool_names, enabled,
+    key, prev_key, tool_entries, enabled,
     selected_idx, search_matches, search_match_idx,
     search_direction, search_pattern,
     rows,
@@ -357,7 +365,7 @@ def _handle_normal_key(
     Returns (done, selected_idx, search_mode, search_direction, search_buf,
              search_pattern, search_matches, search_match_idx, pre_search_idx).
     """
-    n    = len(tool_names)
+    n    = len(tool_entries)
     done = False
     search_mode    = False
     search_buf: list = []
@@ -373,7 +381,7 @@ def _handle_normal_key(
         selected_idx = min(n - 1, selected_idx + 1)
 
     elif key == ' ':
-        nm = tool_names[selected_idx]
+        nm = tool_entries[selected_idx][0]
         if nm in enabled:
             enabled.discard(nm)
         else:

@@ -371,7 +371,7 @@ def parse_harness_file(path: str):
 def _build_block_args(block, base_args):
     """
     Copy base_args and apply per-block flag overrides.
-    Returns (block_args, block_external_mcps).
+    Returns block_args.
     """
     block_args = copy.copy(base_args)
 
@@ -385,17 +385,10 @@ def _build_block_args(block, base_args):
         block_args.system_prompt = block.system_prompt
     block_args.force_tools = block.force_tools
 
-    # Split tools into internal names vs external MCP paths
-    block_args.selected_tools = set()
-    block_external_mcps = {}
-    for tool_entry in block.tools:
-        if os.path.isfile(tool_entry) or tool_entry.endswith('.py'):
-            from cai.cli import get_external_tools
-            block_external_mcps[tool_entry] = get_external_tools(tool_entry)
-        else:
-            block_args.selected_tools.add(tool_entry)
+    # Tool names are prefixed (e.g. cai__generic_linux_command) — set directly.
+    block_args.selected_tools = set(block.tools)
 
-    return block_args, block_external_mcps
+    return block_args
 
 
 def run_block(block, global_messages, user_prompt, base_args, available_tools):
@@ -433,7 +426,7 @@ def run_block(block, global_messages, user_prompt, base_args, available_tools):
 
     local_messages.append({"role": "user", "content": prompt})
 
-    block_args, block_external_mcps = _build_block_args(block, base_args)
+    block_args = _build_block_args(block, base_args)
 
     prefix = f"[{block.name}]"
 
@@ -483,7 +476,6 @@ def run_block(block, global_messages, user_prompt, base_args, available_tools):
             local_messages,
             block_args,
             available_tools,
-            block_external_mcps,
             stream_callback=stream_cb,
             tool_callback=_tool_cb,
             status_callback=_status_cb,

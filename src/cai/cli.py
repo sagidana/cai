@@ -25,8 +25,6 @@ global available_tools
 global api_key
 global openai_api
 global openrouter_api
-global external_mcps
-external_mcps = {}
 
 logging.basicConfig(
     filename="/tmp/cai.log",
@@ -142,9 +140,6 @@ def init():
     global api_key
     global openai_api
     global openrouter_api
-    global call_tool
-    global call_external_tool
-    global get_external_tools
 
     log.info("init: starting")
 
@@ -152,10 +147,7 @@ def init():
     import cai.tools as _cai_tools
     OpenAiApi = _cai_api.OpenAiApi
     OpenRouterApi = _cai_api.OpenRouterApi
-    get_tools = _cai_tools.get_tools
-    call_tool = _cai_tools.call_tool
-    get_external_tools = _cai_tools.get_external_tools
-    call_external_tool = _cai_tools.call_external_tool
+    _cai_tools.register_server(_cai_tools.INTERNAL_SERVER)
 
     config_dir = os.path.expanduser("~/.config/cai")
     if not os.path.exists(config_dir):
@@ -197,13 +189,13 @@ def init():
         with open(config_path, "w") as f:
             json.dump(config, f, indent=2)
 
-    available_tools = get_tools()
+    available_tools = _cai_tools.get_all_tools()
     api_key = open(api_key_path).read().strip()
     openai_api = OpenAiApi(config.get('base_url'), api_key, ssl_verify=config.get('ssl_verify', True))
     openrouter_api = OpenRouterApi(api_key)
     log.info("init: done (base_url=%s, available_tools=%d)", config.get('base_url'), len(available_tools))
 
-    _llm.setup(config, openai_api, call_tool, call_external_tool, diag_fn=_diag)
+    _llm.setup(config, openai_api, _cai_tools.call_tool, diag_fn=_diag)
 
     # models = openrouter_api.get_models()
     # stats = openrouter_api.get_account_stats()
@@ -220,7 +212,7 @@ def read_stdin_if_available():
         return sys.stdin.read()
     return None
 
-def prompt_line_by_line(args, messages, available_tools, external_mcps):
+def prompt_line_by_line(args, messages, available_tools):
     if not sys.stdin.isatty():
         log.info("prompt_line_by_line: mode=streaming_stdin")
         streaming_stdin = True
@@ -262,7 +254,6 @@ def prompt_line_by_line(args, messages, available_tools, external_mcps):
         response = call_llm(local_messages,
                             args,
                             available_tools,
-                            external_mcps,
                             interrupt_event=shutdown_event)
 
         with lock:
@@ -485,7 +476,7 @@ def _build_base_messages(args, stdin_content=None):
     return messages
 
 ACTION_PROMPT = "prompt"
-def action_prompt(args, available_tools, external_mcps):
+def action_prompt(args, available_tools):
     if not args.prompt:
         print("this action require --prompt to be provided.")
         return
@@ -496,7 +487,7 @@ def action_prompt(args, available_tools, external_mcps):
     messages = _build_base_messages(args)
 
     if args.line_by_line:
-        return prompt_line_by_line(args, messages, available_tools, external_mcps)
+        return prompt_line_by_line(args, messages, available_tools)
 
     messages.append({"role": "user", "content": args.prompt})
 
@@ -540,7 +531,6 @@ def action_prompt(args, available_tools, external_mcps):
             call_llm(messages,
                      args,
                      available_tools,
-                     external_mcps,
                      stream_callback=_stream_to_stdout,
                      tool_callback=_stderr_tool,
                      status_callback=_stderr_status,
@@ -558,7 +548,6 @@ def action_prompt(args, available_tools, external_mcps):
             content = call_llm(messages,
                                args,
                                available_tools,
-                               external_mcps,
                                tool_callback=_stderr_tool,
                                status_callback=_stderr_status,
                                ctx_callback=_stderr_ctx)
@@ -590,9 +579,9 @@ def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_c
         last_ctx[0] = f"ctx 0% (0/{profile['context']})"
         status_callback("ready")
     elif cmd == "tools":
-        tool_names = [t.get('function', {}).get('name') for t in available_tools
-                      if t.get('function', {}).get('name')]
-        new_selected = screen.prompt_tools_overlay(tool_names, args.selected_tools)
+        import cai.tools as _cai_tools
+        tool_entries = _cai_tools.get_tool_entries()
+        new_selected = screen.prompt_tools_overlay(tool_entries, args.selected_tools)
         args.selected_tools = new_selected
         args._manual_selected_tools = set(new_selected)
         status_callback("ready")
@@ -703,7 +692,7 @@ def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_c
         screen.write(f"\033[2;37m[unknown command: {cmd}]\033[m\n")
 
 ACTION_INTERACTIVE = "interactive"
-def action_interactive(args, available_tools, external_mcps):
+def action_interactive(args, available_tools):
     """Multi-turn TUI conversation loop using Screen for display."""
     from cai.screen import Screen
 
@@ -789,7 +778,7 @@ def action_interactive(args, available_tools, external_mcps):
             ))
             try:
                 _cai_logger.push_nest(1)
-                response = call_llm(messages, args, available_tools, external_mcps,
+                response = call_llm(messages, args, available_tools,
                                     stream_callback=stream_cb,
                                     status_callback=status_callback,
                                     tool_callback=tool_cb,
@@ -821,8 +810,8 @@ def action_interactive(args, available_tools, external_mcps):
 
 
 def main():
-    global external_mcps
     global config
+    global available_tools
 
     parser = argparse.ArgumentParser(description="cai is a command line utility to make use of LLM intelegent in multiple cases.")
 
@@ -869,8 +858,13 @@ def main():
                         '--tools',
                         nargs='+',
                         default=[],
-                        help="list of mcp tools to give the LLM. the tools come in the form of abosult paths to the python files implementing the mcp server.")
+                        help="internal tool names to enable (e.g. generic_linux_command). use --mcp for external MCP servers.")
     tools_arg.completer = _tools_completer
+    parser.add_argument('--mcp',
+                        nargs='+',
+                        default=[],
+                        metavar='CMD',
+                        help="shell commands to launch external MCP servers (e.g. 'python server.py' or 'npx @modelcontextprotocol/server-filesystem /').")
     parser.add_argument('--cores', type=int, default=1,
                         help="number of parallel threads for the grep action (default: 4).")
     parser.add_argument('--line-by-line', action='store_true', default=False,
@@ -906,18 +900,24 @@ def main():
     if args.model is None:
         args.model = config.get('model', "arcee-ai/trinity-mini:free")
 
-    external_mcps = {}
+    import cai.tools as _cai_tools
+    for cmd_str in args.mcp:
+        cmd_str = cmd_str.strip().rstrip(',')
+        if not cmd_str:
+            continue
+        log.info("main: registering MCP server %r", cmd_str)
+        _cai_tools.register_server(cmd_str)
+    if args.mcp:
+        # Refresh available_tools now that additional servers are registered.
+        available_tools = _cai_tools.get_all_tools()
+
     args.selected_tools = set()
     for entry in args.tools:
         entry = entry.strip().rstrip(',')
         if not entry:
             continue
-        if os.path.isfile(entry) or entry.endswith('.py'):
-            log.info("main: loading external MCP %s", entry)
-            external_mcps[entry] = get_external_tools(entry)
-        else:
-            log.info("main: enabling internal tool %s", entry)
-            args.selected_tools.add(entry)
+        log.info("main: enabling tool %s", entry)
+        args.selected_tools.add(entry)
     # Snapshot tools before skill injection so /skill can reset cleanly.
     args._base_selected_tools = frozenset(args.selected_tools)
 
@@ -925,9 +925,8 @@ def main():
         if args.line_by_line or args.oneline:
             parser.error("--interactive is incompatible with --line-by-line / --oneline")
 
-    log.info("main: action=%s model=%s selected_tools=%s external_mcps=%s interactive=%s",
-             args.action, args.model, sorted(args.selected_tools), list(external_mcps.keys()),
-             args.interactive)
+    log.info("main: action=%s model=%s selected_tools=%s interactive=%s",
+             args.action, args.model, sorted(args.selected_tools), args.interactive)
 
     if args.logger:
         from cai.logger import launch_tui
@@ -943,11 +942,11 @@ def main():
         return
 
     if args.interactive:
-        action_interactive(args, available_tools, external_mcps)
+        action_interactive(args, available_tools)
         return
 
     if args.action == ACTION_PROMPT:
-        action_prompt(args, available_tools, external_mcps)
+        action_prompt(args, available_tools)
 
 
 if __name__ == "__main__":
