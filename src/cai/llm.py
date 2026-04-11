@@ -616,11 +616,9 @@ def call_llm(messages,
 
     profile = get_model_profile(args.model)
 
-    tier_defaults = {'small': 5, 'mid': 10, 'large': 20}
-    default_max_turns = tier_defaults.get(profile['tier'], 10)
-    max_turns = getattr(args, 'max_turns', None) or default_max_turns
+    max_turns = getattr(args, 'max_turns', None)  # None = unlimited
 
-    log.info("call_llm: model=%s tier=%s context=%d messages=%d tools=%d streaming=%s strict_format=%s max_turns=%d",
+    log.info("call_llm: model=%s tier=%s context=%d messages=%d tools=%d streaming=%s strict_format=%s max_turns=%s",
              args.model,
              profile['tier'],
              profile['context'],
@@ -628,7 +626,7 @@ def call_llm(messages,
              len(included_tools),
              stream_callback,
              args.strict_format or "none",
-             max_turns)
+             max_turns if max_turns is not None else "unlimited")
 
     call_history = {}  # (tool_name, args_str) -> call count, for stuck detection
 
@@ -637,7 +635,12 @@ def call_llm(messages,
     else:
         run_turn = _run_nonstreaming_turn
 
-    for turn in range(1, max_turns + 1):
+    turn = 0
+    while True:
+        turn += 1
+        if max_turns is not None and turn > max_turns:
+            break
+
         # Force at least one tool call on turn 1 in agentic mode so the model
         # doesn't skip tools and answer directly from training data.
         if args.force_tools and turn == 1:
@@ -645,9 +648,10 @@ def call_llm(messages,
         else:
             tool_choice = "auto"
 
+        turns_label = f"{turn}/{max_turns}" if max_turns is not None else str(turn)
         _cai_logger.push_nest(1)
-        _cai_logger.log(1, "=== TURN {}/{} ===  [{}]{}".format(
-            turn, max_turns,
+        _cai_logger.log(1, "=== TURN {} ===  [{}]{}".format(
+            turns_label,
             datetime.datetime.now().strftime("%H:%M:%S"),
             "  tool_choice=required (force_tools)" if tool_choice == "required" else ""))
 
@@ -704,7 +708,7 @@ def call_llm(messages,
                 return f"{name}({args_str})"
 
             tool_calls_fmt = [_fmt_call(c) for c in tool_calls]
-            status = f"[turn {turn}/{max_turns}] {', '.join(tool_calls_fmt)}"
+            status = f"[turn {turns_label}] {', '.join(tool_calls_fmt)}"
             _emit_status(status, status_callback)
             if tool_callback:
                 for fmt in tool_calls_fmt:
@@ -724,7 +728,7 @@ def call_llm(messages,
         _check_context_budget(messages, usage, profile, args, status_callback)
         _cai_logger.pop_nest(1)              # pop at end of loop body
 
-    log.warning("call_llm: reached max_turns=%d", max_turns)
+    log.warning("call_llm: reached max_turns=%s", max_turns)
     _cai_logger.log(1, "MAX TURNS REACHED ({})".format(max_turns))
     _emit_status(f"[!] reached max turns ({max_turns})", status_callback)
-    raise MaxTurnsReached(max_turns)
+    raise MaxTurnsReached(max_turns)  # only reached when max_turns is set
