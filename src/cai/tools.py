@@ -4,6 +4,8 @@ import sys
 import json
 import os
 import logging
+import threading
+import atexit
 
 logging.basicConfig(
     filename="/tmp/cai.log",
@@ -12,164 +14,153 @@ logging.basicConfig(
 )
 log = logging.getLogger("cai.tools")
 
-def send_rpc(process, method, params, request_id):
-    message = {
-        "jsonrpc": "2.0",
-        "id": request_id,
-        "method": method,
-        "params": params
-    }
-    process.stdin.write(json.dumps(message) + "\n")
-    process.stdin.flush()
-    return json.loads(process.stdout.readline())
+# Guards creation of singleton connections
+_registry_lock = threading.Lock()
+_internal_conn = None
+_external_conns = {}  # server_path -> MCPServerConnection
+
+
+class MCPServerConnection:
+    def __init__(self, cmd):
+        self._cmd = cmd
+        self._lock = threading.Lock()
+        self._req_id = 0
+        self._process = None
+        self._start()
+        atexit.register(self.close)
+
+    def _start(self):
+        self._process = subprocess.Popen(
+            self._cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1
+        )
+        self._req_id = 0
+        self._send_rpc("initialize", {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "cai-client", "version": "1.0"}
+        })
+        # Send initialized notification (no response expected)
+        self._process.stdin.write(json.dumps({
+            "jsonrpc": "2.0", "method": "notifications/initialized"
+        }) + "\n")
+        self._process.stdin.flush()
+        log.info("MCPServerConnection started: %s", self._cmd)
+
+    def _ensure_alive(self):
+        if self._process.poll() is not None:
+            log.warning("MCPServerConnection process died, restarting: %s", self._cmd)
+            self._start()
+
+    def _send_rpc(self, method, params):
+        self._req_id += 1
+        message = {
+            "jsonrpc": "2.0",
+            "id": self._req_id,
+            "method": method,
+            "params": params
+        }
+        self._process.stdin.write(json.dumps(message) + "\n")
+        self._process.stdin.flush()
+        return json.loads(self._process.stdout.readline())
+
+    def call(self, method, params):
+        with self._lock:
+            self._ensure_alive()
+            return self._send_rpc(method, params)
+
+    def close(self):
+        if self._process and self._process.poll() is None:
+            self._process.terminate()
+            log.info("MCPServerConnection terminated: %s", self._cmd)
+
+
+def _get_internal_conn():
+    global _internal_conn
+    if _internal_conn is None:
+        with _registry_lock:
+            if _internal_conn is None:
+                _internal_conn = MCPServerConnection(
+                    [sys.executable, "-m", "cai.tools"]
+                )
+    return _internal_conn
+
+
+def _get_external_conn(server_path):
+    if server_path not in _external_conns:
+        with _registry_lock:
+            if server_path not in _external_conns:
+                _external_conns[server_path] = MCPServerConnection(
+                    ["python", server_path]
+                )
+    return _external_conns[server_path]
+
 
 def call_tool(tool_name, arguments):
     log.info("call_tool: %s %s", tool_name, arguments)
-    process = subprocess.Popen(
-        [sys.executable, "-m", "cai.tools"],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        bufsize=1
-    )
-
     try:
-        send_rpc(process,
-                 "initialize", {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {},
-                    "clientInfo": { "name": "manual-subproc-client", "version": "1.0" }
-                 }, 1)
-
-
-        process.stdin.write(json.dumps({
-            "jsonrpc": "2.0", "method": "notifications/initialized"
-        }) + "\n")
-        process.stdin.flush()
-
-        response = send_rpc(process,
-                            "tools/call", {
-                                "name": tool_name,
-                                "arguments": arguments
-                            }, 2)
-
-        result = response.get("result", {}).get("content", [{}])[0].get("text")
-        # log.info("call_tool result: %s: %s", tool_name, result)
-        return result
+        conn = _get_internal_conn()
+        response = conn.call("tools/call", {"name": tool_name, "arguments": arguments})
+        return response.get("result", {}).get("content", [{}])[0].get("text")
     except Exception as e:
         log.error("call_tool exception: %s", e)
-    finally:
-        process.terminate()
+
 
 def get_tools():
-    process = subprocess.Popen(
-        [sys.executable, "-m", "cai.tools"],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        bufsize=1
-    )
-
     try:
-        send_rpc(process,
-                 "initialize", {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {},
-                    "clientInfo": {"name": "tool-lister", "version": "1.0"}
-                }, 1)
-
-        response = send_rpc(process, "tools/list", {}, 2)
-
+        conn = _get_internal_conn()
+        response = conn.call("tools/list", {})
         mcp_tools = response.get("result", {}).get("tools", [])
-        openai_tools = []
-        for tool in mcp_tools:
-            openai_tools.append({
+        return [
+            {
                 "type": "function",
-                "function":{
+                "function": {
                     "name": tool["name"],
                     "description": tool["description"],
                     "parameters": tool["inputSchema"]
-                    }
-                })
-        return openai_tools
-    finally:
-        process.terminate()
+                }
+            }
+            for tool in mcp_tools
+        ]
+    except Exception as e:
+        log.error("get_tools exception: %s", e)
+        return []
+
 
 def call_external_tool(server_path, tool_name, arguments):
     log.info("call_external_tool: %s %s %s", server_path, tool_name, arguments)
-    process = subprocess.Popen(
-        ["python", server_path],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        bufsize=1
-    )
-
     try:
-        send_rpc(process,
-                 "initialize", {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {},
-                    "clientInfo": { "name": "manual-subproc-client", "version": "1.0" }
-                 }, 1)
-
-
-        process.stdin.write(json.dumps({
-            "jsonrpc": "2.0", "method": "notifications/initialized"
-        }) + "\n")
-        process.stdin.flush()
-
-        response = send_rpc(process,
-                            "tools/call", {
-                                "name": tool_name,
-                                "arguments": arguments
-                            }, 2)
-
-        result = response.get("result", {}).get("content", [{}])[0].get("text")
-        # log.info("call_external_tool result: %s: %s", tool_name, result)
-        return result
+        conn = _get_external_conn(server_path)
+        response = conn.call("tools/call", {"name": tool_name, "arguments": arguments})
+        return response.get("result", {}).get("content", [{}])[0].get("text")
     except Exception as e:
         log.error("call_external_tool exception: %s", e)
-    finally:
-        process.terminate()
+
 
 def get_external_tools(server_path):
-    process = subprocess.Popen(
-        ["python", server_path],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        bufsize=1
-    )
-
     try:
-        send_rpc(process,
-                 "initialize", {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {},
-                    "clientInfo": {"name": "tool-lister", "version": "1.0"}
-                }, 1)
-
-        response = send_rpc(process, "tools/list", {}, 2)
-
+        conn = _get_external_conn(server_path)
+        response = conn.call("tools/list", {})
         mcp_tools = response.get("result", {}).get("tools", [])
-        openai_tools = []
-        for tool in mcp_tools:
-            openai_tools.append({
+        return [
+            {
                 "type": "function",
-                "function":{
+                "function": {
                     "name": tool["name"],
                     "description": tool["description"],
                     "parameters": tool["inputSchema"]
-                    }
-                })
-        return openai_tools
-    finally:
-        process.terminate()
+                }
+            }
+            for tool in mcp_tools
+        ]
+    except Exception as e:
+        log.error("get_external_tools exception: %s", e)
+        return []
+
 
 if __name__ == '__main__':
     from cai import adb_tools, files_tools, frida_tools, git_tools, smali_tools, web_tools

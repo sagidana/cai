@@ -10,9 +10,11 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from cai import logger as _cai_logger
 from cai.llm import (
-    call_llm, LLMError, MaxTurnsReached,
-    trim_tool_result, enforce_strict_format,
-    get_model_profile, MODEL_PROFILES, AGENTIC_SYSTEM_PROMPTS,
+    call_llm,
+    LLMError,
+    get_model_profile,
+    MODEL_PROFILES,
+    AGENTIC_SYSTEM_PROMPTS,
     _compact_messages,
 )
 import cai.llm as _llm
@@ -79,7 +81,6 @@ def _note_output(text):
 def _skills_completer(prefix, **kwargs):
     """Completer for --skill: returns skill names matching the prefix."""
     return [n for n in _list_skill_names() if n.startswith(prefix)]
-
 
 def _tools_completer(prefix, **kwargs):
     """Completer for --tools: file paths for external MCPs, tool names for internal."""
@@ -219,7 +220,6 @@ def read_stdin_if_available():
         return sys.stdin.read()
     return None
 
-
 def prompt_line_by_line(args, messages, available_tools, external_mcps):
     if not sys.stdin.isatty():
         log.info("prompt_line_by_line: mode=streaming_stdin")
@@ -259,7 +259,10 @@ def prompt_line_by_line(args, messages, available_tools, external_mcps):
         local_messages.append({"role": "user", "content": line})
         local_messages.append({"role": "user", "content": args.prompt})
 
-        response = call_llm(local_messages, args, available_tools, external_mcps,
+        response = call_llm(local_messages,
+                            args,
+                            available_tools,
+                            external_mcps,
                             interrupt_event=shutdown_event)
 
         with lock:
@@ -323,12 +326,10 @@ def prompt_line_by_line(args, messages, available_tools, external_mcps):
         if shutdown_event.is_set():
             _diag("\n[!] interrupted — all pending tasks cancelled.")
 
-
 def _read_file_numbered(path):
     """Return file contents as a numbered-line string."""
     with open(path) as f:
         return "".join(f"{i + 1}: {line}" for i, line in enumerate(f))
-
 
 def _list_skill_names():
     """Return sorted list of available skill names (built-in + user)."""
@@ -339,7 +340,6 @@ def _list_skill_names():
                 if f.endswith('.md'):
                     names.add(f[:-3])
     return sorted(names)
-
 
 def _parse_skill_file(text):
     """Parse a skill markdown file into (tools: set[str], prompt: str).
@@ -365,7 +365,6 @@ def _parse_skill_file(text):
                 tools = {t.strip() for t in val.split(',') if t.strip()}
         return tools, body.strip()
     return tools, text.strip()
-
 
 def _load_skills(names):
     """Load and parse skill files by name.
@@ -397,7 +396,6 @@ def _load_skills(names):
                         name, _USER_SKILLS_DIR, _SKILLS_DIR)
     return all_tools, prompts
 
-
 _MODE_BLOCKS = {
     'research': (
         "## Current Task Mode: Research\n"
@@ -412,7 +410,6 @@ _MODE_BLOCKS = {
         "building. Treat research steps as secondary unless explicitly needed.\n"
     ),
 }
-
 
 def _load_cai_prompt():
     """Load the base cai system prompt from disk based on config prompt_mode.
@@ -434,7 +431,6 @@ def _load_cai_prompt():
         log.error("_load_cai_prompt: cannot read %s: %s", prompt_path, e)
         return AGENTIC_SYSTEM_PROMPTS.get('mid')
 
-
 def _assemble_system_prompt(task_mode, skill_prompts):
     """Assemble the full system prompt in specificity order.
 
@@ -446,7 +442,6 @@ def _assemble_system_prompt(task_mode, skill_prompts):
         parts.append(_MODE_BLOCKS[task_mode])
     parts.extend(skill_prompts)
     return "\n\n".join(parts)
-
 
 def _build_base_messages(args, stdin_content=None):
     """Build the initial messages list (system prompt, stdin, file, cursor)."""
@@ -488,7 +483,6 @@ def _build_base_messages(args, stdin_content=None):
                              "content": f"<cursor_location> line number: {ln}, column number: {cn} </cursor_location>"})
 
     return messages
-
 
 ACTION_PROMPT = "prompt"
 def action_prompt(args, available_tools, external_mcps):
@@ -707,7 +701,6 @@ def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_c
                 screen.write(f"\033[1;31m[load error] {_e}\033[m\n")
     else:
         screen.write(f"\033[2;37m[unknown command: {cmd}]\033[m\n")
-
 
 ACTION_INTERACTIVE = "interactive"
 def action_interactive(args, available_tools, external_mcps):

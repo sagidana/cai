@@ -72,7 +72,7 @@ MODEL_PROFILES = {
     "deepseek/deepseek-r1":           {"tier": "large", "context": 64000,  "tool_calling": False},
     "deepseek/deepseek-chat":         {"tier": "mid",   "context": 64000,  "tool_calling": True},
     # Conservative fallback for any unrecognised model
-    "_default":                       {"tier": "mid",   "context": 16000,  "tool_calling": True},
+    "_default":                       {"tier": "mid",   "context": 128000,  "tool_calling": True},
 }
 
 AGENTIC_SYSTEM_PROMPTS = {
@@ -94,7 +94,6 @@ AGENTIC_SYSTEM_PROMPTS = {
         "Do not ask clarifying questions. Be concise."
     ),
 }
-
 
 def get_model_profile(model_id):
     """Return capability profile for model_id.
