@@ -17,6 +17,7 @@ harness.cai format overview:
         --prepend-user-prompt
         --tools read, list_files
         --mcp "python server.py", "npx @mcp/server /"
+        --skill code-review, security-audit
         --model gpt-4o
         --max-turns 50
         --strict-format "regex:^(ok|retry)$"
@@ -103,6 +104,7 @@ class CaiBlock:
     prepend_user_prompt: bool = False
     tools: list = field(default_factory=list)
     mcp: list = field(default_factory=list)
+    skill: list = field(default_factory=list)
     model: Optional[str] = None
     max_turns: Optional[int] = None
     strict_format: Optional[str] = None
@@ -217,6 +219,13 @@ def _build_block(flags, prompt_lines, lineno):
     else:
         mcp = []
 
+    # Parse skill: "code-review, security-audit" or "code-review security-audit"
+    skill_raw = flags.get('skill', '')
+    if isinstance(skill_raw, str) and skill_raw:
+        skill = [t.strip() for t in re.split(r'[,\s]+', skill_raw) if t.strip()]
+    else:
+        skill = []
+
     max_turns_raw = flags.get('max_turns')
     if max_turns_raw is not None and max_turns_raw is not True:
         try:
@@ -237,6 +246,7 @@ def _build_block(flags, prompt_lines, lineno):
         prepend_user_prompt=bool(flags.get('prepend_user_prompt', False)),
         tools=tools,
         mcp=mcp,
+        skill=skill,
         model=_opt_str('model'),
         max_turns=max_turns,
         strict_format=_opt_str('strict_format'),
@@ -386,6 +396,7 @@ def _build_block_args(block, base_args, available_tools):
     if the block declares --mcp servers.
     """
     import cai.tools as _cai_tools
+    from cai.cli import _load_skills
 
     block_args = copy.copy(base_args)
 
@@ -401,6 +412,18 @@ def _build_block_args(block, base_args, available_tools):
 
     # Built-in tool names are unprefixed; external MCP tools are prefixed.
     block_args.selected_tools = set(block.tools)
+
+    # Load skills: add their tools to selected_tools and append their
+    # prompts to the block's system prompt (matching CLI --skill behaviour).
+    if block.skill:
+        skill_tools, skill_prompts = _load_skills(block.skill)
+        block_args.selected_tools |= skill_tools
+        if skill_prompts:
+            base = block_args.system_prompt or ''
+            block_args.system_prompt = '\n\n'.join(
+                [base] + skill_prompts) if base else '\n\n'.join(skill_prompts)
+        log.info("_build_block_args: loaded skills %s for block %r (tools=%s)",
+                 block.skill, block.name, sorted(skill_tools))
 
     # Register any --mcp servers declared in this block and auto-select their tools.
     if block.mcp:
@@ -443,11 +466,14 @@ def run_block(block, global_messages, user_prompt, base_args, available_tools):
             f"{prompt}"
         )
 
+    block_args, available_tools = _build_block_args(block, base_args, available_tools)
+
     # Build local messages: optional system message + global context snapshot + this prompt.
     # The system message is NOT enriched into global context (it's block-local).
+    # Use block_args.system_prompt (may include skill prompts appended by _build_block_args).
     local_messages = []
-    if block.system_prompt:
-        local_messages.append({"role": "system", "content": block.system_prompt})
+    if block_args.system_prompt:
+        local_messages.append({"role": "system", "content": block_args.system_prompt})
 
     local_messages.extend(global_messages)
 
@@ -455,8 +481,6 @@ def run_block(block, global_messages, user_prompt, base_args, available_tools):
     global_end = len(local_messages)
 
     local_messages.append({"role": "user", "content": prompt})
-
-    block_args, available_tools = _build_block_args(block, base_args, available_tools)
 
     prefix = f"[{block.name}]"
 
