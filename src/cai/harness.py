@@ -16,6 +16,7 @@ harness.cai format overview:
         --enrich full       # required: none | result-only | full
         --prepend-user-prompt
         --tools read, list_files
+        --mcp "python server.py", "npx @mcp/server /"
         --model gpt-4o
         --max-turns 50
         --strict-format "regex:^(ok|retry)$"
@@ -101,6 +102,7 @@ class CaiBlock:
     enrich_mode: EnrichMode
     prepend_user_prompt: bool = False
     tools: list = field(default_factory=list)
+    mcp: list = field(default_factory=list)
     model: Optional[str] = None
     max_turns: Optional[int] = None
     strict_format: Optional[str] = None
@@ -207,6 +209,14 @@ def _build_block(flags, prompt_lines, lineno):
     else:
         tools = []
 
+    # Parse mcp: comma-separated shell commands, each optionally quoted.
+    # e.g. --mcp "python server.py", "npx @mcp/server /"
+    mcp_raw = flags.get('mcp', '')
+    if isinstance(mcp_raw, str) and mcp_raw:
+        mcp = [_strip_quotes(t) for t in mcp_raw.split(',') if t.strip()]
+    else:
+        mcp = []
+
     max_turns_raw = flags.get('max_turns')
     if max_turns_raw is not None and max_turns_raw is not True:
         try:
@@ -226,6 +236,7 @@ def _build_block(flags, prompt_lines, lineno):
         enrich_mode=enrich_mode,
         prepend_user_prompt=bool(flags.get('prepend_user_prompt', False)),
         tools=tools,
+        mcp=mcp,
         model=_opt_str('model'),
         max_turns=max_turns,
         strict_format=_opt_str('strict_format'),
@@ -368,11 +379,14 @@ def parse_harness_file(path: str):
 
 # ─── Executor ────────────────────────────────────────────────────────────────
 
-def _build_block_args(block, base_args):
+def _build_block_args(block, base_args, available_tools):
     """
     Copy base_args and apply per-block flag overrides.
-    Returns block_args.
+    Returns (block_args, available_tools) — available_tools may be refreshed
+    if the block declares --mcp servers.
     """
+    import cai.tools as _cai_tools
+
     block_args = copy.copy(base_args)
 
     if block.model:
@@ -388,7 +402,23 @@ def _build_block_args(block, base_args):
     # Built-in tool names are unprefixed; external MCP tools are prefixed.
     block_args.selected_tools = set(block.tools)
 
-    return block_args
+    # Register any --mcp servers declared in this block and auto-select their tools.
+    if block.mcp:
+        tools_before = {t['function']['name'] for t in available_tools}
+        for cmd_str in block.mcp:
+            cmd_str = cmd_str.strip().rstrip(',')
+            if not cmd_str:
+                continue
+            log.info("_build_block_args: registering MCP server %r for block %r",
+                     cmd_str, block.name)
+            _cai_tools.register_server(cmd_str)
+        available_tools = _cai_tools.get_all_tools()
+        mcp_tools = {t['function']['name'] for t in available_tools} - tools_before
+        block_args.selected_tools |= mcp_tools
+        log.info("_build_block_args: auto-selected %d MCP tools for block %r: %s",
+                 len(mcp_tools), block.name, sorted(mcp_tools))
+
+    return block_args, available_tools
 
 
 def run_block(block, global_messages, user_prompt, base_args, available_tools):
@@ -426,7 +456,7 @@ def run_block(block, global_messages, user_prompt, base_args, available_tools):
 
     local_messages.append({"role": "user", "content": prompt})
 
-    block_args = _build_block_args(block, base_args)
+    block_args, available_tools = _build_block_args(block, base_args, available_tools)
 
     prefix = f"[{block.name}]"
 
