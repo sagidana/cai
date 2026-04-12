@@ -126,9 +126,9 @@ def register_server(cmd_str: str, label: str = None) -> None:
 def get_all_tools() -> list:
     """Return the unified OpenAI-format tool list from all registered servers.
 
-    Tool names are prefixed as ``{label}__{original_name}`` to avoid
-    cross-server collisions.  Also rebuilds the internal dispatch table used
-    by call_tool().
+    Built-in (internal) tool names are exposed as-is.  External MCP tool names
+    are prefixed as ``{label}__{original_name}`` to avoid cross-server
+    collisions.  Also rebuilds the internal dispatch table used by call_tool().
     """
     global _dispatch
     new_dispatch = {}
@@ -143,14 +143,15 @@ def get_all_tools() -> list:
             log.error("get_all_tools: failed listing tools for %r: %s", cmd_str, e)
             mcp_tools = []
 
+        is_internal = (cmd_str == INTERNAL_SERVER)
         for tool in mcp_tools:
             original_name = tool["name"]
-            prefixed_name = f"{label}__{original_name}"
-            new_dispatch[prefixed_name] = (cmd_str, original_name)
+            exposed_name = original_name if is_internal else f"{label}__{original_name}"
+            new_dispatch[exposed_name] = (cmd_str, original_name)
             openai_tools.append({
                 "type": "function",
                 "function": {
-                    "name": prefixed_name,
+                    "name": exposed_name,
                     "description": tool["description"],
                     "parameters": tool["inputSchema"]
                 }

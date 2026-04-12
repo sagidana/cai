@@ -385,7 +385,7 @@ def _build_block_args(block, base_args):
         block_args.system_prompt = block.system_prompt
     block_args.force_tools = block.force_tools
 
-    # Tool names are prefixed (e.g. cai__generic_linux_command) — set directly.
+    # Built-in tool names are unprefixed; external MCP tools are prefixed.
     block_args.selected_tools = set(block.tools)
 
     return block_args
