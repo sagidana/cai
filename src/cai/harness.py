@@ -403,7 +403,7 @@ def run_block(block, global_messages, user_prompt, base_args, available_tools):
 
     Returns the block's final text output (stripped).
     """
-    from cai.cli import call_llm, MaxTurnsReached
+    from cai.llm import call_llm, MaxTurnsReached
 
     # Build the prompt text for this block
     prompt = block.prompt
