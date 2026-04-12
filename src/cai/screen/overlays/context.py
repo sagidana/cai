@@ -413,6 +413,7 @@ def overlay_edit_in_nvim(ctx: _OverlayCtx, pos: int, tty_fd: int, cooked_attrs) 
         sys.stdout.flush()
         tty.setraw(tty_fd)
         _overlay_recompute_tokens(ctx)
+        ctx.first_draw = True
 
 
 # ── Event loop ────────────────────────────────────────────────────────────────
