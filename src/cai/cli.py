@@ -481,6 +481,52 @@ def _build_base_messages(args, stdin_content=None):
 
     return messages
 
+
+def _load_context(path, args, merge_tools=False):
+    """Load a .flow context file and apply settings to args.
+
+    Returns the messages list from the flow.
+
+    When *merge_tools* is False (default, used by /load), the flow's tools
+    replace args.selected_tools.  When True (used by --context), CLI --tools
+    already in args.selected_tools are kept and the flow's tools are added.
+
+    Skills from the flow are always loaded and their tools/prompts injected.
+    The system prompt in messages is rebuilt to reflect the loaded skills.
+    """
+    import json as _json
+    with open(path) as f:
+        payload = _json.load(f)
+
+    messages = payload.get("messages", [])
+    settings = payload.get("settings", {})
+
+    flow_tools = set(settings.get("selected_tools", []))
+    if merge_tools:
+        args.selected_tools = flow_tools | args.selected_tools
+    else:
+        args.selected_tools = flow_tools
+        args._manual_selected_tools = set(flow_tools)
+
+    # Load skills from the flow and rebuild system prompt.
+    flow_skills = settings.get("skills", [])
+    existing_skills = set(getattr(args, 'skill', []) or [])
+    args.skill = list(existing_skills | set(flow_skills))
+    skill_tools, skill_prompts = _load_skills(args.skill)
+    args.selected_tools |= skill_tools
+
+    task_mode = getattr(args, 'mode', 'research')
+    new_system = _assemble_system_prompt(task_mode, skill_prompts)
+    if messages and messages[0].get('role') == 'system':
+        messages[0]['content'] = new_system
+    else:
+        messages.insert(0, {"role": "system", "content": new_system})
+
+    log.info("_load_context: loaded %s — %d messages, tools=%s, skills=%s",
+             path, len(messages), sorted(args.selected_tools), args.skill)
+    return messages
+
+
 ACTION_PROMPT = "prompt"
 def action_prompt(args, available_tools):
     if not args.prompt:
@@ -490,7 +536,10 @@ def action_prompt(args, available_tools):
     log.info("action_prompt: model=%s file=%s cursor=%s line_by_line=%s oneline=%s",
              args.model, args.file, args.cursor, args.line_by_line, args.oneline)
 
-    messages = _build_base_messages(args)
+    if getattr(args, 'context', None):
+        messages = _load_context(args.context, args, merge_tools=True)
+    else:
+        messages = _build_base_messages(args)
 
     if args.line_by_line:
         return prompt_line_by_line(args, messages, available_tools)
@@ -675,28 +724,9 @@ def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_c
         if not path:
             screen.write(f"\033[2;37m[usage: /load <path>]\033[m\n")
         else:
-            import json as _json
             try:
-                with open(path) as _f:
-                    payload = _json.load(_f)
-                # Restore messages
-                messages[:] = payload.get("messages", [])
-                settings = payload.get("settings", {})
-                # Restore tools
-                loaded_tools = set(settings.get("selected_tools", []))
-                args.selected_tools = loaded_tools
-                args._manual_selected_tools = set(loaded_tools)
-                # Restore skills and rebuild system prompt
-                loaded_skills = settings.get("skills", [])
-                args.skill = loaded_skills
-                skill_tools, skill_prompts = _load_skills(args.skill)
-                args.selected_tools |= skill_tools
-                task_mode = getattr(args, 'mode', 'research')
-                new_system = _assemble_system_prompt(task_mode, skill_prompts)
-                if messages and messages[0].get('role') == 'system':
-                    messages[0]['content'] = new_system
-                else:
-                    messages.insert(0, {"role": "system", "content": new_system})
+                loaded = _load_context(path, args)
+                messages[:] = loaded
                 screen.write(f"\033[2;37m[loaded from {path} — {len(messages)} messages, "
                              f"{len(args.selected_tools)} tools, "
                              f"skills: {', '.join(args.skill) or 'none'}]\033[m\n")
@@ -726,7 +756,10 @@ def action_interactive(args, available_tools):
     # Pre-capture piped stdin BEFORE Screen (tty.setraw) takes over keyboard input
     stdin_content = read_stdin_if_available()
 
-    messages = _build_base_messages(args, stdin_content=stdin_content)
+    if getattr(args, 'context', None):
+        messages = _load_context(args.context, args, merge_tools=True)
+    else:
+        messages = _build_base_messages(args, stdin_content=stdin_content)
 
     screen = Screen()
     _skill_cmds = [f"skill {n}" for n in _list_skill_names()] + ["skill", "skill off"]
@@ -902,6 +935,9 @@ def main():
                         help="process stdin (or --file) one line at a time, calling LLM per line.")
     parser.add_argument('prompt_words', nargs='*',
                         help="prompt words after -- (alternative to -p)")
+    parser.add_argument('--context', default=None, metavar='PATH',
+                        help="path to a .flow file (from /save) to resume from. "
+                             "Tools from --tools are appended; --model overrides.")
     parser.add_argument('--harness', default=None,
                         help="path to a .harness.cai orchestration file.")
     parser.add_argument('--naked', action='store_true',
