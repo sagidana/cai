@@ -23,6 +23,7 @@ harness.cai format overview:
         --strict-format "regex:^(ok|retry)$"
         --force-tools
         --reasoning-effort high     # enable extended thinking (high | medium | low)
+        --temperature 0.7           # sampling temperature (0.0-2.0)
         --system-prompt "You are a concise assistant."   # single-line
         --system-prompt          # multi-line: followed by '''...''' block
         '''
@@ -112,6 +113,7 @@ class CaiBlock:
     system_prompt: Optional[str] = None
     force_tools: bool = False
     reasoning_effort: Optional[str] = None
+    temperature: Optional[float] = None
 
 
 @dataclass
@@ -255,6 +257,7 @@ def _build_block(flags, prompt_lines, lineno):
         system_prompt=_opt_str('system_prompt'),
         force_tools=bool(flags.get('force_tools', False)),
         reasoning_effort=_opt_str('reasoning_effort'),
+        temperature=float(flags['temperature']) if flags.get('temperature') not in (None, True) else None,
     )
 
 
@@ -414,6 +417,8 @@ def _build_block_args(block, base_args, available_tools):
     block_args.force_tools = block.force_tools
     if block.reasoning_effort:
         block_args.reasoning_effort = block.reasoning_effort
+    if block.temperature is not None:
+        block_args.temperature = block.temperature
 
     # Built-in tool names are unprefixed; external MCP tools are prefixed.
     block_args.selected_tools = set(block.tools)

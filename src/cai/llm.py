@@ -389,7 +389,8 @@ def _run_nonstreaming_turn(messages, args, included_tools, stream_callback=None,
                                                            model=args.model,
                                                            tools=included_tools,
                                                            tool_choice=tool_choice,
-                                                           reasoning_effort=getattr(args, 'reasoning_effort', None)),
+                                                           reasoning_effort=getattr(args, 'reasoning_effort', None),
+                                                           temperature=getattr(args, 'temperature', None)),
                                    args.strict_format,
                                    messages=messages)
     # Strip format-retry feedback messages so they never leak into global context via enrichment.
@@ -413,7 +414,8 @@ def _run_streaming_turn(messages, args, included_tools, stream_callback, tool_ch
                                                                              model=args.model,
                                                                              tools=included_tools,
                                                                              tool_choice=tool_choice,
-                                                                             reasoning_effort=getattr(args, 'reasoning_effort', None)):
+                                                                             reasoning_effort=getattr(args, 'reasoning_effort', None),
+                                                                             temperature=getattr(args, 'temperature', None)):
         if interrupt_event and interrupt_event.is_set():
             break
         if reasoning_chunk:
@@ -648,7 +650,10 @@ def call_llm(messages,
 
         # Force at least one tool call on turn 1 in agentic mode so the model
         # doesn't skip tools and answer directly from training data.
-        if args.force_tools and turn == 1:
+        # Skip when reasoning is enabled — Anthropic rejects tool_choice=required
+        # combined with extended thinking.
+        reasoning = getattr(args, 'reasoning_effort', None)
+        if args.force_tools and turn == 1 and not reasoning:
             tool_choice = "required"
         else:
             tool_choice = "auto"

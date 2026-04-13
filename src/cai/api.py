@@ -35,6 +35,14 @@ class OpenRouterApi:
 
         return r.json()
 
+def _is_o_series(model):
+    """Check if model is an OpenAI o-series reasoning model (o1, o3, o4-mini, etc.)."""
+    # Match openai/o1, openai/o3, openai/o4-mini, or bare o1, o3, etc.
+    parts = model.rsplit('/', 1)
+    name = parts[-1]
+    return name.startswith('o') and len(name) >= 2 and name[1:2].isdigit()
+
+
 class OpenAiApi:
     def __init__(self, base_url, api_key, ssl_verify=True):
         self.base_url = base_url
@@ -49,7 +57,7 @@ class OpenAiApi:
             return None
         return [m.get('id') for m in r.json().get('data', [])]
 
-    def chat(self, messages, model, system_prompt=None, tools=None, tool_choice="auto", reasoning_effort=None):
+    def chat(self, messages, model, system_prompt=None, tools=None, tool_choice="auto", reasoning_effort=None, temperature=None):
         url = f"{self.base_url}/chat/completions"
         headers = {}
         headers['Authorization'] = f"Bearer {self.api_key}"
@@ -64,6 +72,17 @@ class OpenAiApi:
             data['tool_choice'] = tool_choice
         if reasoning_effort:
             data['reasoning'] = {"effort": reasoning_effort}
+        if temperature is not None:
+            if _is_o_series(model):
+                log.warning("temperature=%.1f ignored for o-series model %s (fixed at 1)", temperature, model)
+            else:
+                data['temperature'] = temperature
+
+        if _is_o_series(model):
+            for msg in messages:
+                if msg.get('role') == 'system':
+                    log.warning("o-series model %s does not support role='system' — use role='developer' instead", model)
+                    break
 
         if system_prompt:
             data['messages'].append(system_prompt)
@@ -95,7 +114,7 @@ class OpenAiApi:
 
         return content, reasoning, tool_calls, usage
 
-    def chat_stream(self, messages, model, system_prompt=None, tools=None, tool_choice="auto", reasoning_effort=None):
+    def chat_stream(self, messages, model, system_prompt=None, tools=None, tool_choice="auto", reasoning_effort=None, temperature=None):
         url = f"{self.base_url}/chat/completions"
         headers = {}
         headers['Authorization'] = f"Bearer {self.api_key}"
@@ -110,6 +129,17 @@ class OpenAiApi:
             data['tool_choice'] = tool_choice
         if reasoning_effort:
             data['reasoning'] = {"effort": reasoning_effort}
+        if temperature is not None:
+            if _is_o_series(model):
+                log.warning("temperature=%.1f ignored for o-series model %s (fixed at 1)", temperature, model)
+            else:
+                data['temperature'] = temperature
+
+        if _is_o_series(model):
+            for msg in messages:
+                if msg.get('role') == 'system':
+                    log.warning("o-series model %s does not support role='system' — use role='developer' instead", model)
+                    break
 
         if system_prompt:
             data['messages'].append(system_prompt)

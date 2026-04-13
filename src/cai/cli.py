@@ -915,6 +915,8 @@ def main():
     parser.add_argument("--reasoning-effort", default=None,
                         choices=["high", "medium", "low"],
                         help="enable extended thinking via OpenRouter reasoning.effort")
+    parser.add_argument("--temperature", type=float, default=None,
+                        help="sampling temperature (0.0-2.0). not supported by all models.")
     parser.add_argument("--non-streaming", action="store_true",
                         help="let the action know whether or not to use the non-streaming api.")
     parser.add_argument("-i", "--interactive", action="store_true",
