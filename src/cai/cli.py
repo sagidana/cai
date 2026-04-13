@@ -912,6 +912,9 @@ def main():
                         help="the expected format from the LLM response: 'json', 'regex:<pattern>', or 'regex-each-line:<pattern>'.")
     parser.add_argument("--include-reasoning", action="store_true",
                         help="let the action know whether or not to include reasoning in the output.")
+    parser.add_argument("--reasoning-effort", default=None,
+                        choices=["high", "medium", "low"],
+                        help="enable extended thinking via OpenRouter reasoning.effort")
     parser.add_argument("--non-streaming", action="store_true",
                         help="let the action know whether or not to use the non-streaming api.")
     parser.add_argument("-i", "--interactive", action="store_true",

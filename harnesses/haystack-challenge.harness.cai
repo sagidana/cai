@@ -1,0 +1,85 @@
+# haystack solver
+
+---
+    --name "start"
+    --enrich full
+    --mcp "aidle mcp --username bob"
+    --force-tools
+    --reasoning-effort high
+    --system-prompt
+    '''
+    you are challenger solver, your goal is to solve the challenges before you.
+    take your time, do it step by step, double check yourself each step to make
+    sure you are on the right track, if not, re-iterate. TAKE YOUR TIME.
+    '''
+    --prompt
+    '''
+    choose the haystack challenge in medium dificulty and start reading all
+    buckets. keep all buckets as is, this phase is only the gathering phase.
+    return a list of all the buckets you have and key word to look for.
+    '''
+---
+
+search:
+if-more-than 30 done
+
+---
+    --name "search"
+    --enrich result-only
+    --mcp "aidle mcp --username bob"
+    --reasoning-effort high
+    --system-prompt
+    '''
+    you are challenger solver, your goal is to solve the challenges before you.
+    take your time, do it step by step, double check yourself each step to make
+    sure you are on the right track, if not, re-iterate. TAKE YOUR TIME.
+    '''
+    --prompt
+    '''
+    your goal is to return for each each bucket the places (if there are any)
+    of the niddle (the word you need to look for)
+    you have all the information you need in the history!
+    return for each bucket - the word position(s) if there are any.
+    '''
+---
+
+---
+    --name "verify"
+    --enrich none
+    --mcp "aidle mcp --username bob"
+    --strict-format "regex:^(ok|retry)$"
+    --system-prompt "You are a strict quality gate. Answer only 'ok' or 'retry'. No punctuation, no explanation."
+    --prompt
+    '''
+    Do you have a final result with good confidence?
+    You MUST double check all given results to see you reach the same
+    conclusion, if there are any miss matches, retry.
+    Answer 'ok' only if YES
+    Answer 'retry' otherwise!
+    '''
+---
+
+if verify == ok: goto submit
+if verify == retry: goto search
+
+submit:
+
+---
+    --name "submit"
+    --enrich full
+    --mcp "aidle mcp --username bob"
+    --force-tools
+    --system-prompt
+    '''
+    you are challenger solver, your goal is to solve the challenges before you.
+    take your time, do it step by step, double check yourself each step to make
+    sure you are on the right track, if not, re-iterate. TAKE YOUR TIME.
+    '''
+    --prompt
+    '''
+    you have the result, submit it at finish the challenge!
+    '''
+---
+
+done:
+exit

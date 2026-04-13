@@ -49,7 +49,7 @@ class OpenAiApi:
             return None
         return [m.get('id') for m in r.json().get('data', [])]
 
-    def chat(self, messages, model, system_prompt=None, tools=None, tool_choice="auto"):
+    def chat(self, messages, model, system_prompt=None, tools=None, tool_choice="auto", reasoning_effort=None):
         url = f"{self.base_url}/chat/completions"
         headers = {}
         headers['Authorization'] = f"Bearer {self.api_key}"
@@ -62,6 +62,8 @@ class OpenAiApi:
         if tools:
             data['tools'] = tools
             data['tool_choice'] = tool_choice
+        if reasoning_effort:
+            data['reasoning'] = {"effort": reasoning_effort}
 
         if system_prompt:
             data['messages'].append(system_prompt)
@@ -93,7 +95,7 @@ class OpenAiApi:
 
         return content, reasoning, tool_calls, usage
 
-    def chat_stream(self, messages, model, system_prompt=None, tools=None, tool_choice="auto"):
+    def chat_stream(self, messages, model, system_prompt=None, tools=None, tool_choice="auto", reasoning_effort=None):
         url = f"{self.base_url}/chat/completions"
         headers = {}
         headers['Authorization'] = f"Bearer {self.api_key}"
@@ -106,6 +108,8 @@ class OpenAiApi:
         if tools:
             data['tools'] = tools
             data['tool_choice'] = tool_choice
+        if reasoning_effort:
+            data['reasoning'] = {"effort": reasoning_effort}
 
         if system_prompt:
             data['messages'].append(system_prompt)

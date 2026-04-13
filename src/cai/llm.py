@@ -388,7 +388,8 @@ def _run_nonstreaming_turn(messages, args, included_tools, stream_callback=None,
     result = enforce_strict_format(lambda: openai_api.chat(messages,
                                                            model=args.model,
                                                            tools=included_tools,
-                                                           tool_choice=tool_choice),
+                                                           tool_choice=tool_choice,
+                                                           reasoning_effort=getattr(args, 'reasoning_effort', None)),
                                    args.strict_format,
                                    messages=messages)
     # Strip format-retry feedback messages so they never leak into global context via enrichment.
@@ -411,7 +412,8 @@ def _run_streaming_turn(messages, args, included_tools, stream_callback, tool_ch
     for chunk, reasoning_chunk, tool_calls, usage in openai_api.chat_stream(messages,
                                                                              model=args.model,
                                                                              tools=included_tools,
-                                                                             tool_choice=tool_choice):
+                                                                             tool_choice=tool_choice,
+                                                                             reasoning_effort=getattr(args, 'reasoning_effort', None)):
         if interrupt_event and interrupt_event.is_set():
             break
         if reasoning_chunk:

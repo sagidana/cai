@@ -22,6 +22,7 @@ harness.cai format overview:
         --max-turns 50
         --strict-format "regex:^(ok|retry)$"
         --force-tools
+        --reasoning-effort high     # enable extended thinking (high | medium | low)
         --system-prompt "You are a concise assistant."   # single-line
         --system-prompt          # multi-line: followed by '''...''' block
         '''
@@ -110,6 +111,7 @@ class CaiBlock:
     strict_format: Optional[str] = None
     system_prompt: Optional[str] = None
     force_tools: bool = False
+    reasoning_effort: Optional[str] = None
 
 
 @dataclass
@@ -252,6 +254,7 @@ def _build_block(flags, prompt_lines, lineno):
         strict_format=_opt_str('strict_format'),
         system_prompt=_opt_str('system_prompt'),
         force_tools=bool(flags.get('force_tools', False)),
+        reasoning_effort=_opt_str('reasoning_effort'),
     )
 
 
@@ -409,6 +412,8 @@ def _build_block_args(block, base_args, available_tools):
     if block.system_prompt:
         block_args.system_prompt = block.system_prompt
     block_args.force_tools = block.force_tools
+    if block.reasoning_effort:
+        block_args.reasoning_effort = block.reasoning_effort
 
     # Built-in tool names are unprefixed; external MCP tools are prefixed.
     block_args.selected_tools = set(block.tools)
