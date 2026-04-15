@@ -665,7 +665,12 @@ def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_c
         if skill_args == ["off"]:
             args.skill = []
         else:
-            args.skill = skill_args
+            # Append new skills, preserving existing ones (no duplicates).
+            existing = getattr(args, 'skill', []) or []
+            for s in skill_args:
+                if s not in existing:
+                    existing.append(s)
+            args.skill = existing
         # Reset to manual /tools selection if the user made one, otherwise
         # fall back to the CLI snapshot — then layer skill tools on top.
         manual = getattr(args, '_manual_selected_tools', None)
@@ -680,7 +685,7 @@ def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_c
         else:
             messages.insert(0, {"role": "system", "content": new_system})
         active_str = ', '.join(args.skill) if args.skill else 'none'
-        screen.write(f"\033[2;37m[skills set to: {active_str}]\033[m\n")
+        screen.write(f"\033[2;37m[active skills: {active_str}]\033[m\n")
         status_callback("ready")
     elif cmd.startswith("save"):
         path = cmd[len("save"):].strip()
