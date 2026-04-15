@@ -8,7 +8,7 @@ from cai.utils import safe_path
 
 def register(mcp):
     @mcp.tool()
-    def search(pattern: str, path: str = ".", file_glob: str = "") -> str:
+    def search(pattern: str, path: str = ".", file_glob: str = "", start: int = None, end: int = None) -> str:
         """Search for a regex pattern across files using ripgrep (rg), returning results in
         vimgrep format: one match per line as  <file>:<line>:<col>:<matched line text>.
 
@@ -18,6 +18,12 @@ def register(mcp):
         (ripgrep-backed), unicode-aware, and automatically skips binary files, hidden files,
         and paths listed in .gitignore.
 
+        **Result pagination:** At most 500 result lines are returned per call.
+        By default you get lines 1–500. To read further results, call again with
+        start/end — for example start=501, end=1000 for the next page. When the
+        output is truncated a footer line tells you the total number of matches so
+        you know whether more pages exist.
+
         Args:
             pattern:   Regular expression to search for (ripgrep / Rust regex syntax).
                        Examples: "def train", "TODO|FIXME", r"class\\w+Model".
@@ -25,9 +31,18 @@ def register(mcp):
             path:      Directory or file to search in. Defaults to "." (current working dir).
             file_glob: Optional glob to restrict which files are searched, e.g. "*.py",
                        "**/*.{ts,tsx}", "src/**/*.rs". Leave empty to search all files.
+            start:     1-based index of the first result line to return.
+                       Defaults to 1. Use this to paginate: start=1 gives the first
+                       page, start=501 gives the second page, etc.
+            end:       1-based index of the last result line to return (inclusive).
+                       Defaults to start + 499 (i.e. a window of 500 lines).
+                       Set explicitly to narrow or widen the window. For example,
+                       start=1, end=50 returns only the first 50 matches;
+                       start=200, end=250 returns matches 200–250.
 
         Returns:
             One match per line in vimgrep format: filepath:line:col:text
+            A footer "[Showing X of Y total matches]" is appended when results are truncated.
             Returns "No matches found." when the pattern does not match anything.
             Returns an error message prefixed with "Error:" if rg is unavailable or fails.
         """
@@ -44,7 +59,20 @@ def register(mcp):
             output = result.stdout.strip()
             if result.returncode not in (0, 1):
                 return f"Error: {result.stderr.strip() or 'rg exited with code ' + str(result.returncode)}"
-            return output if output else "No matches found."
+            if not output:
+                return "No matches found."
+            lines = output.split("\n")
+            total = len(lines)
+            s = (start - 1) if start is not None else 0
+            if end is not None:
+                e = end
+            else:
+                e = s + 500
+            sliced = lines[s:e]
+            result_text = "\n".join(sliced)
+            if len(sliced) < total:
+                result_text += f"\n\n[Showing {len(sliced)} of {total} total matches. Use start/end to see more.]"
+            return result_text
         except FileNotFoundError:
             return "Error: ripgrep (rg) is not installed or not on PATH."
 
@@ -108,9 +136,12 @@ def register(mcp):
             return f"Error: {e}"
 
     @mcp.tool()
-    def list_files(path: str = ".", pattern: str = "") -> str:
-        """Recursively list all files and directories under the given path, ordered by depth
-        (breadth-first: root-level entries first, then their children, then grandchildren, etc.).
+    def list_files(path: str = ".", pattern: str = "", start: int = None, end: int = None) -> str:
+        """Recursively list all files and directories under the given path.
+
+        Results are sorted by depth (shallowest / closest files first), so the
+        top-level layout appears at the top of the output. Within the same depth,
+        entries are sorted alphabetically.
 
         Each line is one entry in the format:
             [file|dir]  <relative-path>
@@ -119,24 +150,35 @@ def register(mcp):
         to understand a project's structure, find where certain file types live, audit what exists
         before making changes, or pass a full file listing to another tool or prompt.
 
-        Unlike a simple ls, this tool descends into every subdirectory so nothing is hidden from
-        view. Unlike find/walk output, entries are sorted by depth first so the top-level layout is
-        immediately visible at the top of the output without scrolling past deeply-nested paths.
-
         When a pattern is supplied, only entries whose relative path matches the regex are included
         in the output — useful for narrowing results to specific extensions, naming conventions, or
         path segments (e.g. r"\\.py$" for Python files, "test" for anything test-related,
         "src/.*\\.ts$" for TypeScript files under src/).  Directory traversal always goes full-depth
         regardless of the filter so nested matches are never missed.
 
+        **Result pagination:** At most 500 result lines are returned per call.
+        By default you get lines 1–500. To read further results, call again with
+        start/end — for example start=501, end=1000 for the next page. When the
+        output is truncated a footer line tells you the total number of entries so
+        you know whether more pages exist.
+
         Args:
             path:    Root directory to list. Defaults to "." (current working directory).
                      Accepts absolute or relative paths.
             pattern: Optional regex pattern (Python re syntax) to filter results. Matched against
                      the relative path of each entry. Leave empty to return all entries.
+            start:   1-based index of the first result line to return.
+                     Defaults to 1. Use this to paginate: start=1 gives the first
+                     page, start=501 gives the second page, etc.
+            end:     1-based index of the last result line to return (inclusive).
+                     Defaults to start + 499 (i.e. a window of 500 lines).
+                     Set explicitly to narrow or widen the window. For example,
+                     start=1, end=50 returns only the first 50 entries;
+                     start=200, end=250 returns entries 200–250.
 
         Returns:
             One entry per line: "file  <rel-path>" or "dir  <rel-path>".
+            A footer "[Showing X of Y total entries]" is appended when results are truncated.
             Returns "(empty)" if the directory contains no entries (or none match the pattern).
             Returns "Error: invalid pattern: ..." if the regex cannot be compiled.
         """
@@ -174,7 +216,24 @@ def register(mcp):
                 if os.path.isdir(full):
                     queue.append(full)
 
-        return "\n".join(entries) if entries else "(empty)"
+        if not entries:
+            return "(empty)"
+
+        # Sort by depth (shallowest first), then alphabetically within same depth
+        entries.sort(key=lambda e: (e.split("  ", 1)[1].count(os.sep), e.split("  ", 1)[1]))
+
+        total = len(entries)
+        s = (start - 1) if start is not None else 0
+        if end is not None:
+            e = end
+        else:
+            e = s + 500
+        sliced = entries[s:e]
+
+        result_text = "\n".join(sliced)
+        if len(sliced) < total:
+            result_text += f"\n\n[Showing {len(sliced)} of {total} total entries. Use start/end to see more.]"
+        return result_text
 
     @mcp.tool()
     def create_file(file_path: str, content: str) -> str:
