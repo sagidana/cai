@@ -34,8 +34,9 @@ CUR_RESTORE   = '\033[u'
 CUR_HOME      = '\033[H'
 CUR_REV_INDEX = '\033M'       # reverse index: scroll display down one row
 
-CURSOR_BAR   = '\033[5 q'    # blinking bar (prompt mode)
-CURSOR_RESET = '\033[0 q'    # reset to default block
+CURSOR_BAR   = '\033[5 q'    # blinking bar (insert mode)
+CURSOR_BLOCK = '\033[2 q'    # steady block (normal mode)
+CURSOR_RESET = '\033[0 q'    # reset to default
 
 
 def cur_up(n: int) -> str:         return f'\033[{n}A'
@@ -83,6 +84,35 @@ KEY_TAB            = '\t'
 def ansi_strip(text: str) -> str:
     """Remove ANSI escape sequences (for visual-width calculations)."""
     return _ANSI_RE.sub('', text)
+
+
+def osc52_copy(text: str) -> str:
+    """Return OSC 52 escape sequence to copy *text* to the system clipboard."""
+    import base64
+    encoded = base64.b64encode(text.encode('utf-8')).decode('ascii')
+    return f'\033]52;c;{encoded}\033\\'
+
+
+def clipboard_copy(text: str) -> None:
+    """Copy *text* to the system clipboard via OSC 52 + platform fallback."""
+    import sys as _sys
+    _sys.stdout.write(osc52_copy(text))
+    _sys.stdout.flush()
+    # Subprocess fallback for terminals that don't support OSC 52
+    import platform, shutil, subprocess
+    if platform.system() == 'Darwin':
+        cmd = 'pbcopy'
+    else:
+        cmd = 'xclip' if shutil.which('xclip') else ('xsel' if shutil.which('xsel') else None)
+    if cmd:
+        try:
+            subprocess.run(
+                [cmd] + (['-selection', 'clipboard'] if cmd == 'xclip' else []),
+                input=text.encode('utf-8'), check=True, timeout=2,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            pass
 
 
 def wrap_ansi(text: str, width: int) -> list[str]:

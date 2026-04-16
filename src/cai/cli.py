@@ -630,6 +630,7 @@ def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_c
             messages[1:] = []
         else:
             messages.clear()
+        screen.clear_buffer()
         profile = get_model_profile(args.model)
         last_ctx[0] = f"ctx 0% (0/{profile['context']})"
         status_callback("ready")

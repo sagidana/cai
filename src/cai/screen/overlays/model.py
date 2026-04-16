@@ -1,5 +1,6 @@
 """Interactive model picker overlay (alternate screen, fuzzy finder)."""
 
+import select
 import shutil
 import signal
 import sys
@@ -240,6 +241,9 @@ def prompt_model_overlay(screen, models: list) -> str | None:
                 resize_pending[0] = False
                 _redraw()
 
+            rlist, _, _ = select.select([screen._tty_fd], [], [], 0.05)
+            if not rlist:
+                continue
             key = read_key(screen._tty_fd)
 
             # Cancel

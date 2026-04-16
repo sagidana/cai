@@ -2,6 +2,7 @@
 
 import json as _json
 import os
+import select
 import shutil
 import signal
 import subprocess
@@ -463,6 +464,9 @@ def prompt_context_overlay(
                 ctx.resize_pending = False
                 overlay_redraw(ctx, screen._rows, screen._cols)
 
+            rlist, _, _ = select.select([screen._tty_fd], [], [], 0.05)
+            if not rlist:
+                continue
             key = read_key(screen._tty_fd)
 
             if ctx.filter_mode:

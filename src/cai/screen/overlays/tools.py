@@ -1,6 +1,8 @@
 """Interactive tools toggle overlay (alternate screen, floating box)."""
 
+import os
 import re
+import select
 import shutil
 import signal
 import sys
@@ -280,6 +282,9 @@ def prompt_tools_overlay(screen, tool_entries: list, enabled: set) -> set:
                 resize_pending[0] = False
                 _redraw()
 
+            rlist, _, _ = select.select([screen._tty_fd], [], [], 0.05)
+            if not rlist:
+                continue
             key = read_key(screen._tty_fd)
 
             if search_mode:

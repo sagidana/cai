@@ -1,12 +1,75 @@
-"""State classes and pure logic helpers for the context overlay."""
+"""State classes and pure logic helpers for the TUI and overlays."""
 
 import json as _json
 import re
+from enum import Enum, auto
 
 from .ansi import ansi_strip
 
 
+# ── Mode enum ────────────────────────────────────────────────────────────────
+
+class Mode(Enum):
+    NORMAL      = auto()
+    INSERT      = auto()
+    VISUAL      = auto()
+    VISUAL_LINE = auto()
+    COMMAND     = auto()
+    SEARCH      = auto()   # typing a search pattern (/ or ?)
+
+
+class TUIState:
+    """Mutable state bag for the alternate-screen TUI."""
+    __slots__ = (
+        'mode',
+        'viewport_offset', 'cursor_row',
+        'visual_anchor_row', 'visual_anchor_col', 'cursor_col',
+        'search_direction', 'search_buf', 'search_pattern',
+        'search_matches', 'search_match_idx',
+        'command_buf', 'command_cursor',
+        'pending_key', 'auto_scroll', 'yank_register',
+    )
+
+    def __init__(self) -> None:
+        self.mode: Mode = Mode.INSERT
+
+        # viewport / navigation
+        self.viewport_offset: int = 0
+        self.cursor_row: int = 0       # line in content buffer (for normal/visual)
+        self.cursor_col: int = 0
+
+        # visual selection anchors
+        self.visual_anchor_row: int = 0
+        self.visual_anchor_col: int = 0
+
+        # search
+        self.search_direction: int = 1    # 1 = forward, -1 = backward
+        self.search_buf: list[str] = []
+        self.search_pattern: str = ''
+        self.search_matches: list[int] = []   # line indices
+        self.search_match_idx: int = -1
+
+        # command mode
+        self.command_buf: list[str] = []
+        self.command_cursor: int = 0
+
+        # multi-key sequences (e.g. gg)
+        self.pending_key: str = ''
+
+        # auto-scroll: pin viewport to bottom when True
+        self.auto_scroll: bool = True
+
+        # yank register (internal clipboard)
+        self.yank_register: str = ''
+
+
 class _SubmitException(Exception):
+    def __init__(self, value: str):
+        self.value = value
+
+
+class _CommandException(Exception):
+    """Raised when command mode produces a command to execute."""
     def __init__(self, value: str):
         self.value = value
 
