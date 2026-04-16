@@ -775,8 +775,6 @@ def action_interactive(args, available_tools):
             _live_models = _llm.openai_api.get_models() or []
         except Exception:
             pass
-    screen.set_cmd_completions(["compact", "tools", "clear", "context", "save", "load", "model"] + _skill_cmds)
-
     last_ctx = [""]
 
     def _status(text=None):
@@ -831,10 +829,11 @@ def action_interactive(args, available_tools):
                 screen.write(f"{Screen._USER_STYLE}> {user_input}{Screen._RESET}\n\n")
             else:
                 user_input = screen.prompt("> ")
-            if not user_input.strip():
+            if screen._command_result is not None:
+                _handle_interactive_cmd(screen._command_result, screen, messages, args, status_callback, last_ctx)
+                screen._command_result = None
                 continue
-            if user_input.startswith("/"):
-                _handle_interactive_cmd(user_input[1:].strip(), screen, messages, args, status_callback, last_ctx)
+            if not user_input.strip():
                 continue
             messages.append({"role": "user", "content": user_input})
             status_callback("thinking...")

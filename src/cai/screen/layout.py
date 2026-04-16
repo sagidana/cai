@@ -44,60 +44,6 @@ def _cursor_visual_pos(
     return cursor_vrow, cursor_col
 
 
-def _diversify_overlay(items: list, max_visible: int) -> list:
-    """Pick a diverse subset of overlay items (ported from footer.py)."""
-    if len(items) <= max_visible:
-        return items
-    prefix = items[0]
-    for item in items[1:]:
-        while not item.startswith(prefix):
-            prefix = prefix[:-1]
-            if not prefix:
-                break
-    _SEP = set('/-_:. ')
-    groups: dict[str, list] = {}
-    for item in items:
-        rest = item[len(prefix):]
-        key_end = 0
-        for i, ch in enumerate(rest):
-            key_end = i + 1
-            if ch in _SEP:
-                break
-        key = rest[:key_end] if rest else ''
-        groups.setdefault(key, []).append(item)
-    result: list[str] = []
-    group_lists = list(groups.values())
-    idx = [0] * len(group_lists)
-    while len(result) < max_visible:
-        added = False
-        for g, gl in enumerate(group_lists):
-            if len(result) >= max_visible:
-                break
-            if idx[g] < len(gl):
-                result.append(gl[idx[g]])
-                idx[g] += 1
-                added = True
-        if not added:
-            break
-    result.sort()
-    return result
-
-
-def _window_overlay(overlay_matches: list, cmd_overlay_idx: int, max_visible: int) -> tuple:
-    """Return (visible_items, adjusted_selection_index) for a windowed overlay."""
-    total = len(overlay_matches)
-    if total <= max_visible:
-        return overlay_matches, cmd_overlay_idx
-    if cmd_overlay_idx < 0:
-        return _diversify_overlay(overlay_matches, max_visible), -1
-    half = max_visible // 2
-    start = cmd_overlay_idx - half
-    start = max(0, min(start, total - max_visible))
-    end = start + max_visible
-    visible = overlay_matches[start:end]
-    adj_idx = cmd_overlay_idx - start
-    return visible, adj_idx
-
 
 # ── Mode labels ───────────────────────────────────────────────────────────────
 
@@ -233,6 +179,7 @@ class Layout:
         auto_scroll: bool = True,
         new_content_below: bool = False,
         command_buf: list[str] | None = None,
+        cursor_row: int = 0,
     ) -> None:
         """Render the status bar at the bottom row."""
         out = [cur_move(self.status_row, 1), ERASE_LINE]
@@ -264,10 +211,14 @@ class Layout:
         label = _MODE_LABELS.get(mode, '')
         left = f' {label}  {status_text}' if status_text else f' {label}'
 
-        # Right side: scroll position
+        # Right side: scroll position (cursor-based like vim)
         if total_lines > 0:
-            pct = min(100, int((viewport_offset + self.content_rows) / total_lines * 100)) if total_lines > 0 else 100
-            right = f' {viewport_offset + 1}-{min(viewport_offset + self.content_rows, total_lines)}/{total_lines} ({pct}%) '
+            if auto_scroll:
+                effective_row = total_lines - 1
+            else:
+                effective_row = min(cursor_row, total_lines - 1)
+            pct = min(100, int((effective_row + 1) / total_lines * 100))
+            right = f' {effective_row + 1}/{total_lines} ({pct}%) '
         else:
             right = ''
 
@@ -292,8 +243,6 @@ class Layout:
         prompt_prefix: str,
         cont_prefix: str,
         cols: int,
-        cmd_overlay: list | None = None,
-        overlay_idx: int = -1,
         command_buf: list | None = None,
     ) -> None:
         """Render the input/command area above the status line."""
@@ -313,21 +262,6 @@ class Layout:
             _count_visual_rows(ln, len(prompt_prefix if i == 0 else cont_prefix), cols)
             for i, ln in enumerate(lines)
         ]
-
-        # Render command completion overlay above the input area
-        overlay_rows_rendered = 0
-        if cmd_overlay and mode == Mode.INSERT:
-            max_overlay = min(6, max(0, self.content_rows - 2))
-            visible, vis_sel = _window_overlay(cmd_overlay, overlay_idx, max_overlay)
-            overlay_rows_rendered = len(visible)
-            for i, name in enumerate(visible):
-                row = input_start - overlay_rows_rendered + i
-                if row < 1:
-                    continue
-                style = SGR_BOLD_AZURE if i == vis_sel else SGR_DIM_GRAY
-                marker = '\u25b6' if i == vis_sel else ' '
-                sys.stdout.write(cur_move(row, 1) + ERASE_LINE +
-                                 f'{style} {marker} /{name}{SGR_RESET}')
 
         # Render prompt lines
         vrow_offset = 0
@@ -382,8 +316,6 @@ class Layout:
         search_matches: list[int] | None = None,
         selection: tuple | None = None,
         total_lines: int = 0,
-        cmd_overlay: list | None = None,
-        overlay_idx: int = -1,
         command_buf: list | None = None,
         auto_scroll: bool = True,
         new_content_below: bool = False,
@@ -414,6 +346,7 @@ class Layout:
                 auto_scroll=auto_scroll,
                 new_content_below=new_content_below,
                 command_buf=command_buf,
+                cursor_row=cursor_row,
             )
         else:
             # Render status first, then input last so cursor ends up
@@ -428,12 +361,11 @@ class Layout:
                 cols=self._cols,
                 auto_scroll=auto_scroll,
                 new_content_below=new_content_below,
+                cursor_row=cursor_row,
             )
             self.render_input(
                 input_buf, cursor_pos, mode,
                 prompt_prefix, cont_prefix, self._cols,
-                cmd_overlay=cmd_overlay,
-                overlay_idx=overlay_idx,
             )
         self.position_cursor(mode, cursor_row, viewport_offset, cursor_col)
         sys.stdout.flush()

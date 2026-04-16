@@ -10,7 +10,7 @@ from .ansi import (
 )
 from .state import Mode, TUIState, _SubmitException, _CommandException
 from .input import (
-    get_overlay_matches, tab_complete, history_navigate,
+    history_navigate,
     delete_word_before, open_in_vim, open_buffer_in_vim,
 )
 
@@ -419,7 +419,6 @@ class ModeHandler:
             if screen._cursor_pos > 0:
                 del screen._input_buf[screen._cursor_pos - 1]
                 screen._cursor_pos -= 1
-                screen._cmd_overlay_idx = -1
                 screen._refresh_input()
             return
 
@@ -427,7 +426,6 @@ class ModeHandler:
             screen._input_buf, screen._cursor_pos = delete_word_before(
                 screen._input_buf, screen._cursor_pos
             )
-            screen._cmd_overlay_idx = -1
             screen._refresh_input()
             return
 
@@ -441,7 +439,6 @@ class ModeHandler:
             if screen._input_buf:
                 screen._input_buf.clear()
                 screen._cursor_pos = 0
-                screen._cmd_overlay_idx = -1
                 screen._refresh_input()
                 return
             raise KeyboardInterrupt
@@ -504,15 +501,10 @@ class ModeHandler:
             screen._refresh_input()
             return
 
-        if key == KEY_TAB:
-            self._tab_complete(state, screen)
-            return
-
         # Regular character
         if len(key) == 1 and ord(key) >= 32:
             screen._input_buf.insert(screen._cursor_pos, key)
             screen._cursor_pos += 1
-            screen._cmd_overlay_idx = -1
             screen._refresh_input()
 
     def _handle_submit(self, state: TUIState, screen) -> None:
@@ -522,12 +514,6 @@ class ModeHandler:
             screen._input_buf[screen._cursor_pos - 1] = '\n'
             screen._refresh_input()
             return
-        # If an overlay item is selected, complete to it
-        matches = get_overlay_matches(''.join(screen._input_buf), screen._cmd_completions)
-        if 0 <= screen._cmd_overlay_idx < len(matches):
-            screen._input_buf = list(f'/{matches[screen._cmd_overlay_idx]}')
-            screen._cursor_pos = len(screen._input_buf)
-            screen._cmd_overlay_idx = -1
         result = ''.join(screen._input_buf)
         if result.strip():
             screen._history.insert(0, result)
@@ -536,11 +522,6 @@ class ModeHandler:
         raise _SubmitException(result)
 
     def _handle_insert_arrow_up(self, state: TUIState, screen) -> None:
-        matches = get_overlay_matches(''.join(screen._input_buf), screen._cmd_completions)
-        if matches and screen._history_idx < 0:
-            screen._cmd_overlay_idx = (screen._cmd_overlay_idx - 1) % len(matches)
-            screen._refresh_input()
-            return
         all_lines = ''.join(screen._input_buf).split('\n')
         before = ''.join(screen._input_buf[:screen._cursor_pos])
         lines_before = before.split('\n')
@@ -562,11 +543,6 @@ class ModeHandler:
         screen._refresh_input()
 
     def _handle_insert_arrow_down(self, state: TUIState, screen) -> None:
-        matches = get_overlay_matches(''.join(screen._input_buf), screen._cmd_completions)
-        if matches and screen._history_idx < 0:
-            screen._cmd_overlay_idx = (screen._cmd_overlay_idx + 1) % len(matches)
-            screen._refresh_input()
-            return
         all_lines = ''.join(screen._input_buf).split('\n')
         before = ''.join(screen._input_buf[:screen._cursor_pos])
         lines_before = before.split('\n')
@@ -586,17 +562,6 @@ class ModeHandler:
                 sum(len(all_lines[i]) + 1 for i in range(cur_line + 1)) + target_col
             )
         screen._refresh_input()
-
-    def _tab_complete(self, state: TUIState, screen) -> None:
-        buf_str = ''.join(screen._input_buf)
-        new_buf, new_idx = tab_complete(
-            buf_str, screen._cmd_completions, screen._cmd_overlay_idx
-        )
-        if new_buf is not None:
-            screen._input_buf = list(new_buf)
-            screen._cursor_pos = len(screen._input_buf)
-            screen._cmd_overlay_idx = new_idx
-            screen._refresh_input()
 
     # ── Visual mode ───────────────────────────────────────────────────────────
 
@@ -723,24 +688,6 @@ class ModeHandler:
                 # Empty backspace cancels command mode
                 state.mode = Mode.NORMAL
                 screen._refresh_all()
-            return
-
-        if key == KEY_TAB:
-            # Tab-complete command names
-            cmd_str = ''.join(state.command_buf)
-            from .input import _prefix_matches
-            matches = _prefix_matches(cmd_str, screen._cmd_completions)
-            if len(matches) == 1:
-                state.command_buf = list(matches[0])
-                state.command_cursor = len(state.command_buf)
-                screen._refresh_status()
-            elif len(matches) > 1:
-                from .input import _common_prefix
-                common = _common_prefix(matches)
-                if len(common) > len(cmd_str):
-                    state.command_buf = list(common)
-                    state.command_cursor = len(state.command_buf)
-                    screen._refresh_status()
             return
 
         # Regular character

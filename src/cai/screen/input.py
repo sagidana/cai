@@ -64,64 +64,6 @@ def history_navigate(
     return history_idx, input_buf, cursor_pos
 
 
-def _prefix_matches(prefix: str, completions: list) -> list:
-    """Space-aware prefix matching for /commands.
-
-    Without a space in the prefix (e.g. "skill") only top-level commands are
-    shown — completions that contain a space are hidden so sub-commands don't
-    flood the overlay until the user has committed to a command word.
-
-    With a space in the prefix (e.g. "skill ") the space acts as a delimiter
-    that opts into sub-command matching, so only completions that start with
-    the full prefix (including the space) are returned.
-    """
-    if ' ' in prefix:
-        return [c for c in completions if c.startswith(prefix)]
-    return [c for c in completions if c.startswith(prefix) and ' ' not in c]
-
-
-def get_overlay_matches(buf_str: str, completions: list) -> list:
-    """Return command names whose prefix matches the current /cmd input."""
-    if not buf_str.startswith('/') or '\n' in buf_str:
-        return []
-    prefix = buf_str[1:]
-    return _prefix_matches(prefix, completions)
-
-
-def tab_complete(
-    buf_str: str,
-    completions: list,
-    overlay_idx: int,
-) -> tuple:
-    """Tab-complete /command. Returns (new_buf_str_or_None, new_overlay_idx)."""
-    if not buf_str.startswith('/'):
-        return None, overlay_idx
-    current = buf_str[1:]
-    matches = _prefix_matches(current, completions)
-
-    if 0 <= overlay_idx < len(matches):
-        return f'/{matches[overlay_idx]}', -1
-
-    if len(matches) == 1:
-        return f'/{matches[0]}', -1
-
-    if len(matches) > 1:
-        common = _common_prefix(matches)
-        if len(common) > len(current):
-            return f'/{common}', -1
-
-    return None, overlay_idx
-
-
-def _common_prefix(words: list) -> str:
-    prefix = words[0]
-    for w in words[1:]:
-        i = 0
-        while i < len(prefix) and i < len(w) and prefix[i] == w[i]:
-            i += 1
-        prefix = prefix[:i]
-    return prefix
-
 
 def open_in_vim(tty_fd: int, cooked_attrs, buf: list) -> list:
     """Open buf content in nvim; return updated character list."""

@@ -34,7 +34,7 @@ from .state import Mode, TUIState, _SubmitException, _CommandException
 from .buffer import ContentBuffer
 from .layout import Layout
 from .modes import ModeHandler
-from .input import read_key, get_overlay_matches
+from .input import read_key
 from .overlays.tools import prompt_tools_overlay as _tools_overlay
 from .overlays.context import prompt_context_overlay as _ctx_overlay
 from .overlays.model import prompt_model_overlay as _model_overlay
@@ -71,8 +71,7 @@ class Screen:
 
         self._status_text: str = ''
 
-        self._cmd_completions: list[str] = []
-        self._cmd_overlay_idx: int = -1
+        self._command_result: str | None = None
 
         self._closed: bool = False
         self._resize_pending: bool = False
@@ -184,10 +183,6 @@ class Screen:
             )
             sys.stdout.flush()
 
-    def set_cmd_completions(self, cmds: list[str]) -> None:
-        """Set the command names available for tab/command completion."""
-        self._cmd_completions = list(cmds)
-
     def clear_buffer(self) -> None:
         """Clear the content buffer and refresh."""
         self._buffer.clear()
@@ -219,7 +214,7 @@ class Screen:
         self._input_buf = []
         self._cursor_pos = 0
         self._history_idx = -1
-        self._cmd_overlay_idx = -1
+        self._command_result = None
 
         # Enter insert mode, pin to bottom
         self._state.mode = Mode.INSERT
@@ -283,8 +278,9 @@ class Screen:
                 raise caught_exc
 
         if cmd_result is not None:
-            # Command mode produced a command — return it as a /command
-            return f'/{cmd_result}'
+            # Command mode produced a command — store it for the caller
+            self._command_result = cmd_result
+            return ''
 
         # Echo submitted text into the content buffer
         if result is not None and result.strip():
@@ -470,20 +466,16 @@ class Screen:
             auto_scroll=self._state.auto_scroll,
             new_content_below=self._new_content_below,
             command_buf=self._state.command_buf if self._state.mode == Mode.COMMAND else None,
+            cursor_row=self._state.cursor_row,
         )
         sys.stdout.flush()
 
     def _refresh_input(self) -> None:
         """Re-render the input/prompt area."""
         self._layout.update_input_height(self._input_buf, self._PROMPT_PREFIX, self._CONT_PREFIX)
-        overlay_matches = get_overlay_matches(
-            ''.join(self._input_buf), self._cmd_completions
-        )
         self._layout.render_input(
             self._input_buf, self._cursor_pos, self._state.mode,
             self._PROMPT_PREFIX, self._CONT_PREFIX, self._cols,
-            cmd_overlay=overlay_matches,
-            overlay_idx=self._cmd_overlay_idx,
             command_buf=self._state.command_buf,
         )
         sys.stdout.flush()
@@ -504,9 +496,6 @@ class Screen:
     def _refresh_all(self) -> None:
         """Full screen redraw."""
         self._layout.update_input_height(self._input_buf, self._PROMPT_PREFIX, self._CONT_PREFIX)
-        overlay_matches = get_overlay_matches(
-            ''.join(self._input_buf), self._cmd_completions
-        )
         search_set = set(self._state.search_matches) if self._state.search_matches else None
         selection = self._build_selection()
         self._layout.render_all(
@@ -523,8 +512,6 @@ class Screen:
             search_matches=search_set,
             selection=selection,
             total_lines=self._buffer.line_count(),
-            cmd_overlay=overlay_matches,
-            overlay_idx=self._cmd_overlay_idx,
             command_buf=self._state.command_buf,
             auto_scroll=self._state.auto_scroll,
             new_content_below=self._new_content_below,
