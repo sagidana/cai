@@ -46,7 +46,29 @@ class Screen:
     _PROMPT_PREFIX = '> '
     _CONT_PREFIX   = '  '
 
-    # Style constants — class-level so cli.py can access as Screen._LLM_STYLE
+    # What's currently being written. Callers pass one of these as `kind`
+    # to Screen.write(); the screen owns the style and emits SGR
+    # transitions on state change (or on a fresh segment, so a stream of
+    # chunks that happens to break on '\n' keeps its color).
+    USER      = 'user'
+    LLM       = 'llm'
+    REASONING = 'reasoning'
+    META      = 'meta'
+    TOOL      = 'tool'
+    ERROR     = 'error'
+    DEFAULT   = 'default'
+
+    _KIND_STYLES = {
+        USER:      SGR_BOLD,
+        LLM:       SGR_CYAN,
+        REASONING: SGR_DIM_GRAY,
+        META:      SGR_DIM_GRAY,
+        TOOL:      SGR_DIM_GRAY,
+        ERROR:     SGR_BOLD_RED,
+        DEFAULT:   '',
+    }
+
+    # Back-compat aliases still referenced by cli.py and tests.
     _USER_STYLE   = SGR_BOLD
     _LLM_STYLE    = SGR_CYAN
     _META_STYLE   = SGR_DIM_GRAY
@@ -87,6 +109,11 @@ class Screen:
 
         # Track whether new content arrived while user is scrolled up
         self._new_content_below: bool = False
+
+        # What's currently being written (see Screen.USER/LLM/...).
+        # Transitions emit SGR automatically; a fresh buffer segment in
+        # the same kind re-emits the style so the color survives \n boundaries.
+        self._current_kind: str | None = None
 
         # Batch rendering for streaming: accumulate writes and flush periodically
         self._write_pending: bool = False
@@ -135,10 +162,22 @@ class Screen:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def write(self, text: str) -> None:
-        """Append *text* to the content buffer and refresh the viewport."""
+    def write(self, text: str, kind: str | None = None) -> None:
+        """Append *text* to the content buffer and refresh the viewport.
+
+        When *kind* is one of the class kind constants (USER, LLM, ...),
+        the screen owns styling: the caller writes plain text and the
+        screen emits SGR transitions on state change, and re-emits the
+        active style at the start of a fresh buffer segment so streamed
+        chunks that happen to break on '\\n' keep their color.
+
+        kind=None means the caller manages styling itself (raw ANSI in
+        *text*); the screen leaves _current_kind untouched.
+        """
         if not text:
             return
+        if kind is not None:
+            text = self._apply_kind(text, kind)
         with self._render_lock:
             # Handle resize that may have occurred outside the prompt loop
             if self._resize_pending:
@@ -165,6 +204,33 @@ class Screen:
                 self._write_pending = False
             else:
                 self._write_pending = True
+
+    def _apply_kind(self, text: str, kind: str) -> str:
+        """Derive the SGR/newline prefix required to render *text* as *kind*.
+
+        Three things the state transition takes care of:
+          1. Kind change mid-line — insert '\\n' so the new state starts
+             on a fresh row instead of continuing the previous one.
+          2. Kind change — reset the previous style (if any) and open
+             the new one.
+          3. Same kind but last write ended with '\\n' — wrap_ansi resets
+             style tracking per segment, so re-open the style or the new
+             segment would render in default color.
+        """
+        style = self._KIND_STYLES.get(kind, '')
+        prev = self._current_kind
+        prefix = ''
+        if kind != prev:
+            if self._buffer._partial:
+                prefix += '\n'
+            if prev is not None and self._KIND_STYLES.get(prev):
+                prefix += SGR_RESET
+            if style:
+                prefix += style
+        elif not self._buffer._partial and style:
+            prefix += style
+        self._current_kind = kind
+        return prefix + text if prefix else text
 
     def set_status(self, text: str) -> None:
         """Update status bar text and refresh."""
@@ -211,6 +277,7 @@ class Screen:
         self._state.cursor_row = 0
         self._state.auto_scroll = True
         self._new_content_below = False
+        self._current_kind = None
         with self._render_lock:
             self._refresh_all()
             sys.stdout.flush()
@@ -320,7 +387,7 @@ class Screen:
                     [], 0, Mode.NORMAL,
                     self._PROMPT_PREFIX, self._CONT_PREFIX, self._cols,
                 )
-            self.write(f'{self._USER_STYLE}{msg}{result}{self._RESET}\n\n')
+            self.write(f'{msg}{result}\n\n', kind=Screen.USER)
 
         return result  # type: ignore[return-value]
 
@@ -369,6 +436,17 @@ class Screen:
         """Start a daemon thread that reads interrupt keys during LLM streaming."""
         self._interrupt_event.clear()
         self._listener_active = True
+        # Submitting from INSERT enters NORMAL during streaming. Snap the
+        # block cursor to the bottom of the viewport (right above the
+        # prompt) so the first j/k starts from where the user was typing,
+        # not wherever NORMAL mode was last left.
+        total = self._buffer.line_count()
+        content_rows = self._layout.content_rows
+        self._state.cursor_row = max(0, min(
+            self._state.viewport_offset + content_rows - 1,
+            total - 1,
+        ))
+        self._state.cursor_col = 0
         self._listener_thread = threading.Thread(
             target=self._input_listener_loop, daemon=True, name='cai-input-listener'
         )
@@ -500,7 +578,22 @@ class Screen:
 
     def _refresh_input(self) -> None:
         """Re-render the input/prompt area."""
+        prev_height = self._layout.input_height
         self._layout.update_input_height(self._input_buf, self._PROMPT_PREFIX, self._CONT_PREFIX)
+        if self._layout.input_height != prev_height:
+            # Input area resized — the content viewport grew or shrank.
+            # Rebalance viewport_offset so the buffer stays anchored, and
+            # redraw content + status so rows that transitioned between
+            # input and content don't keep stale text.
+            total = self._buffer.line_count()
+            content_rows = self._layout.content_rows
+            max_offset = max(0, total - content_rows)
+            if self._state.auto_scroll:
+                self._state.viewport_offset = max_offset
+            else:
+                self._state.viewport_offset = min(self._state.viewport_offset, max_offset)
+            self._refresh_content()
+            self._refresh_status()
         self._layout.render_input(
             self._input_buf, self._cursor_pos, self._state.mode,
             self._PROMPT_PREFIX, self._CONT_PREFIX, self._cols,

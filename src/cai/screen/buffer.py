@@ -27,38 +27,40 @@ class ContentBuffer:
         old_count = len(self._lines)
 
         if self._partial and self._raw_segments:
-            # Continue the last incomplete segment
             self._raw_segments[-1] += text
-            # Re-wrap only the last segment
             seg = self._raw_segments[-1]
-            # Remove old wrapped lines from the last segment
-            # We track how many lines the last segment produced
-            new_wrapped = wrap_ansi(seg, self._cols)
-            # Find where the last segment's lines begin
-            # (we need to remove them and replace with re-wrapped version)
+            new_wrapped = self._wrap_segment(seg)
             prev_seg_lines = self._last_seg_line_count
             self._lines = self._lines[:len(self._lines) - prev_seg_lines] + new_wrapped
             self._last_seg_line_count = len(new_wrapped)
         else:
             self._raw_segments.append(text)
-            new_wrapped = wrap_ansi(text, self._cols)
+            new_wrapped = self._wrap_segment(text)
             self._lines.extend(new_wrapped)
             self._last_seg_line_count = len(new_wrapped)
 
-        # Track whether the segment is "partial" (no trailing newline)
         self._partial = not text.endswith('\n')
 
         return len(self._lines) - old_count
+
+    def _wrap_segment(self, seg: str) -> list[str]:
+        # A trailing '\n' means "next write starts a new row", not "emit an
+        # extra blank row". Drop the phantom empty line wrap_ansi produces
+        # from str.split('\n'), otherwise every write ending in \n leaves a
+        # blank that the next write lands below.
+        wrapped = wrap_ansi(seg, self._cols)
+        if seg.endswith('\n') and wrapped and ansi_strip(wrapped[-1]) == '':
+            wrapped = wrapped[:-1]
+        return wrapped
 
     def rewrap(self, new_cols: int) -> None:
         """Re-wrap all content for a new terminal width."""
         self._cols = max(1, new_cols)
         self._lines.clear()
         for seg in self._raw_segments:
-            wrapped = wrap_ansi(seg, self._cols)
-            self._lines.extend(wrapped)
+            self._lines.extend(self._wrap_segment(seg))
         if self._raw_segments:
-            self._last_seg_line_count = len(wrap_ansi(self._raw_segments[-1], self._cols))
+            self._last_seg_line_count = len(self._wrap_segment(self._raw_segments[-1]))
 
     def line_count(self) -> int:
         return len(self._lines)

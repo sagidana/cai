@@ -621,7 +621,7 @@ def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_c
         try:
             _compact_messages(messages, args.model)
         except LLMError as e:
-            screen.write(f"\033[1;31m[compact error] {e}\033[m\n")
+            screen.write(f"[compact error] {e}\n", kind=screen.ERROR)
         last_ctx[0] = ""
         status_callback("ready")
     elif cmd == "clear":
@@ -659,8 +659,8 @@ def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_c
         # /skill with no args → show active skills
         active = getattr(args, 'skill', []) or []
         available = _list_skill_names()
-        screen.write(f"\033[2;37m[active skills: {', '.join(active) or 'none'} | "
-                     f"available: {', '.join(available)}]\033[m\n")
+        screen.write(f"[active skills: {', '.join(active) or 'none'} | "
+                     f"available: {', '.join(available)}]\n", kind=screen.META)
     elif cmd.startswith("skill "):
         skill_args = cmd[len("skill "):].split()
         if skill_args == ["off"]:
@@ -686,12 +686,12 @@ def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_c
         else:
             messages.insert(0, {"role": "system", "content": new_system})
         active_str = ', '.join(args.skill) if args.skill else 'none'
-        screen.write(f"\033[2;37m[active skills: {active_str}]\033[m\n")
+        screen.write(f"[active skills: {active_str}]\n", kind=screen.META)
         status_callback("ready")
     elif cmd.startswith("save"):
         path = cmd[len("save"):].strip()
         if not path:
-            screen.write(f"\033[2;37m[usage: /save <path>]\033[m\n")
+            screen.write("[usage: /save <path>]\n", kind=screen.META)
         else:
             import json as _json
             payload = {
@@ -705,9 +705,9 @@ def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_c
             try:
                 with open(path, 'w') as _f:
                     _json.dump(payload, _f, indent=2)
-                screen.write(f"\033[2;37m[saved to {path}]\033[m\n")
+                screen.write(f"[saved to {path}]\n", kind=screen.META)
             except OSError as _e:
-                screen.write(f"\033[1;31m[save error] {_e}\033[m\n")
+                screen.write(f"[save error] {_e}\n", kind=screen.ERROR)
     elif cmd == "model":
         live_models = None
         if _llm.openai_api is not None:
@@ -716,26 +716,26 @@ def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_c
             except Exception:
                 pass
         if not live_models:
-            screen.write(f"\033[2;37m[current model: {args.model} | no models available]\033[m\n")
+            screen.write(f"[current model: {args.model} | no models available]\n", kind=screen.META)
         else:
             picked = screen.prompt_model_overlay(live_models)
             if picked:
                 args.model = picked
-                screen.write(f"\033[2;37m[model set to: {args.model}]\033[m\n")
+                screen.write(f"[model set to: {args.model}]\n", kind=screen.META)
                 status_callback("ready")
             else:
-                screen.write(f"\033[2;37m[current model: {args.model}]\033[m\n")
+                screen.write(f"[current model: {args.model}]\n", kind=screen.META)
     elif cmd.startswith("load"):
         path = cmd[len("load"):].strip()
         if not path:
-            screen.write(f"\033[2;37m[usage: /load <path>]\033[m\n")
+            screen.write("[usage: /load <path>]\n", kind=screen.META)
         else:
             try:
                 loaded = _load_context(path, args)
                 messages[:] = loaded
-                screen.write(f"\033[2;37m[loaded from {path} — {len(messages)} messages, "
+                screen.write(f"[loaded from {path} — {len(messages)} messages, "
                              f"{len(args.selected_tools)} tools, "
-                             f"skills: {', '.join(args.skill) or 'none'}]\033[m\n")
+                             f"skills: {', '.join(args.skill) or 'none'}]\n", kind=screen.META)
                 _chars = sum(len(str(m.get('content', ''))) for m in messages)
                 _rough_tok = _chars // 4
                 _profile = get_model_profile(args.model)
@@ -746,9 +746,9 @@ def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_c
                     last_ctx[0] = ""
                 status_callback("ready")
             except (OSError, ValueError, KeyError) as _e:
-                screen.write(f"\033[1;31m[load error] {_e}\033[m\n")
+                screen.write(f"[load error] {_e}\n", kind=screen.ERROR)
     else:
-        screen.write(f"\033[2;37m[unknown command: {cmd}]\033[m\n")
+        screen.write(f"[unknown command: {cmd}]\n", kind=screen.META)
 
 ACTION_INTERACTIVE = "interactive"
 def action_interactive(args, available_tools):
@@ -800,34 +800,19 @@ def action_interactive(args, available_tools):
         last_ctx[0] = ctx_str
         _status()
 
-    _LLM_STYLE   = Screen._LLM_STYLE
-    _META_STYLE  = Screen._META_STYLE
-    _ERROR_STYLE = Screen._ERROR_STYLE
-    _RESET       = Screen._RESET
-
     def stream_cb(chunk):
-        screen.write(chunk)
+        screen.write(chunk, kind=Screen.LLM)
 
-    _reasoning_active = [False]
     _reasoning_buf = []
 
     def reasoning_cb(chunk):
         if chunk is None:
-            # End of reasoning — restore LLM style
-            if _reasoning_active[0]:
-                screen.write(f"\n{_RESET}{_LLM_STYLE}")
-                _reasoning_active[0] = False
-        else:
-            _reasoning_buf.append(chunk)
-            if not _reasoning_active[0]:
-                # First reasoning chunk — switch to meta (gray) style
-                screen.write(f"\n{_META_STYLE}")
-                _reasoning_active[0] = True
-            screen.write(chunk)
+            return  # next write's kind handles the transition
+        _reasoning_buf.append(chunk)
+        screen.write(chunk, kind=Screen.REASONING)
 
     def tool_cb(line, error=False):
-        style = _ERROR_STYLE if error else _META_STYLE
-        screen.write(f"{style}{line}{_RESET}{_LLM_STYLE}")
+        screen.write(line, kind=Screen.ERROR if error else Screen.TOOL)
 
     try:
         pending_input = args.prompt  # seed loop with initial prompt if provided
@@ -840,7 +825,7 @@ def action_interactive(args, available_tools):
                 pending_input = None
                 if user_input.strip():
                     screen._history.insert(0, user_input)
-                screen.write(f"{Screen._USER_STYLE}> {user_input}{Screen._RESET}\n\n")
+                screen.write(f"> {user_input}\n\n", kind=Screen.USER)
             else:
                 user_input = screen.prompt("> ")
             if screen._command_result is not None:
@@ -852,7 +837,6 @@ def action_interactive(args, available_tools):
             messages.append({"role": "user", "content": user_input})
             status_callback("thinking...")
             screen.show_prompt_placeholder("> ")
-            screen.write(_LLM_STYLE)
             screen.start_input_listener()
             _tools_str = ", ".join(sorted(getattr(args, 'selected_tools', set()) or [])) or "none"
             _cai_logger.log(1, (
@@ -871,27 +855,26 @@ def action_interactive(args, available_tools):
                                     reasoning_callback=reasoning_cb)
                 _cai_logger.pop_nest(1)
                 if screen._interrupt_event.is_set():
-                    screen.write(f"\n{_RESET}{_META_STYLE}[interrupted]{_RESET}\n\n")
+                    screen.write("\n[interrupted]\n\n", kind=Screen.META)
                     status_callback("interrupted")
                     continue
-                screen.write(f"\n{_RESET}\n")
+                screen.write("\n", kind=Screen.DEFAULT)
                 assistant_msg = {"role": "assistant", "content": response}
                 if _reasoning_buf:
                     assistant_msg['_reasoning'] = ''.join(_reasoning_buf)
                 messages.append(assistant_msg)
             except LLMError as e:
                 _cai_logger.pop_nest(1)
-                screen.write(f"\n{_RESET}{_ERROR_STYLE}[error] {e}{_RESET}\n\n")
+                screen.write(f"\n[error] {e}\n\n", kind=Screen.ERROR)
                 status_callback("error")
             except BaseException:
                 _cai_logger.pop_nest(1)
-                screen.write(_RESET)
                 raise
             finally:
                 screen.stop_input_listener()
 
     except (KeyboardInterrupt, EOFError):
-        screen.write(f"{_RESET}\n[exiting]\n")
+        screen.write("\n[exiting]\n", kind=Screen.META)
     finally:
         screen.close()
 

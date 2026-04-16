@@ -90,6 +90,10 @@ class Layout:
         """1-indexed row where the input area starts."""
         return self._rows - self._input_height
 
+    @property
+    def input_height(self) -> int:
+        return self._input_height
+
     def update_input_height(self, input_buf: list, prompt_prefix: str, cont_prefix: str) -> None:
         """Recompute input area height based on current buffer content."""
         buf_str = ''.join(input_buf)
@@ -263,19 +267,25 @@ class Layout:
             for i, ln in enumerate(lines)
         ]
 
-        # Render prompt lines
+        # Erase the full input area first — otherwise we'd wipe out the
+        # continuation rows that the terminal just wrapped our text onto.
+        for vr in range(self.status_row - input_start):
+            sys.stdout.write(cur_move(input_start + vr, 1) + ERASE_LINE)
+
+        # Render each logical line, manually wrapped so each visual row is
+        # placed explicitly rather than relying on terminal auto-wrap.
         vrow_offset = 0
         for i, line in enumerate(lines):
             prefix = prompt_prefix if i == 0 else cont_prefix
-            # Each logical line may span multiple visual rows
-            for vr in range(line_vrows[i]):
+            wrapped = wrap_ansi(f'{prefix}{line}', cols) or ['']
+            for wline in wrapped:
                 abs_row = input_start + vrow_offset
                 if abs_row >= self.status_row:
                     break
-                sys.stdout.write(cur_move(abs_row, 1) + ERASE_LINE)
-                if vr == 0:
-                    sys.stdout.write(f'{prefix}{line}')
+                sys.stdout.write(cur_move(abs_row, 1) + wline)
                 vrow_offset += 1
+            if input_start + vrow_offset >= self.status_row:
+                break
 
         if mode == Mode.INSERT:
             # Position cursor in prompt area
