@@ -60,10 +60,20 @@ def _is_o_series(model):
 
 
 class OpenAiApi:
-    def __init__(self, base_url, api_key, ssl_verify=True):
+    def __init__(self, base_url, api_key, ssl_verify=True, error_cb=None):
         self.base_url = base_url
         self.api_key = api_key
         self.ssl_verify = ssl_verify
+        self.error_cb = error_cb
+
+    def _report(self, msg):
+        """Log an error and, if a sink is attached, forward it there too."""
+        log.error(msg)
+        if self.error_cb is not None:
+            try:
+                self.error_cb(msg)
+            except Exception as e:
+                log.error(f"[!] error_cb raised: {e}")
 
     def get_models(self):
         url = f"{self.base_url}/models"
@@ -71,14 +81,14 @@ class OpenAiApi:
         try:
             r = requests.get(url, headers=headers, verify=self.ssl_verify)
         except requests.RequestException as e:
-            log.error(f"[!] request {url} failed: {e}")
+            self._report(f"[!] request {url} failed: {e}")
             return None
         if r.status_code != 200:
             return None
         try:
             return [m.get('id') for m in r.json().get('data', [])]
         except ValueError as e:
-            log.error(f"[!] request {url} returned invalid JSON: {e}")
+            self._report(f"[!] request {url} returned invalid JSON: {e}")
             return None
 
     def chat(self, messages, model, system_prompt=None, tools=None, tool_choice="auto", reasoning_effort=None, temperature=None):
@@ -116,27 +126,27 @@ class OpenAiApi:
         try:
             r = requests.post(url, headers=headers, json=data, verify=self.ssl_verify)
         except requests.RequestException as e:
-            log.error(f"[!] request {url} failed: {e}")
+            self._report(f"[!] request {url} failed: {e}")
             return
         if r.status_code != 200:
-            log.error(f"[!] request {url} failed: {r.status_code}, {r.text}")
+            self._report(f"[!] request {url} failed: {r.status_code}, {r.text}")
             return
 
         try:
             result = r.json()
         except ValueError as e:
-            log.error(f"[!] request {url} returned invalid JSON: {e}")
+            self._report(f"[!] request {url} returned invalid JSON: {e}")
             return
         choices = result.get("choices", [])
         if len(choices) != 1:
-            log.error(f"[!] len(choices) != 1: {choices}")
+            self._report(f"[!] len(choices) != 1: {choices}")
             return
 
         choice = choices[0]
 
         message = choice.get('message', None)
         if not message:
-            log.error(f"[!] choice message is None")
+            self._report(f"[!] choice message is None")
             return
 
         content = message.get('content', "")
@@ -189,7 +199,7 @@ class OpenAiApi:
         try:
             response_cm = requests.post(url, headers=headers, json=data, stream=True, verify=self.ssl_verify)
         except requests.RequestException as e:
-            log.error(f"[!] request {url} failed: {e}")
+            self._report(f"[!] request {url} failed: {e}")
             yield None, None, None, {}
             return
 
@@ -197,14 +207,14 @@ class OpenAiApi:
             try:
                 response.raise_for_status()
             except requests.HTTPError as e:
-                log.error(f"[!] request {url} failed: {e.response.status_code}, {e.response.text}")
+                self._report(f"[!] request {url} failed: {e.response.status_code}, {e.response.text}")
                 yield None, None, None, {}
                 return
 
             try:
                 line_iter = response.iter_lines()
             except requests.RequestException as e:
-                log.error(f"[!] request {url} stream failed: {e}")
+                self._report(f"[!] request {url} stream failed: {e}")
                 yield None, None, finished_tool_calls, usage
                 return
 
@@ -214,7 +224,7 @@ class OpenAiApi:
                 except StopIteration:
                     break
                 except requests.RequestException as e:
-                    log.error(f"[!] request {url} stream interrupted: {e}")
+                    self._report(f"[!] request {url} stream interrupted: {e}")
                     yield None, None, finished_tool_calls, usage
                     return
 
@@ -228,7 +238,7 @@ class OpenAiApi:
                 try:
                     chunk = json.loads(response_data)
                 except json.JSONDecodeError as e:
-                    log.error(f"[!] request {url} stream returned invalid JSON: {e}")
+                    self._report(f"[!] request {url} stream returned invalid JSON: {e}")
                     continue
 
                 # Final usage chunk has empty choices

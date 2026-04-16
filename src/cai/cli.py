@@ -814,6 +814,11 @@ def action_interactive(args, available_tools):
     def tool_cb(line, error=False):
         screen.write(line, kind=Screen.ERROR if error else Screen.TOOL)
 
+    def api_error_cb(msg):
+        screen.write(f"\n{msg}\n", kind=Screen.ERROR)
+
+    openai_api.error_cb = api_error_cb
+
     try:
         pending_input = args.prompt  # seed loop with initial prompt if provided
 
@@ -876,6 +881,7 @@ def action_interactive(args, available_tools):
     except (KeyboardInterrupt, EOFError):
         screen.write("\n[exiting]\n", kind=Screen.META)
     finally:
+        openai_api.error_cb = None
         screen.close()
 
 
