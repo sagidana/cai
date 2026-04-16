@@ -703,11 +703,76 @@ class ModeHandler:
                 screen._refresh_all()
             return
 
+        if key == KEY_TAB:
+            self._command_tab_complete(state, screen)
+            return
+
         # Regular character
         if len(key) == 1 and ord(key) >= 32:
             state.command_buf.insert(state.command_cursor, key)
             state.command_cursor += 1
             screen._refresh_status()
+
+    def _command_tab_complete(self, state: TUIState, screen) -> None:
+        """Tab-complete command names and sub-options in command mode."""
+        completions = screen._cmd_completions
+        if not completions:
+            return
+        text = ''.join(state.command_buf)
+
+        # Check if we're completing a sub-option (e.g. "skill fr")
+        parts = text.split(' ', 1)
+        cmd_word = parts[0]
+
+        if len(parts) == 2:
+            # Sub-option completion: cmd_word is already determined
+            if cmd_word not in completions:
+                return
+            sub_options = completions[cmd_word]
+            if not sub_options:
+                return
+            sub_prefix = parts[1]
+            matches = [s for s in sub_options if s.startswith(sub_prefix)]
+            if not matches:
+                return
+            if len(matches) == 1:
+                result = f'{cmd_word} {matches[0]}'
+            else:
+                common = matches[0]
+                for m in matches[1:]:
+                    i = 0
+                    while i < len(common) and i < len(m) and common[i] == m[i]:
+                        i += 1
+                    common = common[:i]
+                if len(common) > len(sub_prefix):
+                    result = f'{cmd_word} {common}'
+                else:
+                    return
+        else:
+            # Top-level command completion
+            matches = [c for c in completions if c.startswith(cmd_word)]
+            if not matches:
+                return
+            if len(matches) == 1:
+                result = matches[0]
+                # Add trailing space if the command has sub-options
+                if completions.get(matches[0]):
+                    result += ' '
+            else:
+                common = matches[0]
+                for m in matches[1:]:
+                    i = 0
+                    while i < len(common) and i < len(m) and common[i] == m[i]:
+                        i += 1
+                    common = common[:i]
+                if len(common) > len(cmd_word):
+                    result = common
+                else:
+                    return
+
+        state.command_buf = list(result)
+        state.command_cursor = len(state.command_buf)
+        screen._refresh_status()
 
     # ── Search mode ───────────────────────────────────────────────────────────
 

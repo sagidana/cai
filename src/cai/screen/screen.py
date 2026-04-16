@@ -73,6 +73,10 @@ class Screen:
 
         self._command_result: str | None = None
 
+        # Command-mode completions: top-level commands and sub-options
+        # {cmd_name: [sub_options]} — empty list means no sub-options
+        self._cmd_completions: dict[str, list[str]] = {}
+
         self._closed: bool = False
         self._resize_pending: bool = False
 
@@ -181,6 +185,14 @@ class Screen:
             self._refresh_status()
             sys.stdout.flush()
         self._status_text = old
+
+    def set_cmd_completions(self, completions: dict[str, list[str]]) -> None:
+        """Set command-mode completions.
+
+        *completions* maps command names to lists of sub-options.
+        E.g. {"skill": ["off", "frida", "web"], "compact": [], ...}
+        """
+        self._cmd_completions = dict(completions)
 
     def show_prompt_placeholder(self, msg: str = '> ') -> None:
         """Show a dimmed placeholder in the input area during streaming."""

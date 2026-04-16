@@ -775,6 +775,18 @@ def action_interactive(args, available_tools):
             _live_models = _llm.openai_api.get_models() or []
         except Exception:
             pass
+    _skill_names = _list_skill_names()
+    screen.set_cmd_completions({
+        "compact": [],
+        "clear": [],
+        "tools": [],
+        "context": [],
+        "model": [],
+        "save": [],
+        "load": [],
+        "skill": ["off"] + _skill_names,
+    })
+
     last_ctx = [""]
 
     def _status(text=None):
