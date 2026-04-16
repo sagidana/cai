@@ -529,6 +529,7 @@ class Screen:
             auto_scroll=self._state.auto_scroll,
             new_content_below=self._new_content_below,
             cursor_row=self._state.cursor_row,
+            cursor_col=self._state.cursor_col,
         )
         sys.stdout.flush()
 
@@ -543,16 +544,19 @@ class Screen:
         """Handle terminal resize: rewrap buffer and full redraw."""
         self._buffer.rewrap(self._cols)
         self._layout.resize(self._rows, self._cols)
-        # Adjust viewport proportionally
         total = self._buffer.line_count()
         content_rows = self._layout.content_rows
+        max_offset = max(0, total - content_rows)
         if self._state.auto_scroll:
             self._state.viewport_offset = max(0, total - content_rows)
         else:
-            self._state.viewport_offset = min(
-                self._state.viewport_offset,
-                max(0, total - content_rows)
-            )
+            self._state.viewport_offset = min(self._state.viewport_offset, max_offset)
+        # Clamp cursor to valid range and ensure it's visible
+        self._state.cursor_row = max(0, min(self._state.cursor_row, max(0, total - 1)))
+        if self._state.cursor_row < self._state.viewport_offset:
+            self._state.viewport_offset = self._state.cursor_row
+        elif self._state.cursor_row >= self._state.viewport_offset + content_rows:
+            self._state.viewport_offset = self._state.cursor_row - content_rows + 1
         sys.stdout.write(ERASE_SCREEN)
         self._refresh_all()
         sys.stdout.flush()

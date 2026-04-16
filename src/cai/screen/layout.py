@@ -352,7 +352,7 @@ class Layout:
             sys.stdout.write(cur_move(abs_cursor_row, cursor_col + 1))
             sys.stdout.write(CUR_SHOW)
 
-    def position_cursor(self, mode: Mode, cursor_row: int, viewport_offset: int) -> None:
+    def position_cursor(self, mode: Mode, cursor_row: int, viewport_offset: int, cursor_col: int = 0) -> None:
         """Final cursor placement after all regions have been rendered.
 
         Only NORMAL and VISUAL modes need explicit positioning here (block
@@ -364,7 +364,7 @@ class Layout:
         if mode in (Mode.NORMAL, Mode.VISUAL, Mode.VISUAL_LINE):
             vrow = cursor_row - viewport_offset
             if 0 <= vrow < self.content_rows:
-                sys.stdout.write(cur_move(vrow + 1, 1))
+                sys.stdout.write(cur_move(vrow + 1, min(cursor_col + 1, self._cols)))
             sys.stdout.write(CURSOR_BLOCK + CUR_SHOW)
 
     def render_all(
@@ -388,6 +388,7 @@ class Layout:
         auto_scroll: bool = True,
         new_content_below: bool = False,
         cursor_row: int = 0,
+        cursor_col: int = 0,
     ) -> None:
         """Full screen redraw (used on resize and initial draw)."""
         self.render_content(
@@ -434,5 +435,5 @@ class Layout:
                 cmd_overlay=cmd_overlay,
                 overlay_idx=overlay_idx,
             )
-        self.position_cursor(mode, cursor_row, viewport_offset)
+        self.position_cursor(mode, cursor_row, viewport_offset, cursor_col)
         sys.stdout.flush()

@@ -11,8 +11,180 @@ from .ansi import (
 from .state import Mode, TUIState, _SubmitException, _CommandException
 from .input import (
     get_overlay_matches, tab_complete, history_navigate,
-    delete_word_before, open_in_vim,
+    delete_word_before, open_in_vim, open_buffer_in_vim,
 )
+
+
+# ── Word-motion & text-object helpers ────────────────────────────────────────
+
+def _is_word_char(ch: str) -> bool:
+    """True for characters that belong to a vim 'word' (alnum + underscore)."""
+    return ch.isalnum() or ch == '_'
+
+
+def _motion_w(plain: str, col: int) -> int:
+    """Return column after moving forward one word (vim `w`)."""
+    n = len(plain)
+    if col >= n:
+        return col
+    # Skip current word characters
+    if _is_word_char(plain[col]):
+        while col < n and _is_word_char(plain[col]):
+            col += 1
+    elif not plain[col].isspace():
+        # punctuation word
+        while col < n and not plain[col].isspace() and not _is_word_char(plain[col]):
+            col += 1
+    # Skip whitespace
+    while col < n and plain[col].isspace():
+        col += 1
+    return col
+
+
+def _motion_b(plain: str, col: int) -> int:
+    """Return column after moving backward one word (vim `b`)."""
+    n = len(plain)
+    if n == 0 or col <= 0:
+        return 0
+    col = min(col, n) - 1
+    # Skip whitespace backward
+    while col > 0 and plain[col].isspace():
+        col -= 1
+    if col < 0:
+        return 0
+    # Skip word or punctuation backward
+    if _is_word_char(plain[col]):
+        while col > 0 and _is_word_char(plain[col - 1]):
+            col -= 1
+    elif not plain[col].isspace():
+        while col > 0 and not plain[col - 1].isspace() and not _is_word_char(plain[col - 1]):
+            col -= 1
+    return col
+
+
+def _motion_e(plain: str, col: int) -> int:
+    """Return column after moving to end of word (vim `e`)."""
+    n = len(plain)
+    if col >= n - 1:
+        return max(0, n - 1)
+    col += 1
+    # Skip whitespace
+    while col < n and plain[col].isspace():
+        col += 1
+    if col >= n:
+        return max(0, n - 1)
+    # Move to end of word or punctuation group
+    if _is_word_char(plain[col]):
+        while col + 1 < n and _is_word_char(plain[col + 1]):
+            col += 1
+    elif not plain[col].isspace():
+        while col + 1 < n and not plain[col + 1].isspace() and not _is_word_char(plain[col + 1]):
+            col += 1
+    return col
+
+
+def _textobj_inner_word(plain: str, col: int, big_word: bool = False) -> tuple[int, int] | None:
+    """Return (start_col, end_col) for inner word under cursor."""
+    if not plain or col >= len(plain):
+        return None
+    if big_word:
+        # WORD: delimited by whitespace only
+        if plain[col].isspace():
+            return None
+        sc = col
+        while sc > 0 and not plain[sc - 1].isspace():
+            sc -= 1
+        ec = col
+        while ec + 1 < len(plain) and not plain[ec + 1].isspace():
+            ec += 1
+        return sc, ec
+    else:
+        ch = plain[col]
+        if _is_word_char(ch):
+            sc = col
+            while sc > 0 and _is_word_char(plain[sc - 1]):
+                sc -= 1
+            ec = col
+            while ec + 1 < len(plain) and _is_word_char(plain[ec + 1]):
+                ec += 1
+            return sc, ec
+        elif not ch.isspace():
+            sc = col
+            while sc > 0 and not plain[sc - 1].isspace() and not _is_word_char(plain[sc - 1]):
+                sc -= 1
+            ec = col
+            while ec + 1 < len(plain) and not plain[ec + 1].isspace() and not _is_word_char(plain[ec + 1]):
+                ec += 1
+            return sc, ec
+    return None
+
+
+_BRACKET_PAIRS = {
+    '(': ')', ')': '(',
+    '<': '>', '>': '<',
+}
+
+_QUOTE_CHARS = {'"', "'", '`'}
+
+
+def _textobj_inner_delimited(plain: str, col: int, char: str) -> tuple[int, int] | None:
+    """Return (start_col, end_col) for inner content between matching delimiters.
+
+    Handles quotes (" ' `) and brackets ( ) < >.
+    """
+    n = len(plain)
+    if char in _QUOTE_CHARS:
+        # Find the opening quote before/at col, and closing quote after
+        # Strategy: find all positions of char, pair them left-to-right
+        positions = [i for i, c in enumerate(plain) if c == char]
+        if len(positions) < 2:
+            return None
+        # Find the pair that surrounds col
+        for pi in range(0, len(positions) - 1, 2):
+            start = positions[pi]
+            end = positions[pi + 1]
+            if start <= col <= end:
+                if end - start <= 1:
+                    return None  # empty
+                return start + 1, end - 1
+        return None
+
+    # Bracket pairs
+    open_ch = char if char in ('(', '<') else _BRACKET_PAIRS.get(char)
+    close_ch = _BRACKET_PAIRS.get(open_ch, char) if open_ch else char
+    if open_ch is None:
+        return None
+
+    # Search backward for opening bracket
+    depth = 0
+    start = -1
+    for i in range(col, -1, -1):
+        if plain[i] == close_ch and i != col:
+            depth += 1
+        elif plain[i] == open_ch:
+            if depth == 0:
+                start = i
+                break
+            depth -= 1
+    if start == -1:
+        return None
+
+    # Search forward for closing bracket
+    depth = 0
+    end = -1
+    for i in range(start + 1, n):
+        if plain[i] == open_ch:
+            depth += 1
+        elif plain[i] == close_ch:
+            if depth == 0:
+                end = i
+                break
+            depth -= 1
+    if end == -1:
+        return None
+    if end - start <= 1:
+        return None
+    return start + 1, end - 1
 
 
 class ModeHandler:
@@ -42,7 +214,32 @@ class ModeHandler:
         buf = screen._buffer
         layout = screen._layout
 
-        # Multi-key: gg
+        # Multi-key: gg, zz/zt/zb
+        if state.pending_key == 'z':
+            state.pending_key = ''
+            total = buf.line_count()
+            content_rows = layout.content_rows
+            if key == 'z':
+                # zz — center cursor line in viewport
+                state.viewport_offset = max(0, min(
+                    state.cursor_row - content_rows // 2,
+                    max(0, total - content_rows),
+                ))
+            elif key == 't':
+                # zt — cursor line at top of viewport
+                state.viewport_offset = max(0, min(
+                    state.cursor_row,
+                    max(0, total - content_rows),
+                ))
+            elif key == 'b':
+                # zb — cursor line at bottom of viewport
+                state.viewport_offset = max(0, state.cursor_row - content_rows + 1)
+            else:
+                return  # z + unknown: ignore
+            state.auto_scroll = (state.viewport_offset >= max(0, total - content_rows))
+            screen._refresh_all()
+            return
+
         if state.pending_key == 'g':
             state.pending_key = ''
             if key == 'g':
@@ -61,6 +258,19 @@ class ModeHandler:
             self._scroll_up(state, screen, 1)
             return
 
+        if key == 'h' or key == KEY_LEFT:
+            if state.cursor_col > 0:
+                state.cursor_col -= 1
+                screen._refresh_all()
+            return
+
+        if key == 'l' or key == KEY_RIGHT:
+            plain = buf.get_plain_text(state.cursor_row)
+            if state.cursor_col < max(0, len(plain) - 1):
+                state.cursor_col += 1
+                screen._refresh_all()
+            return
+
         if key == KEY_CTRL_D:
             half = max(1, layout.content_rows // 2)
             self._scroll_down(state, screen, half)
@@ -73,6 +283,10 @@ class ModeHandler:
 
         if key == 'g':
             state.pending_key = 'g'
+            return
+
+        if key == 'z':
+            state.pending_key = 'z'
             return
 
         if key == 'G':
@@ -129,12 +343,48 @@ class ModeHandler:
             screen._refresh_all()
             return
 
+        if key == 'w':
+            self._word_motion(state, screen, 'w')
+            return
+
+        if key == 'b':
+            self._word_motion(state, screen, 'b')
+            return
+
+        if key == 'e':
+            self._word_motion(state, screen, 'e')
+            return
+
+        if key == '0':
+            state.cursor_col = 0
+            screen._refresh_all()
+            return
+
+        if key == '$':
+            plain = buf.get_plain_text(state.cursor_row)
+            state.cursor_col = max(0, len(plain) - 1)
+            screen._refresh_all()
+            return
+
+        if key == '^':
+            plain = buf.get_plain_text(state.cursor_row)
+            col = 0
+            while col < len(plain) and plain[col].isspace():
+                col += 1
+            state.cursor_col = col
+            screen._refresh_all()
+            return
+
         if key == 'n':
             self._search_next(state, screen, state.search_direction)
             return
 
         if key == 'N':
             self._search_next(state, screen, -state.search_direction)
+            return
+
+        if key == KEY_CTRL_V:
+            self._open_buffer_in_vim(state, screen)
             return
 
         if key == KEY_CTRL_C:
@@ -351,6 +601,12 @@ class ModeHandler:
     # ── Visual mode ───────────────────────────────────────────────────────────
 
     def _handle_visual(self, key: str, state: TUIState, screen) -> None:
+        # Handle pending 'i' for text objects
+        if state.pending_key == 'i':
+            state.pending_key = ''
+            self._apply_text_object(key, state, screen)
+            return
+
         if key == KEY_ESC:
             state.mode = Mode.NORMAL
             screen._refresh_all()
@@ -373,6 +629,42 @@ class ModeHandler:
         if key == 'l' or key == KEY_RIGHT:
             state.cursor_col += 1
             screen._refresh_all()
+            return
+
+        if key == 'w':
+            self._word_motion(state, screen, 'w')
+            return
+
+        if key == 'b':
+            self._word_motion(state, screen, 'b')
+            return
+
+        if key == 'e':
+            self._word_motion(state, screen, 'e')
+            return
+
+        if key == '0':
+            state.cursor_col = 0
+            screen._refresh_all()
+            return
+
+        if key == '$':
+            plain = screen._buffer.get_plain_text(state.cursor_row)
+            state.cursor_col = max(0, len(plain) - 1)
+            screen._refresh_all()
+            return
+
+        if key == '^':
+            plain = screen._buffer.get_plain_text(state.cursor_row)
+            col = 0
+            while col < len(plain) and plain[col].isspace():
+                col += 1
+            state.cursor_col = col
+            screen._refresh_all()
+            return
+
+        if key == 'i':
+            state.pending_key = 'i'
             return
 
         if key == KEY_CTRL_D:
@@ -499,6 +791,12 @@ class ModeHandler:
         max_offset = max(0, total - content_rows)
 
         state.cursor_row = min(state.cursor_row + n, max(0, total - 1))
+        # Clamp cursor_col to new line length
+        plain = screen._buffer.get_plain_text(state.cursor_row)
+        if plain:
+            state.cursor_col = min(state.cursor_col, len(plain) - 1)
+        else:
+            state.cursor_col = 0
         # Ensure cursor stays visible
         if state.cursor_row >= state.viewport_offset + content_rows:
             state.viewport_offset = min(state.cursor_row - content_rows + 1, max_offset)
@@ -507,6 +805,12 @@ class ModeHandler:
 
     def _scroll_up(self, state: TUIState, screen, n: int) -> None:
         state.cursor_row = max(state.cursor_row - n, 0)
+        # Clamp cursor_col to new line length
+        plain = screen._buffer.get_plain_text(state.cursor_row)
+        if plain:
+            state.cursor_col = min(state.cursor_col, len(plain) - 1)
+        else:
+            state.cursor_col = 0
         if state.cursor_row < state.viewport_offset:
             state.viewport_offset = state.cursor_row
         state.auto_scroll = False
@@ -543,4 +847,99 @@ class ModeHandler:
             state.viewport_offset = state.cursor_row
         elif state.cursor_row >= state.viewport_offset + content_rows:
             state.viewport_offset = state.cursor_row - content_rows + 1
+        screen._refresh_all()
+
+    # ── Word motions ─────────────────────────────────────────────────────────
+
+    def _word_motion(self, state: TUIState, screen, motion: str) -> None:
+        """Execute w/b/e motion, crossing line boundaries."""
+        buf = screen._buffer
+        total = buf.line_count()
+        if total == 0:
+            return
+        plain = buf.get_plain_text(state.cursor_row)
+        col = min(state.cursor_col, max(0, len(plain) - 1)) if plain else 0
+
+        if motion == 'w':
+            new_col = _motion_w(plain, col)
+            if new_col >= len(plain) and state.cursor_row + 1 < total:
+                state.cursor_row += 1
+                plain = buf.get_plain_text(state.cursor_row)
+                new_col = 0
+                while new_col < len(plain) and plain[new_col].isspace():
+                    new_col += 1
+            state.cursor_col = min(new_col, max(0, len(plain) - 1)) if plain else 0
+        elif motion == 'b':
+            new_col = _motion_b(plain, col)
+            if new_col == 0 and col == 0 and state.cursor_row > 0:
+                state.cursor_row -= 1
+                plain = buf.get_plain_text(state.cursor_row)
+                new_col = max(0, len(plain) - 1) if plain else 0
+            state.cursor_col = new_col
+        elif motion == 'e':
+            new_col = _motion_e(plain, col)
+            if new_col <= col and state.cursor_row + 1 < total:
+                state.cursor_row += 1
+                plain = buf.get_plain_text(state.cursor_row)
+                if plain:
+                    new_col = 0
+                    while new_col < len(plain) and plain[new_col].isspace():
+                        new_col += 1
+                    new_col = _motion_e(plain, new_col)
+                else:
+                    new_col = 0
+            state.cursor_col = new_col
+
+        # Ensure cursor stays visible
+        content_rows = screen._layout.content_rows
+        if state.cursor_row < state.viewport_offset:
+            state.viewport_offset = state.cursor_row
+        elif state.cursor_row >= state.viewport_offset + content_rows:
+            state.viewport_offset = state.cursor_row - content_rows + 1
+        screen._refresh_all()
+
+    # ── Text objects (visual mode) ───────────────────────────────────────────
+
+    def _apply_text_object(self, key: str, state: TUIState, screen) -> None:
+        """Handle i + <key> text object in visual mode."""
+        buf = screen._buffer
+        plain = buf.get_plain_text(state.cursor_row)
+        col = state.cursor_col
+        result = None
+
+        if key == 'w':
+            result = _textobj_inner_word(plain, col, big_word=False)
+        elif key == 'W':
+            result = _textobj_inner_word(plain, col, big_word=True)
+        elif key in ('"', "'", '`'):
+            result = _textobj_inner_delimited(plain, col, key)
+        elif key in ('(', ')', '<', '>'):
+            result = _textobj_inner_delimited(plain, col, key)
+
+        if result is not None:
+            sc, ec = result
+            # Set selection to cover the text object on the current line
+            state.visual_anchor_row = state.cursor_row
+            state.visual_anchor_col = sc
+            state.cursor_col = ec
+            if state.mode == Mode.VISUAL_LINE:
+                state.mode = Mode.VISUAL  # text objects switch to char-wise
+        screen._refresh_all()
+
+    # ── Vim buffer viewer ────────────────────────────────────────────────────
+
+    def _open_buffer_in_vim(self, state: TUIState, screen) -> None:
+        """Open the content buffer in nvim with cursor at current position."""
+        from .ansi import ALT_ENTER, ERASE_SCREEN, CUR_HIDE
+        import sys
+        open_buffer_in_vim(
+            screen._tty_fd, screen._cooked_attrs,
+            screen._buffer._lines,
+            state.cursor_row, state.cursor_col,
+        )
+        # Re-enter alternate screen and restore TUI
+        import tty
+        tty.setraw(screen._tty_fd)
+        sys.stdout.write(ALT_ENTER + ERASE_SCREEN + CUR_HIDE)
+        sys.stdout.flush()
         screen._refresh_all()

@@ -144,3 +144,26 @@ def open_in_vim(tty_fd: int, cooked_attrs, buf: list) -> list:
         except OSError:
             pass
     return list(new_content)
+
+
+def open_buffer_in_vim(tty_fd: int, cooked_attrs, lines: list[str], cursor_row: int, cursor_col: int) -> None:
+    """Open content buffer in vim (read-only) with cursor at the given position."""
+    from .ansi import ansi_strip, ALT_EXIT, ERASE_SCREEN
+    import sys
+    content = '\n'.join(ansi_strip(line) for line in lines)
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+        f.write(content)
+        tmp = f.name
+    try:
+        termios.tcsetattr(tty_fd, termios.TCSADRAIN, cooked_attrs)
+        sys.stdout.write(ALT_EXIT + CUR_SHOW)
+        sys.stdout.flush()
+        # +line positions cursor; cursor_row is 0-based, vim is 1-based
+        vim_row = cursor_row + 1
+        vim_col = cursor_col + 1
+        subprocess.run(['nvim', f'+{vim_row}', f'+normal! {vim_col}|', tmp])
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
