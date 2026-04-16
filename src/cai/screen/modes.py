@@ -514,6 +514,14 @@ class ModeHandler:
             screen._refresh_input()
             return
 
+        # ':' as first character → enter command mode
+        if key == ':' and not screen._input_buf:
+            state.mode = Mode.COMMAND
+            state.command_buf = []
+            state.command_cursor = 0
+            screen._refresh_all()
+            return
+
         # Regular character
         if len(key) == 1 and ord(key) >= 32:
             screen._input_buf.insert(screen._cursor_pos, key)
