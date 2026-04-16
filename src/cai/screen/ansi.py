@@ -76,6 +76,8 @@ KEY_RIGHT          = '\033[C'
 KEY_LEFT           = '\033[D'
 KEY_HOME           = ('\033[H', '\033[1~', '\033OH')
 KEY_END            = ('\033[F', '\033[4~', '\033OF')
+KEY_PGUP           = '\033[5~'
+KEY_PGDN           = '\033[6~'
 KEY_TAB            = '\t'
 
 

@@ -8,6 +8,7 @@ from .ansi import (
     KEY_CTRL_C, KEY_CTRL_D, KEY_CTRL_V, KEY_CTRL_A, KEY_CTRL_E,
     KEY_CTRL_K, KEY_CTRL_U, KEY_TAB,
     KEY_UP, KEY_DOWN, KEY_RIGHT, KEY_LEFT, KEY_HOME, KEY_END,
+    KEY_PGUP, KEY_PGDN,
     clipboard_copy,
 )
 from .state import Mode, TUIState, _SubmitException, _CommandException
@@ -273,12 +274,12 @@ class ModeHandler:
                 screen._refresh_all()
             return
 
-        if key == KEY_CTRL_D:
+        if key in (KEY_CTRL_D, KEY_PGDN):
             half = max(1, layout.content_rows // 2)
             self._scroll_down(state, screen, half)
             return
 
-        if key == KEY_CTRL_U:
+        if key in (KEY_CTRL_U, KEY_PGUP):
             half = max(1, layout.content_rows // 2)
             self._scroll_up(state, screen, half)
             return
@@ -399,16 +400,19 @@ class ModeHandler:
 
     # ── Insert mode ───────────────────────────────────────────────────────────
 
+    def _insert_to_normal(self, state: TUIState, screen) -> None:
+        """Switch from insert to normal mode, positioning the cursor."""
+        state.mode = Mode.NORMAL
+        state.auto_scroll = False
+        total = screen._buffer.line_count()
+        state.cursor_row = min(
+            state.viewport_offset + screen._layout.content_rows - 1,
+            max(0, total - 1),
+        )
+
     def _handle_insert(self, key: str, state: TUIState, screen) -> None:
         if key == KEY_ESC:
-            state.mode = Mode.NORMAL
-            state.auto_scroll = False
-            # Set cursor_row to current viewport bottom
-            total = screen._buffer.line_count()
-            state.cursor_row = min(
-                state.viewport_offset + screen._layout.content_rows - 1,
-                max(0, total - 1),
-            )
+            self._insert_to_normal(state, screen)
             screen._refresh_all()
             return
 
@@ -461,6 +465,16 @@ class ModeHandler:
             screen._input_buf = new_buf
             screen._cursor_pos = len(new_buf)
             screen._refresh_all()
+            return
+
+        # Scroll keys: switch to normal mode and execute the scroll
+        if key in (KEY_CTRL_U, KEY_CTRL_D, KEY_PGUP, KEY_PGDN):
+            self._insert_to_normal(state, screen)
+            half = max(1, screen._layout.content_rows // 2)
+            if key in (KEY_CTRL_U, KEY_PGUP):
+                self._scroll_up(state, screen, half)
+            else:
+                self._scroll_down(state, screen, half)
             return
 
         if key == KEY_UP:
