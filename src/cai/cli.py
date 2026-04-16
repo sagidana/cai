@@ -797,6 +797,7 @@ def action_interactive(args, available_tools):
         screen.write(chunk)
 
     _reasoning_active = [False]
+    _reasoning_buf = []
 
     def reasoning_cb(chunk):
         if chunk is None:
@@ -805,6 +806,7 @@ def action_interactive(args, available_tools):
                 screen.write(f"\n{_RESET}{_LLM_STYLE}")
                 _reasoning_active[0] = False
         else:
+            _reasoning_buf.append(chunk)
             if not _reasoning_active[0]:
                 # First reasoning chunk — switch to meta (gray) style
                 screen.write(f"\n{_META_STYLE}")
@@ -847,6 +849,7 @@ def action_interactive(args, available_tools):
             ))
             try:
                 _cai_logger.push_nest(1)
+                _reasoning_buf.clear()
                 response = call_llm(messages, args, available_tools,
                                     stream_callback=stream_cb,
                                     status_callback=status_callback,
@@ -860,7 +863,10 @@ def action_interactive(args, available_tools):
                     status_callback("interrupted")
                     continue
                 screen.write(f"\n{_RESET}\n")
-                messages.append({"role": "assistant", "content": response})
+                assistant_msg = {"role": "assistant", "content": response}
+                if _reasoning_buf:
+                    assistant_msg['_reasoning'] = ''.join(_reasoning_buf)
+                messages.append(assistant_msg)
             except LLMError as e:
                 _cai_logger.pop_nest(1)
                 screen.write(f"\n{_RESET}{_ERROR_STYLE}[error] {e}{_RESET}\n\n")

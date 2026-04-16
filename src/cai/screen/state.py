@@ -28,6 +28,7 @@ class TUIState:
         'search_matches', 'search_match_idx',
         'command_buf', 'command_cursor',
         'pending_key', 'auto_scroll', 'yank_register',
+        'last_ctrl_c',
     )
 
     def __init__(self) -> None:
@@ -61,6 +62,9 @@ class TUIState:
 
         # yank register (internal clipboard)
         self.yank_register: str = ''
+
+        # double Ctrl-C to quit
+        self.last_ctrl_c: float = 0.0
 
 
 class _SubmitException(Exception):

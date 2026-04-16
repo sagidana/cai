@@ -217,7 +217,7 @@ def _execute_tool(call_name, arguments, allowed_tool_names, usage=None, profile=
 
 
 def handle_tool_calls(tool_calls, messages, call_content, allowed_tool_names,
-                      tool_callback=None, usage=None, profile=None):
+                      tool_callback=None, usage=None, profile=None, reasoning=None):
     log.info("handle_tool_calls: dispatching %d tool call(s)", len(tool_calls))
     for call in tool_calls:
         if call.get('type') != 'function':
@@ -262,6 +262,9 @@ def handle_tool_calls(tool_calls, messages, call_content, allowed_tool_names,
             'tool_calls': [{'id': call_id, 'type': 'function',
                             'function': {'name': call_name, 'arguments': arguments}}],
         }
+        if reasoning:
+            assistant_msg['_reasoning'] = reasoning
+            reasoning = None  # only attach to the first tool call message
         tool_msg = {'role': 'tool', 'tool_call_id': call_id, 'content': result}
         messages.append(assistant_msg)
         messages.append(tool_msg)
@@ -725,7 +728,8 @@ def call_llm(messages,
             _emit_status(status, status_callback)
 
         handle_tool_calls(tool_calls, messages, content, allowed_tool_names,
-                          tool_callback=tool_callback, usage=usage, profile=profile)
+                          tool_callback=tool_callback, usage=usage, profile=profile,
+                          reasoning=reasoning)
         if tool_callback:
             tool_callback("\n")
 

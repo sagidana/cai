@@ -380,13 +380,46 @@ def overlay_nav_key(
         overlay_edit_in_nvim(ctx, sel, tty_fd, cooked_attrs)
 
 
+def _build_tool_call_text(msg: dict) -> str:
+    """Build a readable representation of tool calls in a message."""
+    parts = []
+    for tc in (msg.get('tool_calls') or []):
+        func = tc.get('function', {})
+        name = func.get('name', '?')
+        raw_args = func.get('arguments', '')
+        try:
+            parsed = _json.loads(raw_args) if raw_args else {}
+            args_str = _json.dumps(parsed, indent=2)
+        except Exception:
+            args_str = raw_args
+        parts.append(f"Tool: {name}\nArguments:\n{args_str}")
+    return '\n\n'.join(parts)
+
+
 def overlay_edit_in_nvim(ctx: _OverlayCtx, pos: int, tty_fd: int, cooked_attrs) -> None:
-    """Open messages[view[pos]] in nvim; write changes back on exit."""
+    """Open messages[view[pos]] in nvim; write changes back on exit.
+
+    Tool-call messages are opened read-only (view only).
+    Reasoning (if present) is prepended to the view.
+    """
     ai      = ctx.view[pos]
     msg     = ctx.messages[ai]
     content = msg.get('content', '')
+    tool_calls = msg.get('tool_calls')
+    reasoning = msg.get('_reasoning', '')
     is_json = not isinstance(content, str)
-    text    = _json.dumps(content, indent=2) if is_json else (content or '')
+    read_only = bool(tool_calls)
+
+    # Build the text to show
+    sections = []
+    if reasoning:
+        sections.append(f"--- Reasoning ---\n{reasoning}")
+    if tool_calls:
+        sections.append(f"--- Tool Calls ---\n{_build_tool_call_text(msg)}")
+    if content:
+        content_text = _json.dumps(content, indent=2) if is_json else content
+        sections.append(f"--- Content ---\n{content_text}" if sections else content_text)
+    text = '\n\n'.join(sections) if sections else (content or '')
 
     with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
         f.write(text)
@@ -395,16 +428,28 @@ def overlay_edit_in_nvim(ctx: _OverlayCtx, pos: int, tty_fd: int, cooked_attrs) 
         sys.stdout.write(f'{ALT_EXIT}{CUR_SHOW}')
         sys.stdout.flush()
         termios.tcsetattr(tty_fd, termios.TCSADRAIN, cooked_attrs)
-        subprocess.run(['nvim', tmp])
-        with open(tmp, 'r') as f:
-            new_text = f.read()
-        if is_json:
-            try:
-                ctx.messages[ai]['content'] = _json.loads(new_text)
-            except Exception:
-                ctx.messages[ai]['content'] = new_text
+        if read_only:
+            subprocess.run(['nvim', '-R', tmp])
         else:
-            ctx.messages[ai]['content'] = new_text
+            subprocess.run(['nvim', tmp])
+            with open(tmp, 'r') as f:
+                new_text = f.read()
+            # Strip reasoning header if user somehow edited it (only for non-tool messages)
+            if reasoning and new_text.startswith('--- Reasoning ---\n'):
+                # Find the content section
+                content_marker = '\n\n--- Content ---\n'
+                marker_pos = new_text.find(content_marker)
+                if marker_pos >= 0:
+                    new_text = new_text[marker_pos + len(content_marker):]
+                elif not content:
+                    new_text = ''
+            if is_json:
+                try:
+                    ctx.messages[ai]['content'] = _json.loads(new_text)
+                except Exception:
+                    ctx.messages[ai]['content'] = new_text
+            else:
+                ctx.messages[ai]['content'] = new_text
     finally:
         try:
             os.unlink(tmp)
@@ -413,7 +458,8 @@ def overlay_edit_in_nvim(ctx: _OverlayCtx, pos: int, tty_fd: int, cooked_attrs) 
         sys.stdout.write(f'{ALT_ENTER}{ERASE_SCREEN}')
         sys.stdout.flush()
         tty.setraw(tty_fd)
-        _overlay_recompute_tokens(ctx)
+        if not read_only:
+            _overlay_recompute_tokens(ctx)
         ctx.first_draw = True
 
 

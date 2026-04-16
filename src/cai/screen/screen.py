@@ -173,6 +173,15 @@ class Screen:
                 self._refresh_status()
             sys.stdout.flush()
 
+    def write_status_hint(self, hint: str) -> None:
+        """Temporarily show a hint on the status bar."""
+        old = self._status_text
+        self._status_text = hint
+        with self._render_lock:
+            self._refresh_status()
+            sys.stdout.flush()
+        self._status_text = old
+
     def show_prompt_placeholder(self, msg: str = '> ') -> None:
         """Show a dimmed placeholder in the input area during streaming."""
         self._state.mode = Mode.NORMAL
@@ -216,13 +225,17 @@ class Screen:
         self._history_idx = -1
         self._command_result = None
 
-        # Enter insert mode, pin to bottom
-        self._state.mode = Mode.INSERT
-        self._state.auto_scroll = True
-        total = self._buffer.line_count()
-        content_rows = self._layout.content_rows
-        self._state.viewport_offset = max(0, total - content_rows)
-        self._new_content_below = False
+        # Enter insert mode only if the user was following the conversation
+        # (auto_scroll still on). Otherwise stay in normal mode so we don't
+        # jump the cursor while they're reading earlier content.
+        if self._state.auto_scroll:
+            self._state.mode = Mode.INSERT
+            total = self._buffer.line_count()
+            content_rows = self._layout.content_rows
+            self._state.viewport_offset = max(0, total - content_rows)
+            self._new_content_below = False
+        else:
+            self._state.mode = Mode.NORMAL
 
         self._layout.update_input_height(self._input_buf, self._PROMPT_PREFIX, self._CONT_PREFIX)
 
@@ -235,7 +248,10 @@ class Screen:
             tty.setraw(self._tty_fd)
             termios.tcflush(self._tty_fd, termios.TCIFLUSH)
             self._refresh_all()
-            sys.stdout.write(f'{CUR_SHOW}{CURSOR_BAR}')
+            if self._state.mode == Mode.INSERT:
+                sys.stdout.write(f'{CUR_SHOW}{CURSOR_BAR}')
+            else:
+                sys.stdout.write(f'{CUR_SHOW}{CURSOR_BLOCK}')
             sys.stdout.flush()
 
             while True:

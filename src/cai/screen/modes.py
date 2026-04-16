@@ -1,5 +1,7 @@
 """Mode state machine and per-mode key handlers for the TUI."""
 
+import time
+
 from .ansi import (
     KEY_BACKSPACE, KEY_ESC, KEY_ENTER, KEY_ALT_ENTER,
     KEY_CTRL_W, KEY_CTRL_BACKSPACE, KEY_ALT_BACKSPACE, KEY_DEL,
@@ -388,7 +390,12 @@ class ModeHandler:
             return
 
         if key == KEY_CTRL_C:
-            raise KeyboardInterrupt
+            now = time.monotonic()
+            if now - state.last_ctrl_c < 0.5:
+                raise KeyboardInterrupt
+            state.last_ctrl_c = now
+            screen.write_status_hint("Press Ctrl-C again to quit")
+            return
 
     # ── Insert mode ───────────────────────────────────────────────────────────
 
@@ -439,9 +446,15 @@ class ModeHandler:
             if screen._input_buf:
                 screen._input_buf.clear()
                 screen._cursor_pos = 0
+                state.last_ctrl_c = 0.0
                 screen._refresh_input()
                 return
-            raise KeyboardInterrupt
+            now = time.monotonic()
+            if now - state.last_ctrl_c < 0.5:
+                raise KeyboardInterrupt
+            state.last_ctrl_c = now
+            screen.write_status_hint("Press Ctrl-C again to quit")
+            return
 
         if key == KEY_CTRL_V:
             new_buf = open_in_vim(screen._tty_fd, screen._cooked_attrs, screen._input_buf)
