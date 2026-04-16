@@ -34,7 +34,7 @@ from .state import Mode, TUIState, _SubmitException, _CommandException
 from .buffer import ContentBuffer
 from .layout import Layout
 from .modes import ModeHandler
-from .input import read_key, handle_listener_key, get_overlay_matches
+from .input import read_key, get_overlay_matches
 from .overlays.tools import prompt_tools_overlay as _tools_overlay
 from .overlays.context import prompt_context_overlay as _ctx_overlay
 from .overlays.model import prompt_model_overlay as _model_overlay
@@ -176,6 +176,7 @@ class Screen:
 
     def show_prompt_placeholder(self, msg: str = '> ') -> None:
         """Show a dimmed placeholder in the input area during streaming."""
+        self._state.mode = Mode.NORMAL
         with self._render_lock:
             self._layout.render_input(
                 [], 0, Mode.NORMAL,
@@ -285,6 +286,18 @@ class Screen:
             # Command mode produced a command — return it as a /command
             return f'/{cmd_result}'
 
+        # Echo submitted text into the content buffer
+        if result is not None and result.strip():
+            # Clear the input area first to avoid momentary double "> "
+            self._input_buf = []
+            self._cursor_pos = 0
+            with self._render_lock:
+                self._layout.render_input(
+                    [], 0, Mode.NORMAL,
+                    self._PROMPT_PREFIX, self._CONT_PREFIX, self._cols,
+                )
+            self.write(f'{self._USER_STYLE}{msg}{result}{self._RESET}\n\n')
+
         return result  # type: ignore[return-value]
 
     # ── Overlay entry points ──────────────────────────────────────────────────
@@ -345,15 +358,85 @@ class Screen:
             self._listener_thread = None
 
     def _input_listener_loop(self) -> None:
+        from .ansi import KEY_CTRL_D, KEY_CTRL_U, KEY_UP, KEY_DOWN, KEY_ESC
         old = termios.tcgetattr(self._tty_fd)
         try:
             tty.setraw(self._tty_fd)
+            # Set NORMAL mode so navigation keys work during streaming
+            self._state.mode = Mode.NORMAL
+            pending_g = False
             while self._listener_active:
+                if self._resize_pending:
+                    self._resize_pending = False
+                    with self._render_lock:
+                        self._handle_resize()
+
                 rlist, _, _ = select.select([self._tty_fd], [], [], 0.05)
+
+                # Flush any pending batched writes
+                if self._write_pending:
+                    with self._render_lock:
+                        self._refresh_content()
+                        self._refresh_status()
+                        sys.stdout.flush()
+                        self._write_pending = False
+                        self._last_render_time = time.monotonic()
+
                 if not rlist:
                     continue
                 key = read_key(self._tty_fd)
-                handle_listener_key(key, self._interrupt_event)
+
+                # Ctrl-C signals interrupt to stop streaming
+                if key == KEY_CTRL_C:
+                    self._interrupt_event.set()
+                    continue
+
+                # Handle gg (two-key sequence)
+                if pending_g:
+                    pending_g = False
+                    if key == 'g':
+                        with self._render_lock:
+                            self._state.viewport_offset = 0
+                            self._state.cursor_row = 0
+                            self._state.auto_scroll = False
+                            self._refresh_all()
+                            sys.stdout.flush()
+                        continue
+                    # g + something else: fall through to handle key normally
+
+                # Navigation keys only — no mode changes during streaming
+                if key == 'j' or key == KEY_DOWN:
+                    with self._render_lock:
+                        self._modes._scroll_down(self._state, self, 1)
+                        sys.stdout.flush()
+                elif key == 'k' or key == KEY_UP:
+                    with self._render_lock:
+                        self._modes._scroll_up(self._state, self, 1)
+                        sys.stdout.flush()
+                elif key == KEY_CTRL_D:
+                    with self._render_lock:
+                        half = max(1, self._layout.content_rows // 2)
+                        self._modes._scroll_down(self._state, self, half)
+                        sys.stdout.flush()
+                elif key == KEY_CTRL_U:
+                    with self._render_lock:
+                        half = max(1, self._layout.content_rows // 2)
+                        self._modes._scroll_up(self._state, self, half)
+                        sys.stdout.flush()
+                elif key == 'g':
+                    pending_g = True
+                elif key == 'G':
+                    with self._render_lock:
+                        total = self._buffer.line_count()
+                        content_rows = self._layout.content_rows
+                        self._state.viewport_offset = max(0, total - content_rows)
+                        self._state.cursor_row = max(0, total - 1)
+                        self._state.auto_scroll = True
+                        self._refresh_all()
+                        sys.stdout.flush()
+                elif key == KEY_ESC:
+                    # Esc does nothing special during streaming — already NORMAL
+                    pass
         finally:
             termios.tcsetattr(self._tty_fd, termios.TCSADRAIN, old)
 
