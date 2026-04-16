@@ -15,11 +15,19 @@ class OpenRouterApi:
 
     def get_models(self):
         url = "https://openrouter.ai/api/v1/models"
-        r = requests.get(url)
-        if r.status_code != 200:
-            print(f"[!] request {url} failed with {r.status_code}, {r.text}")
+        try:
+            r = requests.get(url)
+        except requests.RequestException as e:
+            log.error(f"[!] request {url} failed: {e}")
             return
-        response = r.json()
+        if r.status_code != 200:
+            log.error(f"[!] request {url} failed with {r.status_code}, {r.text}")
+            return
+        try:
+            response = r.json()
+        except ValueError as e:
+            log.error(f"[!] request {url} returned invalid JSON: {e}")
+            return
 
         return response.get('data')
 
@@ -28,12 +36,20 @@ class OpenRouterApi:
         headers = {}
         headers['Authorization'] = f"Bearer {self.api_key}"
 
-        r = requests.get(url, headers=headers)
+        try:
+            r = requests.get(url, headers=headers)
+        except requests.RequestException as e:
+            log.error(f"[!] request {url} failed: {e}")
+            return
         if r.status_code != 200:
-            print(f"[!] request {url} failed with {r.status_code}, {r.text}")
+            log.error(f"[!] request {url} failed with {r.status_code}, {r.text}")
             return
 
-        return r.json()
+        try:
+            return r.json()
+        except ValueError as e:
+            log.error(f"[!] request {url} returned invalid JSON: {e}")
+            return
 
 def _is_o_series(model):
     """Check if model is an OpenAI o-series reasoning model (o1, o3, o4-mini, etc.)."""
@@ -52,10 +68,18 @@ class OpenAiApi:
     def get_models(self):
         url = f"{self.base_url}/models"
         headers = {'Authorization': f"Bearer {self.api_key}"}
-        r = requests.get(url, headers=headers, verify=self.ssl_verify)
+        try:
+            r = requests.get(url, headers=headers, verify=self.ssl_verify)
+        except requests.RequestException as e:
+            log.error(f"[!] request {url} failed: {e}")
+            return None
         if r.status_code != 200:
             return None
-        return [m.get('id') for m in r.json().get('data', [])]
+        try:
+            return [m.get('id') for m in r.json().get('data', [])]
+        except ValueError as e:
+            log.error(f"[!] request {url} returned invalid JSON: {e}")
+            return None
 
     def chat(self, messages, model, system_prompt=None, tools=None, tool_choice="auto", reasoning_effort=None, temperature=None):
         url = f"{self.base_url}/chat/completions"
@@ -89,22 +113,30 @@ class OpenAiApi:
 
         data['messages'].extend(messages)
 
-        r = requests.post(url, headers=headers, json=data, verify=self.ssl_verify)
+        try:
+            r = requests.post(url, headers=headers, json=data, verify=self.ssl_verify)
+        except requests.RequestException as e:
+            log.error(f"[!] request {url} failed: {e}")
+            return
         if r.status_code != 200:
-            print(f"[!] request {url} failed: {r.status_code}, {r.text}")
+            log.error(f"[!] request {url} failed: {r.status_code}, {r.text}")
             return
 
-        result = r.json()
+        try:
+            result = r.json()
+        except ValueError as e:
+            log.error(f"[!] request {url} returned invalid JSON: {e}")
+            return
         choices = result.get("choices", [])
         if len(choices) != 1:
-            print(f"[!] len(choices) != 1: {choices}")
+            log.error(f"[!] len(choices) != 1: {choices}")
             return
 
         choice = choices[0]
 
         message = choice.get('message', None)
         if not message:
-            print(f"[!] choice message is None")
+            log.error(f"[!] choice message is None")
             return
 
         content = message.get('content', "")
@@ -154,9 +186,38 @@ class OpenAiApi:
         tool_calls = {}
         usage = {}
 
-        with requests.post(url, headers=headers, json=data, stream=True, verify=self.ssl_verify) as response:
-            response.raise_for_status()
-            for line in response.iter_lines():
+        try:
+            response_cm = requests.post(url, headers=headers, json=data, stream=True, verify=self.ssl_verify)
+        except requests.RequestException as e:
+            log.error(f"[!] request {url} failed: {e}")
+            yield None, None, None, {}
+            return
+
+        with response_cm as response:
+            try:
+                response.raise_for_status()
+            except requests.HTTPError as e:
+                log.error(f"[!] request {url} failed: {e.response.status_code}, {e.response.text}")
+                yield None, None, None, {}
+                return
+
+            try:
+                line_iter = response.iter_lines()
+            except requests.RequestException as e:
+                log.error(f"[!] request {url} stream failed: {e}")
+                yield None, None, finished_tool_calls, usage
+                return
+
+            while True:
+                try:
+                    line = next(line_iter)
+                except StopIteration:
+                    break
+                except requests.RequestException as e:
+                    log.error(f"[!] request {url} stream interrupted: {e}")
+                    yield None, None, finished_tool_calls, usage
+                    return
+
                 if not line: continue
 
                 if not line.startswith(b"data: "): continue
@@ -164,7 +225,11 @@ class OpenAiApi:
                 response_data = line[len(b"data: "):]
 
                 if response_data == b"[DONE]": break
-                chunk = json.loads(response_data)
+                try:
+                    chunk = json.loads(response_data)
+                except json.JSONDecodeError as e:
+                    log.error(f"[!] request {url} stream returned invalid JSON: {e}")
+                    continue
 
                 # Final usage chunk has empty choices
                 if chunk.get('usage'):
@@ -229,11 +294,19 @@ class AnthropicApi:
         data['max_tokens'] = 200
         data['messages'] = messages
 
-        r = requests.post(url, headers=headers, json=data)
-        if r.status_code != 200:
-            print(f"[!] request {url} failed: {r.status_code}, {r.text}")
+        try:
+            r = requests.post(url, headers=headers, json=data)
+        except requests.RequestException as e:
+            log.error(f"[!] request {url} failed: {e}")
             return
-        print(r.json())
+        if r.status_code != 200:
+            log.error(f"[!] request {url} failed: {r.status_code}, {r.text}")
+            return
+        try:
+            print(r.json())
+        except ValueError as e:
+            log.error(f"[!] request {url} returned invalid JSON: {e}")
+            return
 
 
 def main():
