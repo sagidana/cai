@@ -77,18 +77,27 @@ class ContentBuffer:
             return ansi_strip(self._lines[line_idx])
         return ''
 
-    def search(self, pattern: str, direction: int = 1, from_line: int = 0) -> list[int]:
-        """Find all lines matching *pattern*. Returns list of line indices."""
+    def search(self, pattern: str) -> list[tuple[int, int, int]]:
+        """Find every substring match of *pattern*.
+
+        Returns a list of ``(line_idx, start_col, end_col)`` tuples in
+        buffer order.  Columns refer to the ANSI-stripped text so they
+        line up with what the user sees on screen. Zero-width matches
+        are skipped — they would otherwise loop the cursor in place.
+        """
         if not pattern:
             return []
         try:
             rx = re.compile(pattern, re.IGNORECASE)
         except re.error:
             rx = re.compile(re.escape(pattern), re.IGNORECASE)
-        matches = []
+        matches: list[tuple[int, int, int]] = []
         for i, line in enumerate(self._lines):
-            if rx.search(ansi_strip(line)):
-                matches.append(i)
+            plain = ansi_strip(line)
+            for m in rx.finditer(plain):
+                s, e = m.start(), m.end()
+                if e > s:
+                    matches.append((i, s, e))
         return matches
 
     def get_selection_text(

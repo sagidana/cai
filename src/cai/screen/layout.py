@@ -45,6 +45,24 @@ def _cursor_visual_pos(
 
 
 
+def _apply_spans(plain: str, spans: list[tuple[int, int]]) -> str:
+    """Wrap each ``(start, end)`` half-open span in *plain* with SGR_REVERSE_YELLOW."""
+    parts = []
+    prev = 0
+    for s, e in sorted(spans):
+        s = max(prev, min(s, len(plain)))
+        e = max(s, min(e, len(plain)))
+        if s > prev:
+            parts.append(plain[prev:s])
+        parts.append(SGR_REVERSE_YELLOW)
+        parts.append(plain[s:e])
+        parts.append(SGR_RESET)
+        prev = e
+    if prev < len(plain):
+        parts.append(plain[prev:])
+    return ''.join(parts)
+
+
 # ── Mode labels ───────────────────────────────────────────────────────────────
 
 _MODE_LABELS = {
@@ -119,13 +137,15 @@ class Layout:
         cols: int,
         cursor_row: int | None = None,
         selection: tuple | None = None,
-        search_matches: 'set[int] | None' = None,
+        search_spans: 'dict[int, list[tuple[int, int]]] | None' = None,
         viewport_offset: int = 0,
     ) -> None:
         """Render the content viewport directly to stdout.
 
         *selection* is ``(start_row, end_row, line_mode, start_col, end_col)``
-        where rows/cols refer to buffer line indices.
+        where rows/cols refer to buffer line indices. *search_spans* maps a
+        line index to a list of ``(start_col, end_col)`` half-open spans of
+        matched substrings — each span is highlighted individually.
         """
         out = []
         # Unpack selection once
@@ -141,10 +161,12 @@ class Layout:
             if buf_line_idx < len(lines):
                 line = lines[buf_line_idx]
 
-                # Highlight search matches
-                if search_matches and buf_line_idx in search_matches:
-                    line = SGR_REVERSE_YELLOW + ansi_strip(line) + SGR_RESET
-                # Highlight visual selection (overrides search highlight)
+                line_spans = search_spans.get(buf_line_idx) if search_spans else None
+                # Highlight substring search matches (stripping ANSI on
+                # matched lines — same trade-off as selection highlighting).
+                if line_spans:
+                    line = _apply_spans(ansi_strip(line), line_spans)
+                # Highlight visual selection (no search spans on this line)
                 elif selection is not None and sel_sr <= buf_line_idx <= sel_er:
                     plain = ansi_strip(line)
                     if sel_line_mode:
@@ -323,7 +345,7 @@ class Layout:
         cont_prefix: str,
         search_buf: list[str] | None = None,
         search_direction: int = 1,
-        search_matches: list[int] | None = None,
+        search_spans: 'dict[int, list[tuple[int, int]]] | None' = None,
         selection: tuple | None = None,
         total_lines: int = 0,
         command_buf: list | None = None,
@@ -336,7 +358,7 @@ class Layout:
         self.render_content(
             buffer_lines, self.content_rows, self._cols,
             selection=selection,
-            search_matches=search_matches,
+            search_spans=search_spans,
             viewport_offset=viewport_offset,
         )
         if mode in (Mode.COMMAND, Mode.SEARCH):

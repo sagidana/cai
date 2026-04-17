@@ -333,17 +333,11 @@ class ModeHandler:
             return
 
         if key == '/':
-            state.mode = Mode.SEARCH
-            state.search_direction = 1
-            state.search_buf = []
-            screen._refresh_all()
+            self._enter_search(state, screen, direction=1)
             return
 
         if key == '?':
-            state.mode = Mode.SEARCH
-            state.search_direction = -1
-            state.search_buf = []
-            screen._refresh_all()
+            self._enter_search(state, screen, direction=-1)
             return
 
         if key == 'w':
@@ -391,11 +385,26 @@ class ModeHandler:
             return
 
         if key == KEY_CTRL_C:
+            handler = getattr(screen, '_interrupt_handler', None)
+            if handler is not None and handler():
+                state.last_ctrl_c = 0.0
+                return
             now = time.monotonic()
             if now - state.last_ctrl_c < 0.5:
                 raise KeyboardInterrupt
             state.last_ctrl_c = now
             screen.write_status_hint("Press Ctrl-C again to quit")
+            return
+
+        if key == KEY_ESC:
+            # Esc in normal mode clears any lingering search highlights
+            # (vim's :nohlsearch). Leaves pattern/match_idx untouched so
+            # n/N can still re-trigger the last search if desired — just
+            # drops the highlighted-span set that the renderer consults.
+            if state.search_matches:
+                state.search_matches = []
+                state.search_match_idx = -1
+                screen._refresh_all()
             return
 
     # ── Insert mode ───────────────────────────────────────────────────────────
@@ -452,6 +461,10 @@ class ModeHandler:
                 screen._cursor_pos = 0
                 state.last_ctrl_c = 0.0
                 screen._refresh_input()
+                return
+            handler = getattr(screen, '_interrupt_handler', None)
+            if handler is not None and handler():
+                state.last_ctrl_c = 0.0
                 return
             now = time.monotonic()
             if now - state.last_ctrl_c < 0.5:
@@ -798,37 +811,116 @@ class ModeHandler:
 
     # ── Search mode ───────────────────────────────────────────────────────────
 
+    def _enter_search(self, state: TUIState, screen, direction: int) -> None:
+        """Start SEARCH mode, snapshotting the cursor so Esc can restore it."""
+        state.mode = Mode.SEARCH
+        state.search_direction = direction
+        state.search_buf = []
+        state.search_matches = []
+        state.search_match_idx = -1
+        state.search_pattern = ''
+        state.search_origin_row = state.cursor_row
+        state.search_origin_col = state.cursor_col
+        state.search_origin_viewport = state.viewport_offset
+        screen._refresh_all()
+
+    def _cancel_search(self, state: TUIState, screen) -> None:
+        """Discard incremental search and restore the cursor to its origin."""
+        state.search_buf = []
+        state.search_matches = []
+        state.search_match_idx = -1
+        state.search_pattern = ''
+        state.cursor_row = state.search_origin_row
+        state.cursor_col = state.search_origin_col
+        state.viewport_offset = state.search_origin_viewport
+        state.mode = Mode.NORMAL
+        screen._refresh_all()
+
     def _handle_search(self, key: str, state: TUIState, screen) -> None:
         if key == KEY_ESC:
-            state.mode = Mode.NORMAL
-            screen._refresh_all()
+            self._cancel_search(state, screen)
             return
 
         if key in KEY_ENTER:
             pattern = ''.join(state.search_buf)
+            if not pattern:
+                # Empty pattern: behave like cancel (vim would reuse last
+                # pattern, but we don't track one here).
+                self._cancel_search(state, screen)
+                return
             state.search_pattern = pattern
-            state.search_matches = screen._buffer.search(pattern)
-            state.search_match_idx = -1
             state.mode = Mode.NORMAL
-            # Jump to first match
-            if state.search_matches:
-                self._search_next(state, screen, state.search_direction)
-            else:
-                screen._refresh_all()
+            screen._refresh_all()
             return
 
         if key == KEY_BACKSPACE:
             if state.search_buf:
                 state.search_buf.pop()
-                screen._refresh_all()
+                self._search_incremental(state, screen)
             else:
-                state.mode = Mode.NORMAL
-                screen._refresh_all()
+                self._cancel_search(state, screen)
             return
 
         if len(key) == 1 and ord(key) >= 32:
             state.search_buf.append(key)
+            self._search_incremental(state, screen)
+
+    def _search_incremental(self, state: TUIState, screen) -> None:
+        """Recompute matches for the in-progress pattern and jump the cursor.
+
+        Runs on every keystroke while in SEARCH mode. The cursor moves to
+        the first match in state.search_direction starting from the saved
+        origin so extending/shortening the pattern always lands on the
+        match a user would expect from the original position — not from
+        wherever the previous keystroke parked us.
+        """
+        pattern = ''.join(state.search_buf)
+        if not pattern:
+            state.search_pattern = ''
+            state.search_matches = []
+            state.search_match_idx = -1
+            state.cursor_row = state.search_origin_row
+            state.cursor_col = state.search_origin_col
+            state.viewport_offset = state.search_origin_viewport
             screen._refresh_all()
+            return
+
+        state.search_pattern = pattern
+        matches = screen._buffer.search(pattern)
+        state.search_matches = matches
+
+        if not matches:
+            state.search_match_idx = -1
+            state.cursor_row = state.search_origin_row
+            state.cursor_col = state.search_origin_col
+            state.viewport_offset = state.search_origin_viewport
+            screen._refresh_all()
+            return
+
+        origin = (state.search_origin_row, state.search_origin_col)
+        if state.search_direction > 0:
+            idx = next(
+                (i for i, (r, s, _) in enumerate(matches) if (r, s) >= origin),
+                0,  # wrap
+            )
+        else:
+            idx = next(
+                (i for i in range(len(matches) - 1, -1, -1)
+                 if (matches[i][0], matches[i][1]) <= origin),
+                len(matches) - 1,  # wrap
+            )
+        state.search_match_idx = idx
+        row, start, _ = matches[idx]
+        state.cursor_row = row
+        state.cursor_col = start
+
+        content_rows = screen._layout.content_rows
+        if state.cursor_row < state.viewport_offset:
+            state.viewport_offset = state.cursor_row
+        elif state.cursor_row >= state.viewport_offset + content_rows:
+            state.viewport_offset = state.cursor_row - content_rows + 1
+
+        screen._refresh_all()
 
     # ── Scroll helpers ────────────────────────────────────────────────────────
 
@@ -864,29 +956,31 @@ class ModeHandler:
         screen._refresh_all()
 
     def _search_next(self, state: TUIState, screen, direction: int) -> None:
+        # After Esc cleared the highlights, matches is empty but the
+        # pattern is still set — recompute so n/N re-triggers the search,
+        # like vim does after :nohlsearch.
+        if not state.search_matches and state.search_pattern:
+            state.search_matches = screen._buffer.search(state.search_pattern)
+            state.search_match_idx = -1
         if not state.search_matches:
             return
+        cur = (state.cursor_row, state.cursor_col)
+        matches = state.search_matches
         if direction > 0:
-            # Find next match after cursor
-            for i, m in enumerate(state.search_matches):
-                if m > state.cursor_row:
-                    state.search_match_idx = i
-                    state.cursor_row = m
-                    break
-            else:
-                # Wrap around
-                state.search_match_idx = 0
-                state.cursor_row = state.search_matches[0]
+            idx = next(
+                (i for i, (r, s, _) in enumerate(matches) if (r, s) > cur),
+                0,  # wrap
+            )
         else:
-            # Find previous match before cursor
-            for i in range(len(state.search_matches) - 1, -1, -1):
-                if state.search_matches[i] < state.cursor_row:
-                    state.search_match_idx = i
-                    state.cursor_row = state.search_matches[i]
-                    break
-            else:
-                state.search_match_idx = len(state.search_matches) - 1
-                state.cursor_row = state.search_matches[-1]
+            idx = next(
+                (i for i in range(len(matches) - 1, -1, -1)
+                 if (matches[i][0], matches[i][1]) < cur),
+                len(matches) - 1,  # wrap
+            )
+        state.search_match_idx = idx
+        row, start, _ = matches[idx]
+        state.cursor_row = row
+        state.cursor_col = start
 
         # Ensure cursor is visible
         content_rows = screen._layout.content_rows

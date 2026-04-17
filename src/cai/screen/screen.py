@@ -28,7 +28,6 @@ from .ansi import (
     ERASE_SCREEN, ERASE_LINE,
     ALT_ENTER, ALT_EXIT,
     cur_move,
-    KEY_CTRL_C,
 )
 from .state import Mode, TUIState, _SubmitException, _CommandException
 from .buffer import ContentBuffer
@@ -104,8 +103,15 @@ class Screen:
 
         self._render_lock = threading.RLock()
         self._interrupt_event = threading.Event()
-        self._listener_active = False
-        self._listener_thread: 'threading.Thread | None' = None
+
+        # Optional callback invoked on Ctrl-C when the input buffer is empty.
+        # Returning True signals that the event was handled (e.g. the LLM was
+        # interrupted) and the default double-tap quit logic should be skipped.
+        self._interrupt_handler = None
+
+        # Set by the caller (cli.py) while an LLM response is in flight so
+        # the TUI can distinguish "interrupt LLM" from "quit" on Ctrl-C.
+        self._busy: bool = False
 
         # Track whether new content arrived while user is scrolled up
         self._new_content_below: bool = False
@@ -190,6 +196,11 @@ class Screen:
 
             if self._state.auto_scroll:
                 self._state.viewport_offset = max(0, total - content_rows)
+                # Pin the cursor to the tail while following the stream —
+                # otherwise G drops cursor_row on the old bottom and each
+                # new line pushes the viewport past it, stranding the
+                # block cursor above the viewport.
+                self._state.cursor_row = max(0, total - 1)
                 self._new_content_below = False
             else:
                 self._new_content_below = True
@@ -199,6 +210,20 @@ class Screen:
             if now - self._last_render_time >= 0.016:
                 self._refresh_content()
                 self._refresh_status()
+                # While the user is actively at the prompt, re-render the
+                # input area so their cursor stays parked where they're
+                # typing instead of jumping into the content viewport
+                # every time the LLM streams another chunk. In NORMAL/VISUAL
+                # modes position_cursor parks the block cursor in the
+                # content area instead of the prompt.
+                if self._in_prompt:
+                    self._refresh_input()
+                    self._layout.position_cursor(
+                        self._state.mode,
+                        self._state.cursor_row,
+                        self._state.viewport_offset,
+                        self._state.cursor_col,
+                    )
                 sys.stdout.flush()
                 self._last_render_time = now
                 self._write_pending = False
@@ -260,15 +285,19 @@ class Screen:
         """
         self._cmd_completions = dict(completions)
 
-    def show_prompt_placeholder(self, msg: str = '> ') -> None:
-        """Show a dimmed placeholder in the input area during streaming."""
-        self._state.mode = Mode.NORMAL
-        with self._render_lock:
-            self._layout.render_input(
-                [], 0, Mode.NORMAL,
-                self._PROMPT_PREFIX, self._CONT_PREFIX, self._cols,
-            )
-            sys.stdout.flush()
+    def set_interrupt_handler(self, fn) -> None:
+        """Register a Ctrl-C handler invoked when the input buffer is empty.
+
+        The handler should return True if it consumed the interrupt (e.g.
+        cancelled a running LLM response); in that case the TUI skips its
+        double-tap quit logic. Returning False falls through to the normal
+        press-again-to-quit flow.
+        """
+        self._interrupt_handler = fn
+
+    def set_busy(self, busy: bool) -> None:
+        """Mark whether an LLM response is currently in flight."""
+        self._busy = busy
 
     def clear_buffer(self) -> None:
         """Clear the content buffer and refresh."""
@@ -345,6 +374,13 @@ class Screen:
                     with self._render_lock:
                         self._refresh_content()
                         self._refresh_status()
+                        self._refresh_input()
+                        self._layout.position_cursor(
+                            self._state.mode,
+                            self._state.cursor_row,
+                            self._state.viewport_offset,
+                            self._state.cursor_col,
+                        )
                         sys.stdout.flush()
                         self._write_pending = False
                         self._last_render_time = time.monotonic()
@@ -377,9 +413,12 @@ class Screen:
             self._command_result = cmd_result
             return ''
 
-        # Echo submitted text into the content buffer
+        # Clear the input area so the next prompt() call starts clean.
+        # The caller is responsible for echoing the submitted text into
+        # the content buffer at the right time — when prompts are queued
+        # the echo should happen when the LLM actually starts processing
+        # it, not at submit time.
         if result is not None and result.strip():
-            # Clear the input area first to avoid momentary double "> "
             self._input_buf = []
             self._cursor_pos = 0
             with self._render_lock:
@@ -387,7 +426,6 @@ class Screen:
                     [], 0, Mode.NORMAL,
                     self._PROMPT_PREFIX, self._CONT_PREFIX, self._cols,
                 )
-            self.write(f'{msg}{result}\n\n', kind=Screen.USER)
 
         return result  # type: ignore[return-value]
 
@@ -430,123 +468,11 @@ class Screen:
         self._restore_after_overlay()
         return result
 
-    # ── Streaming listener ────────────────────────────────────────────────────
-
-    def start_input_listener(self) -> None:
-        """Start a daemon thread that reads interrupt keys during LLM streaming."""
-        self._interrupt_event.clear()
-        self._listener_active = True
-        # Submitting from INSERT enters NORMAL during streaming. Snap the
-        # block cursor to the bottom of the viewport (right above the
-        # prompt) so the first j/k starts from where the user was typing,
-        # not wherever NORMAL mode was last left.
-        total = self._buffer.line_count()
-        content_rows = self._layout.content_rows
-        self._state.cursor_row = max(0, min(
-            self._state.viewport_offset + content_rows - 1,
-            total - 1,
-        ))
-        self._state.cursor_col = 0
-        self._listener_thread = threading.Thread(
-            target=self._input_listener_loop, daemon=True, name='cai-input-listener'
-        )
-        self._listener_thread.start()
-
-    def stop_input_listener(self) -> None:
-        """Stop the input listener thread and wait for it to exit."""
-        self._listener_active = False
-        if self._listener_thread is not None:
-            self._listener_thread.join(timeout=0.5)
-            self._listener_thread = None
-
-    def _input_listener_loop(self) -> None:
-        from .ansi import KEY_CTRL_D, KEY_CTRL_U, KEY_UP, KEY_DOWN, KEY_ESC
-        old = termios.tcgetattr(self._tty_fd)
-        try:
-            tty.setraw(self._tty_fd)
-            # Set NORMAL mode so navigation keys work during streaming
-            self._state.mode = Mode.NORMAL
-            pending_g = False
-            while self._listener_active:
-                if self._resize_pending:
-                    self._resize_pending = False
-                    with self._render_lock:
-                        self._handle_resize()
-
-                rlist, _, _ = select.select([self._tty_fd], [], [], 0.05)
-
-                # Flush any pending batched writes
-                if self._write_pending:
-                    with self._render_lock:
-                        self._refresh_content()
-                        self._refresh_status()
-                        sys.stdout.flush()
-                        self._write_pending = False
-                        self._last_render_time = time.monotonic()
-
-                if not rlist:
-                    continue
-                key = read_key(self._tty_fd)
-
-                # Ctrl-C signals interrupt to stop streaming
-                if key == KEY_CTRL_C:
-                    self._interrupt_event.set()
-                    continue
-
-                # Handle gg (two-key sequence)
-                if pending_g:
-                    pending_g = False
-                    if key == 'g':
-                        with self._render_lock:
-                            self._state.viewport_offset = 0
-                            self._state.cursor_row = 0
-                            self._state.auto_scroll = False
-                            self._refresh_all()
-                            sys.stdout.flush()
-                        continue
-                    # g + something else: fall through to handle key normally
-
-                # Navigation keys only — no mode changes during streaming
-                if key == 'j' or key == KEY_DOWN:
-                    with self._render_lock:
-                        self._modes._scroll_down(self._state, self, 1)
-                        sys.stdout.flush()
-                elif key == 'k' or key == KEY_UP:
-                    with self._render_lock:
-                        self._modes._scroll_up(self._state, self, 1)
-                        sys.stdout.flush()
-                elif key == KEY_CTRL_D:
-                    with self._render_lock:
-                        half = max(1, self._layout.content_rows // 2)
-                        self._modes._scroll_down(self._state, self, half)
-                        sys.stdout.flush()
-                elif key == KEY_CTRL_U:
-                    with self._render_lock:
-                        half = max(1, self._layout.content_rows // 2)
-                        self._modes._scroll_up(self._state, self, half)
-                        sys.stdout.flush()
-                elif key == 'g':
-                    pending_g = True
-                elif key == 'G':
-                    with self._render_lock:
-                        total = self._buffer.line_count()
-                        content_rows = self._layout.content_rows
-                        self._state.viewport_offset = max(0, total - content_rows)
-                        self._state.cursor_row = max(0, total - 1)
-                        self._state.auto_scroll = True
-                        self._refresh_all()
-                        sys.stdout.flush()
-                elif key == KEY_ESC:
-                    # Esc does nothing special during streaming — already NORMAL
-                    pass
-        finally:
-            termios.tcsetattr(self._tty_fd, termios.TCSADRAIN, old)
-
     # ── Refresh helpers ───────────────────────────────────────────────────────
 
     def _refresh_content(self) -> None:
         """Re-render the content viewport area."""
-        search_set = set(self._state.search_matches) if self._state.search_matches else None
+        search_spans = self._build_search_spans()
         selection = self._build_selection()
 
         self._layout.render_content(
@@ -555,7 +481,7 @@ class Screen:
             self._cols,
             cursor_row=self._state.cursor_row,
             selection=selection,
-            search_matches=search_set,
+            search_spans=search_spans,
             viewport_offset=self._state.viewport_offset,
         )
 
@@ -601,6 +527,15 @@ class Screen:
         )
         sys.stdout.flush()
 
+    def _build_search_spans(self) -> 'dict[int, list[tuple[int, int]]] | None':
+        """Group the flat match list into per-line (start, end) spans."""
+        if not self._state.search_matches:
+            return None
+        spans: dict[int, list[tuple[int, int]]] = {}
+        for row, s, e in self._state.search_matches:
+            spans.setdefault(row, []).append((s, e))
+        return spans
+
     def _build_selection(self):
         """Build the selection tuple for visual mode, or None."""
         if self._state.mode not in (Mode.VISUAL, Mode.VISUAL_LINE):
@@ -617,7 +552,7 @@ class Screen:
     def _refresh_all(self) -> None:
         """Full screen redraw."""
         self._layout.update_input_height(self._input_buf, self._PROMPT_PREFIX, self._CONT_PREFIX)
-        search_set = set(self._state.search_matches) if self._state.search_matches else None
+        search_spans = self._build_search_spans()
         selection = self._build_selection()
         self._layout.render_all(
             self._buffer._lines,
@@ -630,7 +565,7 @@ class Screen:
             self._CONT_PREFIX,
             search_buf=self._state.search_buf if self._state.mode == Mode.SEARCH else None,
             search_direction=self._state.search_direction,
-            search_matches=search_set,
+            search_spans=search_spans,
             selection=selection,
             total_lines=self._buffer.line_count(),
             command_buf=self._state.command_buf,

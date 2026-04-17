@@ -1,6 +1,7 @@
 import argparse
 import argcomplete
 import json
+import queue as _queue
 import sys
 import os
 import re
@@ -788,19 +789,56 @@ def action_interactive(args, available_tools):
     })
 
     last_ctx = [""]
+    llm_state = {"phase": "ready"}
+    message_queue: _queue.Queue = _queue.Queue()
 
-    def _status(text=None):
-        ctx_part = f" | {last_ctx[0]}" if last_ctx[0] else ""
-        screen.set_status(f"{args.model}{ctx_part}")
+    def _drain_queue():
+        while True:
+            try:
+                message_queue.get_nowait()
+                message_queue.task_done()
+            except _queue.Empty:
+                return
+
+    def _refresh_status_line():
+        parts = [args.model]
+        if last_ctx[0]:
+            parts.append(last_ctx[0])
+        phase = llm_state.get("phase") or ""
+        if phase:
+            parts.append(phase)
+        qsize = message_queue.qsize()
+        if qsize:
+            parts.append(f"queued:{qsize}")
+        screen.set_status(" | ".join(parts))
 
     def status_callback(text=None):
-        _status()
+        if text is not None:
+            # llm.py emits "[turn N] foo(args), bar(args)" when tool calls
+            # are dispatched. The detail is noisy on the status line —
+            # collapse it to a short label. Details still show up in the
+            # content buffer via tool_callback.
+            if text.startswith("[turn "):
+                text = "calling tools"
+            llm_state["phase"] = text
+        _refresh_status_line()
 
     def ctx_cb(ctx_str):
         last_ctx[0] = ctx_str
-        _status()
+        _refresh_status_line()
+
+    def _mark_thinking():
+        # llm.py emits "calling tools" when dispatching tool calls but
+        # never re-announces that it's back to generating a response,
+        # so "calling tools" would otherwise stick on the status line
+        # for the rest of the turn. As soon as we see content or
+        # reasoning chunks streaming back, flip the phase.
+        if llm_state["phase"] != "thinking...":
+            llm_state["phase"] = "thinking..."
+            _refresh_status_line()
 
     def stream_cb(chunk):
+        _mark_thinking()
         screen.write(chunk, kind=Screen.LLM)
 
     _reasoning_buf = []
@@ -808,6 +846,7 @@ def action_interactive(args, available_tools):
     def reasoning_cb(chunk):
         if chunk is None:
             return  # next write's kind handles the transition
+        _mark_thinking()
         _reasoning_buf.append(chunk)
         screen.write(chunk, kind=Screen.REASONING)
 
@@ -819,70 +858,131 @@ def action_interactive(args, available_tools):
 
     openai_api.error_cb = api_error_cb
 
-    try:
-        pending_input = args.prompt  # seed loop with initial prompt if provided
+    def _on_interrupt() -> bool:
+        """Ctrl-C from the prompt — interrupt the in-flight LLM call and
+        drop everything still queued. Returning True tells the TUI the
+        event was consumed (skip its press-again-to-quit logic)."""
+        if screen._busy or message_queue.qsize() > 0:
+            _drain_queue()
+            screen._interrupt_event.set()
+            llm_state["phase"] = "interrupting..."
+            _refresh_status_line()
+            return True
+        return False
 
-        # Main interactive loop
-        _status("ready")
+    screen.set_interrupt_handler(_on_interrupt)
+
+    def llm_worker():
         while True:
-            if pending_input is not None:
-                user_input = pending_input
-                pending_input = None
-                if user_input.strip():
-                    screen._history.insert(0, user_input)
-                screen.write(f"> {user_input}\n\n", kind=Screen.USER)
-            else:
-                user_input = screen.prompt("> ")
-            if screen._command_result is not None:
-                _handle_interactive_cmd(screen._command_result, screen, messages, args, status_callback, last_ctx)
-                screen._command_result = None
+            user_input = message_queue.get()
+            if user_input is None:
+                message_queue.task_done()
+                return
+            if screen._interrupt_event.is_set():
+                # Queue was drained by an interrupt; skip stragglers.
+                message_queue.task_done()
+                if message_queue.qsize() == 0:
+                    screen.set_busy(False)
+                    _refresh_status_line()
                 continue
-            if not user_input.strip():
-                continue
-            messages.append({"role": "user", "content": user_input})
-            status_callback("thinking...")
-            screen.show_prompt_placeholder("> ")
-            screen.start_input_listener()
+            screen._interrupt_event.clear()
+            llm_state["phase"] = "thinking..."
+            _refresh_status_line()
+            # Echo the prompt into the content buffer now — at the moment
+            # the LLM actually starts working on it — rather than at submit
+            # time. For queued prompts this keeps the conversation log in
+            # the same order the LLM sees them.
+            screen.write(f"> {user_input}\n\n", kind=Screen.USER)
             _tools_str = ", ".join(sorted(getattr(args, 'selected_tools', set()) or [])) or "none"
             _cai_logger.log(1, (
                 f"USER  model={args.model}  max_turns={getattr(args, 'max_turns', None)}  "
                 f"tools=[{_tools_str}]\n{user_input}"
             ))
             try:
+                messages.append({"role": "user", "content": user_input})
                 _cai_logger.push_nest(1)
                 _reasoning_buf.clear()
-                response = call_llm(messages, args, available_tools,
-                                    stream_callback=stream_cb,
-                                    status_callback=status_callback,
-                                    tool_callback=tool_cb,
-                                    ctx_callback=ctx_cb,
-                                    interrupt_event=screen._interrupt_event,
-                                    reasoning_callback=reasoning_cb)
-                _cai_logger.pop_nest(1)
+                try:
+                    response = call_llm(messages, args, available_tools,
+                                        stream_callback=stream_cb,
+                                        status_callback=status_callback,
+                                        tool_callback=tool_cb,
+                                        ctx_callback=ctx_cb,
+                                        interrupt_event=screen._interrupt_event,
+                                        reasoning_callback=reasoning_cb)
+                finally:
+                    _cai_logger.pop_nest(1)
                 if screen._interrupt_event.is_set():
                     screen.write("\n[interrupted]\n\n", kind=Screen.META)
-                    status_callback("interrupted")
-                    continue
-                screen.write("\n", kind=Screen.DEFAULT)
-                assistant_msg = {"role": "assistant", "content": response}
-                if _reasoning_buf:
-                    assistant_msg['_reasoning'] = ''.join(_reasoning_buf)
-                messages.append(assistant_msg)
+                    llm_state["phase"] = "interrupted"
+                    _drain_queue()
+                    screen._interrupt_event.clear()
+                else:
+                    screen.write("\n", kind=Screen.DEFAULT)
+                    assistant_msg = {"role": "assistant", "content": response}
+                    if _reasoning_buf:
+                        assistant_msg['_reasoning'] = ''.join(_reasoning_buf)
+                    messages.append(assistant_msg)
             except LLMError as e:
-                _cai_logger.pop_nest(1)
                 screen.write(f"\n[error] {e}\n\n", kind=Screen.ERROR)
-                status_callback("error")
-            except BaseException:
-                _cai_logger.pop_nest(1)
-                raise
+                llm_state["phase"] = "error"
+            except Exception as e:
+                log.exception("llm_worker: unhandled error")
+                screen.write(f"\n[error] {e}\n\n", kind=Screen.ERROR)
+                llm_state["phase"] = "error"
             finally:
-                screen.stop_input_listener()
+                message_queue.task_done()
+                if message_queue.qsize() == 0:
+                    screen.set_busy(False)
+                    if llm_state["phase"] not in ("interrupted", "error"):
+                        llm_state["phase"] = "ready"
+                _refresh_status_line()
+
+    worker = threading.Thread(target=llm_worker, daemon=True, name='cai-llm-worker')
+    worker.start()
+
+    def _queue_prompt(user_input: str) -> None:
+        if not user_input.strip():
+            return
+        # Set busy before enqueueing so Ctrl-C in the handoff window between
+        # the worker dequeuing and entering call_llm still routes through
+        # _on_interrupt instead of the press-again-to-quit path.
+        screen.set_busy(True)
+        message_queue.put(user_input)
+        _refresh_status_line()
+
+    try:
+        _refresh_status_line()
+
+        # Seed with initial --prompt if provided. The worker echoes it
+        # into the content buffer when it actually starts processing.
+        if args.prompt:
+            seed = args.prompt
+            if seed.strip():
+                screen._history.insert(0, seed)
+                _queue_prompt(seed)
+
+        while True:
+            user_input = screen.prompt("> ")
+            if screen._command_result is not None:
+                _handle_interactive_cmd(screen._command_result, screen, messages, args, status_callback, last_ctx)
+                screen._command_result = None
+                _refresh_status_line()
+                continue
+            # prompt() has already echoed the submission into the content
+            # buffer; just queue it for the worker and keep looping so the
+            # user can type the next prompt immediately.
+            _queue_prompt(user_input)
 
     except (KeyboardInterrupt, EOFError):
         screen.write("\n[exiting]\n", kind=Screen.META)
     finally:
+        screen._interrupt_event.set()
+        _drain_queue()
+        message_queue.put(None)
         openai_api.error_cb = None
         screen.close()
+        worker.join(timeout=1.0)
 
 
 def main():

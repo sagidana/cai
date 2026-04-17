@@ -26,6 +26,7 @@ class TUIState:
         'visual_anchor_row', 'visual_anchor_col', 'cursor_col',
         'search_direction', 'search_buf', 'search_pattern',
         'search_matches', 'search_match_idx',
+        'search_origin_row', 'search_origin_col', 'search_origin_viewport',
         'command_buf', 'command_cursor',
         'pending_key', 'auto_scroll', 'yank_register',
         'last_ctrl_c',
@@ -49,6 +50,12 @@ class TUIState:
         self.search_pattern: str = ''
         self.search_matches: list[int] = []   # line indices
         self.search_match_idx: int = -1
+
+        # Origin saved when entering SEARCH mode so Esc can restore
+        # cursor/viewport if the user cancels mid-pattern.
+        self.search_origin_row: int = 0
+        self.search_origin_col: int = 0
+        self.search_origin_viewport: int = 0
 
         # command mode
         self.command_buf: list[str] = []
