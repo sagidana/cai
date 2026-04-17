@@ -86,6 +86,48 @@ def _motion_e(plain: str, col: int) -> int:
     return col
 
 
+def _motion_W(plain: str, col: int) -> int:
+    """Return column after moving forward one WORD (vim `W`). WORDs are whitespace-delimited."""
+    n = len(plain)
+    if col >= n:
+        return col
+    while col < n and not plain[col].isspace():
+        col += 1
+    while col < n and plain[col].isspace():
+        col += 1
+    return col
+
+
+def _motion_B(plain: str, col: int) -> int:
+    """Return column after moving backward one WORD (vim `B`)."""
+    n = len(plain)
+    if n == 0 or col <= 0:
+        return 0
+    col = min(col, n) - 1
+    while col > 0 and plain[col].isspace():
+        col -= 1
+    if col <= 0:
+        return 0
+    while col > 0 and not plain[col - 1].isspace():
+        col -= 1
+    return col
+
+
+def _motion_E(plain: str, col: int) -> int:
+    """Return column after moving to end of WORD (vim `E`)."""
+    n = len(plain)
+    if col >= n - 1:
+        return max(0, n - 1)
+    col += 1
+    while col < n and plain[col].isspace():
+        col += 1
+    if col >= n:
+        return max(0, n - 1)
+    while col + 1 < n and not plain[col + 1].isspace():
+        col += 1
+    return col
+
+
 def _textobj_inner_word(plain: str, col: int, big_word: bool = False) -> tuple[int, int] | None:
     """Return (start_col, end_col) for inner word under cursor."""
     if not plain or col >= len(plain):
@@ -340,16 +382,8 @@ class ModeHandler:
             self._enter_search(state, screen, direction=-1)
             return
 
-        if key == 'w':
-            self._word_motion(state, screen, 'w')
-            return
-
-        if key == 'b':
-            self._word_motion(state, screen, 'b')
-            return
-
-        if key == 'e':
-            self._word_motion(state, screen, 'e')
+        if key in ('w', 'W', 'b', 'B', 'e', 'E'):
+            self._word_motion(state, screen, key)
             return
 
         if key == '0':
@@ -644,16 +678,8 @@ class ModeHandler:
             screen._refresh_all()
             return
 
-        if key == 'w':
-            self._word_motion(state, screen, 'w')
-            return
-
-        if key == 'b':
-            self._word_motion(state, screen, 'b')
-            return
-
-        if key == 'e':
-            self._word_motion(state, screen, 'e')
+        if key in ('w', 'W', 'b', 'B', 'e', 'E'):
+            self._word_motion(state, screen, key)
             return
 
         if key == '0':
@@ -993,7 +1019,7 @@ class ModeHandler:
     # ── Word motions ─────────────────────────────────────────────────────────
 
     def _word_motion(self, state: TUIState, screen, motion: str) -> None:
-        """Execute w/b/e motion, crossing line boundaries."""
+        """Execute w/b/e/W/B/E motion, crossing line boundaries."""
         buf = screen._buffer
         total = buf.line_count()
         if total == 0:
@@ -1001,8 +1027,12 @@ class ModeHandler:
         plain = buf.get_plain_text(state.cursor_row)
         col = min(state.cursor_col, max(0, len(plain) - 1)) if plain else 0
 
-        if motion == 'w':
-            new_col = _motion_w(plain, col)
+        fwd = {'w': _motion_w, 'W': _motion_W}
+        back = {'b': _motion_b, 'B': _motion_B}
+        end = {'e': _motion_e, 'E': _motion_E}
+
+        if motion in fwd:
+            new_col = fwd[motion](plain, col)
             if new_col >= len(plain) and state.cursor_row + 1 < total:
                 state.cursor_row += 1
                 plain = buf.get_plain_text(state.cursor_row)
@@ -1010,15 +1040,15 @@ class ModeHandler:
                 while new_col < len(plain) and plain[new_col].isspace():
                     new_col += 1
             state.cursor_col = min(new_col, max(0, len(plain) - 1)) if plain else 0
-        elif motion == 'b':
-            new_col = _motion_b(plain, col)
+        elif motion in back:
+            new_col = back[motion](plain, col)
             if new_col == 0 and col == 0 and state.cursor_row > 0:
                 state.cursor_row -= 1
                 plain = buf.get_plain_text(state.cursor_row)
                 new_col = max(0, len(plain) - 1) if plain else 0
             state.cursor_col = new_col
-        elif motion == 'e':
-            new_col = _motion_e(plain, col)
+        elif motion in end:
+            new_col = end[motion](plain, col)
             if new_col <= col and state.cursor_row + 1 < total:
                 state.cursor_row += 1
                 plain = buf.get_plain_text(state.cursor_row)
@@ -1026,7 +1056,7 @@ class ModeHandler:
                     new_col = 0
                     while new_col < len(plain) and plain[new_col].isspace():
                         new_col += 1
-                    new_col = _motion_e(plain, new_col)
+                    new_col = end[motion](plain, new_col)
                 else:
                     new_col = 0
             state.cursor_col = new_col
