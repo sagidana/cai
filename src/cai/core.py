@@ -277,3 +277,27 @@ def assemble_system_prompt(config: dict, task_mode, skill_prompts) -> str:
         parts.append(MODE_BLOCKS[task_mode])
     parts.extend(skill_prompts)
     return "\n\n".join(parts)
+
+
+def compose_system_prompt(config: dict, base, task_mode, skill_prompts) -> str:
+    """Tri-state composition of a system prompt.
+
+    - ``base is None`` → use the default CAI prompt + mode block + skills
+      (same behaviour as :func:`assemble_system_prompt`).
+    - ``base == ""``   → empty string. No mode block, no skills — the caller
+      explicitly wanted nothing.
+    - ``base`` is a non-empty string → ``base`` + mode block + skills.
+
+    Single source of truth for composing the system prompt; called from
+    Harness.__init__, Harness.load, and the CLI :skill / :load handlers so
+    that skill mutations reuse identical logic.
+    """
+    if base == "":
+        return ""
+    if base is None:
+        return assemble_system_prompt(config, task_mode, skill_prompts)
+    parts = [base]
+    if task_mode and task_mode in MODE_BLOCKS:
+        parts.append(MODE_BLOCKS[task_mode])
+    parts.extend(skill_prompts)
+    return "\n\n".join(parts)

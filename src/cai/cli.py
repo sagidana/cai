@@ -356,8 +356,14 @@ def _load_context(path, args, merge_tools=False):
     skill_tools, skill_prompts = core.load_skills(args.skill)
     args.selected_tools |= skill_tools
 
-    task_mode = getattr(args, 'mode', 'research')
-    new_system = core.assemble_system_prompt(config, task_mode, skill_prompts)
+    # v2 flows carry system_prompt_base (the user-supplied base passed to
+    # Harness(system_prompt=...)). v1 and CLI-saved flows omit it — falling
+    # back to None preserves the old "rebuild from config defaults" path.
+    args.system_prompt_base = settings.get("system_prompt_base")
+
+    task_mode = settings.get("task_mode") or getattr(args, 'mode', 'research')
+    new_system = core.compose_system_prompt(
+        config, args.system_prompt_base, task_mode, skill_prompts)
     if messages and messages[0].get('role') == 'system':
         messages[0]['content'] = new_system
     else:
@@ -523,9 +529,11 @@ def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_c
         args.selected_tools = set(manual) if manual is not None else set(getattr(args, '_base_selected_tools', set()))
         skill_tools, skill_prompts = core.load_skills(args.skill)
         args.selected_tools |= skill_tools
-        # Rebuild system message in-place.
+        # Rebuild system message in-place via the shared composer so a
+        # flow-loaded base (if any) survives skill mutations.
         task_mode = getattr(args, 'mode', 'research')
-        new_system = core.assemble_system_prompt(config, task_mode, skill_prompts)
+        base = getattr(args, 'system_prompt_base', None)
+        new_system = core.compose_system_prompt(config, base, task_mode, skill_prompts)
         if messages and messages[0].get('role') == 'system':
             messages[0]['content'] = new_system
         else:
@@ -540,11 +548,14 @@ def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_c
         else:
             import json as _json
             payload = {
-                "version": 1,
+                "version": 2,
                 "messages": messages,
                 "settings": {
-                    "selected_tools": sorted(getattr(args, 'selected_tools', set()) or []),
+                    "system_prompt_base": getattr(args, 'system_prompt_base', None),
+                    "task_mode": getattr(args, 'mode', None),
                     "skills": list(getattr(args, 'skill', []) or []),
+                    "selected_tools": sorted(getattr(args, 'selected_tools', set()) or []),
+                    "model": getattr(args, 'model', None),
                 },
             }
             try:

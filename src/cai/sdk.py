@@ -329,24 +329,18 @@ class Harness:
         if self._functions:
             _cai_tools.register_local_functions(self._functions)
 
-        # 4. Skills: pulls in skill tool names + skill prompts
-        skill_tool_names, skill_prompts = core.load_skills(skills or [])
+        # 4. Skills: pulls in skill tool names + skill prompts.
+        # Retain the *names* so save()/load() can round-trip without baking
+        # the composed system prompt into the flow file.
+        self._skills: list = list(skills or [])
+        skill_tool_names, skill_prompts = core.load_skills(self._skills)
 
-        # 5. Assembled system prompt per tri-state:
-        #    None → default + mode + skills
-        #    ""   → truly empty (nothing, even mode and skills are dropped)
-        #    str  → custom base + mode + skills
-        if system_prompt == "":
-            self._system_prompt = ""
-        elif system_prompt is None:
-            self._system_prompt = core.assemble_system_prompt(
-                ctx.config, task_mode, skill_prompts)
-        else:
-            parts = [system_prompt]
-            if task_mode and task_mode in core.MODE_BLOCKS:
-                parts.append(core.MODE_BLOCKS[task_mode])
-            parts.extend(skill_prompts)
-            self._system_prompt = "\n\n".join(parts)
+        # 5. Assembled system prompt via the shared tri-state composer.
+        # Retain the user-supplied base so skill mutations can recompose
+        # without losing it (and so flow files can round-trip).
+        self._system_prompt_base = system_prompt
+        self._system_prompt = core.compose_system_prompt(
+            ctx.config, system_prompt, task_mode, skill_prompts)
 
         # 6. Tool allowlist. Refresh available_tools after any registrations.
         # Only tools explicitly listed (or pulled in by skills) are exposed —
@@ -595,6 +589,105 @@ class Harness:
                         f"{n_before} \u2192 {len(self.messages)} messages")
         return len(self.messages) != n_before
 
+    # ─── save / load ─────────────────────────────────────────────────────────
+
+    FLOW_VERSION = 2
+
+    def save(self, path: str) -> None:
+        """Persist the harness's conversation + settings to a flow file.
+
+        The payload is JSON with the CLI-compatible schema v2:
+
+        - ``messages`` with the current system prompt prepended at index 0
+          (matches the shape CLI ``:load`` expects).
+        - ``settings.system_prompt_base`` — the *user-supplied* base (what
+          was passed to ``Harness(system_prompt=...)``). ``None`` = default,
+          ``""`` = empty. The fully composed prompt is never stored; it's
+          always re-derived from base + task_mode + skills on load or on
+          skill mutation, so there is one source of truth.
+        - ``settings.task_mode``, ``settings.skills``, ``settings.selected_tools``,
+          ``settings.model``.
+
+        Tools registered via ``functions=`` can't be serialised (Python
+        callables). Their *names* are saved as part of ``selected_tools``,
+        but the caller must re-register the same functions before
+        ``Harness.load`` can dispatch them.
+        """
+        payload = {
+            "version": Harness.FLOW_VERSION,
+            "messages": (
+                [{"role": "system", "content": self._system_prompt}] + list(self.messages)
+                if self._system_prompt
+                else list(self.messages)
+            ),
+            "settings": {
+                "system_prompt_base": self._system_prompt_base,
+                "task_mode": self._task_mode,
+                "skills": list(self._skills),
+                "selected_tools": list(self._tools),
+                "model": self._model,
+            },
+        }
+        with open(path, "w") as f:
+            json.dump(payload, f, indent=2)
+        _cai_logger.log(1, f"FLOW SAVED  harness={self._name!r}  path={path!r}  "
+                        f"messages={len(self.messages)}  tools={len(self._tools)}  "
+                        f"skills={self._skills}")
+
+    @classmethod
+    def load(cls, path: str, *,
+             functions: Optional[list] = None,
+             mcp_servers: Optional[list] = None,
+             name: Optional[str] = None,
+             log_path: Optional[str] = None) -> "Harness":
+        """Construct a new Harness from a flow file.
+
+        Accepts v1 files (CLI-saved without ``system_prompt_base``) and v2
+        files. Missing fields fall back to constructor defaults.
+
+        ``functions=`` / ``mcp_servers=`` / ``name=`` / ``log_path=`` are
+        construction-time concerns that can't be serialised — pass them
+        here if the flow used local functions or non-default MCP servers.
+        Tools listed in the flow but not present in the current registry
+        are logged as a warning and dropped.
+        """
+        with open(path) as f:
+            payload = json.load(f)
+
+        settings = payload.get("settings", {}) or {}
+        messages = list(payload.get("messages", []) or [])
+        # Drop a leading system message — harness owns the composed prompt.
+        if messages and messages[0].get("role") == "system":
+            messages = messages[1:]
+
+        harness = cls(
+            system_prompt=settings.get("system_prompt_base"),
+            skills=settings.get("skills") or [],
+            tools=settings.get("selected_tools") or [],
+            functions=functions,
+            model=settings.get("model"),
+            task_mode=settings.get("task_mode"),
+            mcp_servers=mcp_servers,
+            name=name,
+            log_path=log_path,
+        )
+        harness.messages = messages
+
+        # Warn on tools the flow names but the current registry doesn't expose.
+        requested = set(settings.get("selected_tools") or [])
+        missing = requested - set(harness._tools)
+        if missing:
+            log.warning("Harness.load: tools not available in current registry: %s",
+                        sorted(missing))
+            _cai_logger.log(1, f"FLOW LOAD WARN  harness={harness._name!r}  "
+                            f"missing_tools={sorted(missing)}")
+
+        _cai_logger.log(1, f"FLOW LOADED  harness={harness._name!r}  path={path!r}  "
+                        f"version={payload.get('version', 1)}  "
+                        f"messages={len(harness.messages)}  tools={len(harness._tools)}  "
+                        f"skills={harness._skills}")
+        return harness
+
     # ─── clone ────────────────────────────────────────────────────────────────
 
     def clone(self, *, name: Optional[str] = None) -> "Harness":
@@ -616,6 +709,8 @@ class Harness:
         new._ctx = self._ctx
         new._name = name or f"{self._name}-clone-{next(_harness_seq)}"
         new._functions = list(self._functions)
+        new._skills = list(self._skills)
+        new._system_prompt_base = self._system_prompt_base
         new._system_prompt = self._system_prompt
         new._tools = list(self._tools)
         new._model = self._model
