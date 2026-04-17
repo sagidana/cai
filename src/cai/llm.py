@@ -659,7 +659,11 @@ def call_llm(messages,
 
     call_history = {}  # (tool_name, args_str) -> call count, for stuck detection
 
-    if stream_callback:
+    # strict_format requires the full response before validation/retry, so it
+    # cannot coexist with the streaming path (which emits chunks live and has
+    # no format enforcement). Route to non-streaming whenever strict_format
+    # is set, regardless of stream_callback.
+    if stream_callback and not strict_format:
         run_turn = _run_streaming_turn
     else:
         run_turn = _run_nonstreaming_turn

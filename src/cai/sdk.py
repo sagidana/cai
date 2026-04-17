@@ -480,7 +480,10 @@ class Harness:
 
     # ─── gate ─────────────────────────────────────────────────────────────────
 
-    def gate(self, options: list, prompt: str, *, system_prompt: Optional[str] = None) -> str:
+    def gate(self, options: list, prompt: str,
+             *, system_prompt: Optional[str] = None,
+             tools: Optional[list] = None,
+             skills: Optional[list] = None) -> str:
         """Single-turn strict-format gate: ask a question, get back exactly one
         of ``options``. Wraps the common agent(strict_format=..., ...) idiom
         used for quality checks and routing between harness stages.
@@ -488,6 +491,11 @@ class Harness:
         ``system_prompt`` overrides the default "strict quality gate" persona —
         useful when a stage wants a specific reviewer voice (principal engineer,
         security lead, etc.).
+
+        ``tools`` / ``skills`` append to the harness's own (same semantics as
+        ``agent()``) — let the gate inspect files, run a search, etc. before
+        answering. The strict_format regex still pins the final reply to one
+        of ``options``.
 
         Returns the model's stripped reply, guaranteed to equal one of ``options``.
         """
@@ -500,6 +508,8 @@ class Harness:
             strict_format=f"regex:^({pattern})$",
             system_prompt=system_prompt,
             prompt=prompt,
+            tools=tools,
+            skills=skills,
             name="gate",
         ).wait()
         return r.text.strip()
