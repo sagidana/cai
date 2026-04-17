@@ -499,6 +499,18 @@ def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_c
         if skill_args == ["off"]:
             args.skill = []
         else:
+            # Reject the whole command if any requested skill is unknown —
+            # silently remembering a bogus name is worse than a loud error.
+            available = set(core.list_skill_names())
+            unknown = [s for s in skill_args if s not in available]
+            if unknown:
+                screen.write(
+                    f"[error: unknown skill(s): {', '.join(unknown)} | "
+                    f"available: {', '.join(sorted(available)) or 'none'}]\n",
+                    kind=screen.META,
+                )
+                status_callback("ready")
+                return
             # Append new skills, preserving existing ones (no duplicates).
             existing = getattr(args, 'skill', []) or []
             for s in skill_args:
