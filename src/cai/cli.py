@@ -20,6 +20,7 @@ from cai.llm import (
 )
 import cai.llm as _llm
 from cai.tools import select_tools
+from cai import core
 
 
 global config
@@ -34,10 +35,6 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",
 )
 log = logging.getLogger("cai")
-
-_PROMPTS_DIR = os.path.join(os.path.dirname(__file__), "prompts")
-_SKILLS_DIR  = os.path.join(os.path.dirname(__file__), "skills")
-_USER_SKILLS_DIR = os.path.join(os.path.expanduser("~/.config/cai"), "skills")
 
 # ─── Diagnostic output (stderr, TTY-only) ────────────────────────────────────
 # Diagnostics are dim/faint so the final result is easy to spot.
@@ -80,7 +77,7 @@ def _note_output(text):
 
 def _skills_completer(prefix, **kwargs):
     """Completer for --skill: returns skill names matching the prefix."""
-    return [n for n in _list_skill_names() if n.startswith(prefix)]
+    return [n for n in core.list_skill_names() if n.startswith(prefix)]
 
 def _tools_completer(prefix, **kwargs):
     """Completer for --tools: file paths for external MCPs, tool names for internal."""
@@ -143,65 +140,12 @@ def init():
     global openai_api
     global openrouter_api
 
-    log.info("init: starting")
-
-    import cai.api as _cai_api
-    import cai.tools as _cai_tools
-    OpenAiApi = _cai_api.OpenAiApi
-    OpenRouterApi = _cai_api.OpenRouterApi
-    _cai_tools.register_server(_cai_tools.INTERNAL_SERVER)
-
-    config_dir = os.path.expanduser("~/.config/cai")
-    if not os.path.exists(config_dir):
-        os.makedirs(config_dir)
-
-    config_path = os.path.join(config_dir, "config.json")
-    if not os.path.exists(config_path):
-        default_config = {
-            "base_url": "https://openrouter.ai/api/v1",
-            "model": "arcee-ai/trinity-mini:free",
-            "observation_mask_pct": 0.60,
-            "observation_mask_keep": 3,
-            "context_budget_pct": 0.75,
-            "tool_result_max_chars": 40000,
-            "ssl_verify": True,
-            "stuck_detection": False,
-            "model_profiles": {k: dict(v) for k, v in MODEL_PROFILES.items()}
-        }
-        with open(config_path, "w") as f:
-            json.dump(default_config, f, indent=2)
-        print(f"[*] Created default config at {config_path}")
-
-    api_key_path = os.path.join(config_dir, "api_key")
-    if not os.path.exists(api_key_path):
-        with open(api_key_path, "w") as f:
-            f.write("")
-        print(f"[*] Created empty api_key file at {api_key_path}")
-
-    config = json.loads(open(config_path).read())
-
-    # Backfill keys added in newer versions so existing configs stay up-to-date.
-    updated = False
-    if 'ssl_verify' not in config:
-        config['ssl_verify'] = True
-        updated = True
-    if 'prompt_mode' not in config:
-        config['prompt_mode'] = 'local'
-        updated = True
-    if 'stuck_detection' not in config:
-        config['stuck_detection'] = False
-        updated = True
-    if updated:
-        with open(config_path, "w") as f:
-            json.dump(config, f, indent=2)
-
-    available_tools = _cai_tools.get_all_tools()
-    api_key = open(api_key_path).read().strip()
-    openai_api = OpenAiApi(config.get('base_url'), api_key, ssl_verify=config.get('ssl_verify', True))
-    openrouter_api = OpenRouterApi(api_key)
-    log.info("init: done (base_url=%s, available_tools=%d)", config.get('base_url'), len(available_tools))
-
-    _llm.setup(config, openai_api, _cai_tools.call_tool, diag_fn=_diag)
+    ctx = core.bootstrap(diag_fn=_diag)
+    config = ctx.config
+    api_key = ctx.api_key
+    openai_api = ctx.openai_api
+    openrouter_api = ctx.openrouter_api
+    available_tools = ctx.available_tools
 
     # models = openrouter_api.get_models()
     # stats = openrouter_api.get_account_stats()
@@ -335,118 +279,6 @@ def _read_file_numbered(path):
     with open(path) as f:
         return "".join(f"{i + 1}: {line}" for i, line in enumerate(f))
 
-def _list_skill_names():
-    """Return sorted list of available skill names (built-in + user)."""
-    names = set()
-    for d in (_SKILLS_DIR, _USER_SKILLS_DIR):
-        if os.path.isdir(d):
-            for f in os.listdir(d):
-                if f.endswith('.md'):
-                    names.add(f[:-3])
-    return sorted(names)
-
-def _parse_skill_file(text):
-    """Parse a skill markdown file into (tools: set[str], prompt: str).
-
-    Format:
-        tools: tool_a, tool_b
-        ---
-        ## Skill: Name
-        ...prompt body...
-
-    Everything before the first '---' line is metadata (key: value).
-    Everything after is the prompt body. If no '---' is present the whole
-    file is treated as the prompt body with no tool declarations.
-    """
-    tools: set[str] = set()
-    if '\n---\n' in text:
-        header, _, body = text.partition('\n---\n')
-        for line in header.splitlines():
-            if ':' not in line:
-                continue
-            key, _, val = line.partition(':')
-            if key.strip().lower() == 'tools':
-                tools = {t.strip() for t in val.split(',') if t.strip()}
-        return tools, body.strip()
-    return tools, text.strip()
-
-def _load_skills(names):
-    """Load and parse skill files by name.
-
-    Search order per name: user skills dir first, then built-in package dir.
-    Returns (all_tools: set[str], prompts: list[str]).
-    Unknown skill names are logged as warnings and skipped.
-    """
-    all_tools: set[str] = set()
-    prompts: list[str] = []
-    for name in names:
-        candidates = [
-            os.path.join(_USER_SKILLS_DIR, f"{name}.md"),
-            os.path.join(_SKILLS_DIR, f"{name}.md"),
-        ]
-        for path in candidates:
-            try:
-                with open(path) as f:
-                    tools, prompt = _parse_skill_file(f.read())
-                all_tools |= tools
-                if prompt:
-                    prompts.append(prompt)
-                log.info("_load_skills: loaded %r from %s (tools=%s)", name, path, tools)
-                break
-            except OSError:
-                continue
-        else:
-            log.warning("_load_skills: skill %r not found in %s or %s",
-                        name, _USER_SKILLS_DIR, _SKILLS_DIR)
-    return all_tools, prompts
-
-_MODE_BLOCKS = {
-    'research': (
-        "## Current Task Mode: Research\n"
-        "Your primary focus is investigation and analysis. Prioritize forming "
-        "hypotheses, gathering evidence, and stating confidence levels. "
-        "Treat development steps as secondary unless explicitly needed.\n"
-    ),
-    'dev': (
-        "## Current Task Mode: Development\n"
-        "Your primary focus is implementation and planning. Prioritize reading "
-        "existing code, making targeted edits, and producing a clear plan before "
-        "building. Treat research steps as secondary unless explicitly needed.\n"
-    ),
-}
-
-def _load_cai_prompt():
-    """Load the base cai system prompt from disk based on config prompt_mode.
-
-    Reads either prompts/local.md or prompts/sota.md from the package directory.
-    Falls back to the mid-tier agentic prompt if the file cannot be read.
-    Mode and skill blocks are assembled by the caller so they appear after the
-    base prompt (recency bias — more specific instructions carry more weight).
-    """
-    prompt_mode = config.get('prompt_mode', 'local')
-    if prompt_mode not in ('local', 'sota'):
-        log.warning("_load_cai_prompt: unknown prompt_mode %r, falling back to 'local'", prompt_mode)
-        prompt_mode = 'local'
-    prompt_path = os.path.join(_PROMPTS_DIR, f"{prompt_mode}.md")
-    try:
-        with open(prompt_path) as f:
-            return f.read()
-    except OSError as e:
-        log.error("_load_cai_prompt: cannot read %s: %s", prompt_path, e)
-        return AGENTIC_SYSTEM_PROMPTS.get('mid')
-
-def _assemble_system_prompt(task_mode, skill_prompts):
-    """Assemble the full system prompt in specificity order.
-
-    Order: base → mode block → skill prompts
-    Most specific instructions last so they take precedence via recency bias.
-    """
-    parts = [_load_cai_prompt()]
-    if task_mode and task_mode in _MODE_BLOCKS:
-        parts.append(_MODE_BLOCKS[task_mode])
-    parts.extend(skill_prompts)
-    return "\n\n".join(parts)
-
 def _build_base_messages(args, stdin_content=None):
     """Build the initial messages list (system prompt, stdin, file, cursor)."""
     messages = []
@@ -457,12 +289,12 @@ def _build_base_messages(args, stdin_content=None):
         log.info("_build_base_messages: --naked mode, skipping default system prompt")
     else:
         skill_names = getattr(args, 'skill', []) or []
-        skill_tools, skill_prompts = _load_skills(skill_names)
+        skill_tools, skill_prompts = core.load_skills(skill_names)
         if skill_tools:
             args.selected_tools |= skill_tools
 
         task_mode = getattr(args, 'mode', 'research')
-        messages.append({"role": "system", "content": _assemble_system_prompt(task_mode, skill_prompts)})
+        messages.append({"role": "system", "content": core.assemble_system_prompt(config, task_mode, skill_prompts)})
         log.info("_build_base_messages: system prompt assembled "
                  "(prompt_mode=%s, task_mode=%s, skills=%s)",
                  config.get('prompt_mode', 'local'), task_mode, skill_names)
@@ -521,11 +353,11 @@ def _load_context(path, args, merge_tools=False):
     flow_skills = settings.get("skills", [])
     existing_skills = set(getattr(args, 'skill', []) or [])
     args.skill = list(existing_skills | set(flow_skills))
-    skill_tools, skill_prompts = _load_skills(args.skill)
+    skill_tools, skill_prompts = core.load_skills(args.skill)
     args.selected_tools |= skill_tools
 
     task_mode = getattr(args, 'mode', 'research')
-    new_system = _assemble_system_prompt(task_mode, skill_prompts)
+    new_system = core.assemble_system_prompt(config, task_mode, skill_prompts)
     if messages and messages[0].get('role') == 'system':
         messages[0]['content'] = new_system
     else:
@@ -659,7 +491,7 @@ def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_c
     elif cmd == "" or cmd == "skill":
         # /skill with no args → show active skills
         active = getattr(args, 'skill', []) or []
-        available = _list_skill_names()
+        available = core.list_skill_names()
         screen.write(f"[active skills: {', '.join(active) or 'none'} | "
                      f"available: {', '.join(available)}]\n", kind=screen.META)
     elif cmd.startswith("skill "):
@@ -677,11 +509,11 @@ def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_c
         # fall back to the CLI snapshot — then layer skill tools on top.
         manual = getattr(args, '_manual_selected_tools', None)
         args.selected_tools = set(manual) if manual is not None else set(getattr(args, '_base_selected_tools', set()))
-        skill_tools, skill_prompts = _load_skills(args.skill)
+        skill_tools, skill_prompts = core.load_skills(args.skill)
         args.selected_tools |= skill_tools
         # Rebuild system message in-place.
         task_mode = getattr(args, 'mode', 'research')
-        new_system = _assemble_system_prompt(task_mode, skill_prompts)
+        new_system = core.assemble_system_prompt(config, task_mode, skill_prompts)
         if messages and messages[0].get('role') == 'system':
             messages[0]['content'] = new_system
         else:
@@ -769,14 +601,14 @@ def action_interactive(args, available_tools):
         messages = _build_base_messages(args, stdin_content=stdin_content)
 
     screen = Screen()
-    _skill_cmds = [f"skill {n}" for n in _list_skill_names()] + ["skill", "skill off"]
+    _skill_cmds = [f"skill {n}" for n in core.list_skill_names()] + ["skill", "skill off"]
     _live_models = []
     if _llm.openai_api is not None:
         try:
             _live_models = _llm.openai_api.get_models() or []
         except Exception:
             pass
-    _skill_names = _list_skill_names()
+    _skill_names = core.list_skill_names()
     screen.set_cmd_completions({
         "compact": [],
         "clear": [],
@@ -1010,10 +842,10 @@ def main():
                         help="the system prompt to send to the LLM.")
     parser.add_argument("--system-prompt-file",
                         help="path to a file whose contents are used as the system prompt.")
-    parser.add_argument("--mode", choices=list(_MODE_BLOCKS.keys()), default='research',
+    parser.add_argument("--mode", choices=list(core.MODE_BLOCKS.keys()), default='research',
                         help="task-focus hint prepended to the system prompt (default: research).")
     skill_arg = parser.add_argument("--skill", nargs='+', default=[], metavar='SKILL',
-                        help=f"activate one or more skills (available: {', '.join(_list_skill_names())}).")
+                        help=f"activate one or more skills (available: {', '.join(core.list_skill_names())}).")
     skill_arg.completer = _skills_completer
     parser.add_argument("--file",
                         help="file path to include in the LLM context.")

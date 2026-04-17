@@ -403,7 +403,7 @@ def _build_block_args(block, base_args, available_tools):
     if the block declares --mcp servers.
     """
     import cai.tools as _cai_tools
-    from cai.cli import _load_skills
+    from cai.core import load_skills
 
     block_args = copy.copy(base_args)
 
@@ -427,7 +427,7 @@ def _build_block_args(block, base_args, available_tools):
     # Load skills: add their tools to selected_tools and append their
     # prompts to the block's system prompt (matching CLI --skill behaviour).
     if block.skill:
-        skill_tools, skill_prompts = _load_skills(block.skill)
+        skill_tools, skill_prompts = load_skills(block.skill)
         block_args.selected_tools |= skill_tools
         if skill_prompts:
             base = block_args.system_prompt or ''
@@ -607,7 +607,7 @@ def _compact_global_if_needed(global_messages, base_args, threshold_pct):
     [memory] system message, preserving the first exchange and the last four
     messages verbatim.
     """
-    from cai.cli import _compact_messages, get_model_profile
+    from cai.llm import _compact_messages, get_model_profile
 
     if not global_messages:
         return

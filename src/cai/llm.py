@@ -749,3 +749,4 @@ def call_llm(messages,
     _cai_logger.log(1, "MAX TURNS REACHED ({})".format(max_turns))
     _emit_status(f"[!] reached max turns ({max_turns})", status_callback)
     raise MaxTurnsReached(max_turns)  # only reached when max_turns is set
+
