@@ -16,6 +16,9 @@ and `call_llm` in llm.py is invoked through its public callback API.
 
 from __future__ import annotations
 
+import contextvars
+import itertools
+import json
 import logging
 import queue
 import threading
@@ -23,8 +26,14 @@ from dataclasses import dataclass
 from typing import Callable, Iterator, Literal, Optional
 
 from cai import core
+from cai import logger as _cai_logger
 
 log = logging.getLogger("cai.sdk")
+
+# Auto-generated names for anonymous Harness and run_agent calls, so log
+# records in the TUI have stable, identifying labels.
+_harness_seq = itertools.count(1)
+_block_seq = itertools.count(1)
 
 
 # ─── Event ────────────────────────────────────────────────────────────────────
@@ -67,7 +76,9 @@ class Result:
                  model: str,
                  config: dict,
                  max_turns: Optional[int] = None,
-                 strict_format: Optional[str] = None):
+                 strict_format: Optional[str] = None,
+                 block_name: str = "",
+                 log_ctx: Optional[contextvars.Context] = None):
         self._input_messages = messages
         self._system_prompt = system_prompt
         self._tool_dicts = tool_dicts     # OpenAI-format schema list for call_llm
@@ -75,6 +86,10 @@ class Result:
         self._config = config
         self._max_turns = max_turns
         self._strict_format = strict_format
+        # Log plumbing: name used in BLOCK RESULT records, and a contextvars
+        # snapshot so the worker thread inherits the caller's nesting level.
+        self._block_name = block_name
+        self._log_ctx = log_ctx if log_ctx is not None else contextvars.copy_context()
 
         # Thread + queue for streaming events out of llm.call_llm
         self._queue: "queue.Queue" = queue.Queue()
@@ -176,7 +191,10 @@ class Result:
         if self._started:
             return
         self._started = True
-        self._thread = threading.Thread(target=self._run, daemon=True)
+        # Run the worker inside the caller's contextvars snapshot so the
+        # log-nesting level propagates across the thread boundary.
+        self._thread = threading.Thread(
+            target=self._log_ctx.run, args=(self._run,), daemon=True)
         self._thread.start()
 
     def _run(self) -> None:
@@ -219,9 +237,12 @@ class Result:
                     is_error=ev["is_error"],
                 ))
 
+        _cai_logger.push_nest(1)
         try:
             # call_llm mutates `messages` in place and returns the final
-            # assistant content string on success.
+            # assistant content string on success. llm.py's own structured
+            # log records (TURN, TOOL CALL, [assistant], …) appear as
+            # children of the BLOCK header thanks to the nest push above.
             content = llm.call_llm(
                 messages=messages,
                 model=self._model,
@@ -238,14 +259,20 @@ class Result:
             # value as the authoritative final text.
             self._text = content or self._text
             self._finish_reason = "stop"
+            _cai_logger.log(1, f"BLOCK RESULT  name={self._block_name!r}  "
+                            f"len={len(self._text)}\n{self._text}")
         except llm.LLMError as e:
             self._error = str(e)
             self._finish_reason = "error"
+            _cai_logger.log(1, f"BLOCK ERROR  name={self._block_name!r}  {e}")
         except Exception as e:
             log.exception("sdk.Result worker thread failed")
             self._error = f"{type(e).__name__}: {e}"
             self._finish_reason = "error"
+            _cai_logger.log(1, f"BLOCK ERROR  name={self._block_name!r}  "
+                            f"{type(e).__name__}: {e}")
         finally:
+            _cai_logger.pop_nest(1)
             self._queue.put(_DONE)
 
 
@@ -266,13 +293,26 @@ class Harness:
                  functions: Optional[list] = None,
                  model: Optional[str] = None,
                  task_mode: Optional[str] = None,
-                 mcp_servers: Optional[list] = None):
+                 mcp_servers: Optional[list] = None,
+                 name: Optional[str] = None,
+                 log_path: Optional[str] = None):
         import cai.tools as _cai_tools
+
+        # 0. Lazy-init the structured logger so SDK-only users get the same
+        #    hierarchical log file that cli.py produces. Idempotent: if
+        #    cli.py (or a previous Harness) already initialised it, skip.
+        if _cai_logger._instance is None:
+            _cai_logger.init(log_path or _cai_logger.LOG_PATH)
 
         # 1. Bootstrap — loads config, registers internal MCP, builds APIs,
         #    wires up llm module state.
         ctx = core.bootstrap()
         self._ctx = ctx
+
+        # Public identifier used in structured log records. Auto-generated
+        # when not supplied so the TUI can still distinguish concurrent
+        # harnesses.
+        self._name = name or f"harness-{next(_harness_seq)}"
 
         # 2. Extra MCP servers
         for cmd in (mcp_servers or []):
@@ -318,6 +358,14 @@ class Harness:
         # Caller-owned conversation state
         self.messages: list = []
 
+        _cai_logger.log(1, f"HARNESS {self._name}  model={self._model}  "
+                        f"tools={len(self._tools)}")
+        # Push the log nesting so every BLOCK / ENRICHMENT / user log() call
+        # made through this Harness folds as a child of the HARNESS record.
+        # close() (or __exit__) pops this; __del__ is a safety net.
+        _cai_logger.push_nest(1)
+        self._nest_active = True
+
     # ─── read-only introspection ──────────────────────────────────────────────
 
     @property
@@ -347,7 +395,8 @@ class Harness:
                   functions: Optional[list] = None,
                   model: Optional[str] = None,
                   task_mode: Optional[str] = None,
-                  strict_format: Optional[str] = None) -> Result:
+                  strict_format: Optional[str] = None,
+                  name: Optional[str] = None) -> Result:
         import cai.tools as _cai_tools
 
         if prompt is None and messages is None:
@@ -399,6 +448,20 @@ class Harness:
 
         eff_model = model or self._model
 
+        # Structured log: emit the BLOCK header + prompt synchronously so
+        # they appear immediately in the log (and the worker thread's
+        # LLM-level logs fold underneath them). BLOCK RESULT is emitted
+        # from the worker after call_llm returns.
+        block_name = name or f"block-{next(_block_seq)}"
+        eff_tool_names = [t["function"]["name"] for t in eff_tool_dicts]
+        _cai_logger.log(1, (
+            f"BLOCK  name={block_name!r}  harness={self._name!r}  "
+            f"model={eff_model}  strict_format={strict_format}  "
+            f"tools={eff_tool_names}"
+        ))
+        prompt_text = prompt if prompt is not None else ""
+        _cai_logger.log(2, f"BLOCK PROMPT  {prompt_text}")
+
         return Result(
             messages=eff_messages,
             system_prompt=eff_system,
@@ -406,6 +469,8 @@ class Harness:
             model=eff_model,
             config=self._ctx.config,
             strict_format=strict_format,
+            block_name=block_name,
+            log_ctx=contextvars.copy_context(),
         )
 
     # ─── gate ─────────────────────────────────────────────────────────────────
@@ -431,6 +496,7 @@ class Harness:
             strict_format=f"regex:^({pattern})$",
             system_prompt=system_prompt,
             prompt=prompt,
+            name="gate",
         ).wait()
         return r.text.strip()
 
@@ -444,9 +510,46 @@ class Harness:
         """
         if isinstance(data, list):
             self.messages = list(data)
+            _cai_logger.log(1, f"ENRICHMENT harness={self._name!r}  "
+                            f"kind=messages  count={len(data)}")
+            for m in data:
+                _cai_logger.log(2, json.dumps(m, ensure_ascii=False, default=str))
         elif isinstance(data, str):
             self.messages.append({"role": "assistant", "content": data})
+            _cai_logger.log(1, f"ENRICHMENT harness={self._name!r}  "
+                            f"kind=text  len={len(data)}")
+            _cai_logger.log(2, data)
         else:
             raise TypeError(
                 f"enrich expects list[dict] or str, got {type(data).__name__}"
             )
+
+    # ─── lifecycle ────────────────────────────────────────────────────────────
+
+    def close(self) -> None:
+        """Finalise the harness: emit HARNESS DONE and restore the log
+        nesting level pushed in ``__init__``. Idempotent.
+
+        Call this (or use the harness as a context manager) when the script
+        is about to create another Harness or do unrelated work — otherwise
+        subsequent log records will stay nested under this harness.
+        """
+        if not getattr(self, "_nest_active", False):
+            return
+        _cai_logger.pop_nest(1)
+        self._nest_active = False
+
+    def __enter__(self) -> "Harness":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        # Best-effort cleanup for scripts that neither call close() nor use
+        # the context manager. May fire at arbitrary points during process
+        # shutdown; any failure is silently ignored.
+        try:
+            self.close()
+        except Exception:
+            pass

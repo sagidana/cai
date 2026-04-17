@@ -899,13 +899,18 @@ def main():
     parser.add_argument('--naked', action='store_true',
                         help="do not prepend any default system prompts. overridden by --system-prompt / --system-prompt-file.")
     parser.add_argument('--logger', action='store_true',
-                        help="launch the interactive hierarchical log viewer (reads /tmp/cai/cai.log).")
+                        help="launch the interactive hierarchical log viewer.")
+    parser.add_argument('--log-path', default=_cai_logger.LOG_PATH, metavar='PATH',
+                        help=f"path to the JSONL log file — used both for writing "
+                             f"and for --logger viewing (default: {_cai_logger.LOG_PATH}).")
 
     # Must be called before init() so tab completion exits immediately without
     # running any heavy initialization (API clients, tree-sitter, etc.).
     argcomplete.autocomplete(parser)
 
-    _cai_logger.init()
+    # Parse before init() so --log-path routes both the writer and viewer.
+    _early_args, _ = parser.parse_known_args()
+    _cai_logger.init(_early_args.log_path)
     init()
     setup_shell_completion()
 
@@ -961,7 +966,7 @@ def main():
 
     if args.logger:
         from cai.logger import launch_tui
-        launch_tui()
+        launch_tui(args.log_path)
         return
 
     if args.harness:
