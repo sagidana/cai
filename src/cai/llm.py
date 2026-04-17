@@ -385,20 +385,23 @@ def enforce_strict_format(call_fn, strict_format, messages=None, max_attempts=4)
 # ---------------------------------------------------------------------------
 # LLM turn runners
 # ---------------------------------------------------------------------------
-def _run_nonstreaming_turn(messages, args, included_tools, stream_callback=None, tool_choice="auto", interrupt_event=None, reasoning_callback=None):
+def _run_nonstreaming_turn(messages, included_tools, model, strict_format=None,
+                           reasoning_effort=None, temperature=None,
+                           stream_callback=None, tool_choice="auto",
+                           interrupt_event=None, reasoning_callback=None):
     """Single non-streaming LLM call. Returns (content, reasoning, tool_calls, usage)."""
     _pre_format_len = len(messages)
     result = enforce_strict_format(lambda: openai_api.chat(messages,
-                                                           model=args.model,
+                                                           model=model,
                                                            tools=included_tools,
                                                            tool_choice=tool_choice,
-                                                           reasoning_effort=getattr(args, 'reasoning_effort', None),
-                                                           temperature=getattr(args, 'temperature', None)),
-                                   args.strict_format,
+                                                           reasoning_effort=reasoning_effort,
+                                                           temperature=temperature),
+                                   strict_format,
                                    messages=messages)
     # Strip format-retry feedback messages so they never leak into global context via enrichment.
     # Safe: strict_format only retries on text-only turns (tool_calls bypass the retry loop).
-    if args.strict_format and len(messages) > _pre_format_len:
+    if strict_format and len(messages) > _pre_format_len:
         del messages[_pre_format_len:]
 
     if not result: return "", "", None, {}
@@ -406,7 +409,10 @@ def _run_nonstreaming_turn(messages, args, included_tools, stream_callback=None,
     content, reasoning, tool_calls, usage = result
     return content or "", reasoning or "", tool_calls, usage
 
-def _run_streaming_turn(messages, args, included_tools, stream_callback, tool_choice="auto", interrupt_event=None, reasoning_callback=None):
+def _run_streaming_turn(messages, included_tools, model, strict_format=None,
+                        reasoning_effort=None, temperature=None,
+                        stream_callback=None, tool_choice="auto",
+                        interrupt_event=None, reasoning_callback=None):
     """Single streaming LLM call. Returns (accumulated_text, reasoning, tool_calls, usage)."""
     accumulated = []
     reasoning_chunks = []
@@ -414,11 +420,11 @@ def _run_streaming_turn(messages, args, included_tools, stream_callback, tool_ch
     last_tool_calls = None
     usage = {}
     for chunk, reasoning_chunk, tool_calls, usage in openai_api.chat_stream(messages,
-                                                                             model=args.model,
+                                                                             model=model,
                                                                              tools=included_tools,
                                                                              tool_choice=tool_choice,
-                                                                             reasoning_effort=getattr(args, 'reasoning_effort', None),
-                                                                             temperature=getattr(args, 'temperature', None)):
+                                                                             reasoning_effort=reasoning_effort,
+                                                                             temperature=temperature):
         if interrupt_event and interrupt_event.is_set():
             break
         if reasoning_chunk:
@@ -537,7 +543,7 @@ def _compact_messages(messages, model):
         len(compactable), len(summary), summary))
 
 
-def _check_context_budget(messages, usage, profile, args, status_callback=None):
+def _check_context_budget(messages, usage, profile, model, status_callback=None):
     """Apply observation masking and/or LLM compaction based on context budget thresholds.
 
     Two independent thresholds (both configurable):
@@ -575,7 +581,7 @@ def _check_context_budget(messages, usage, profile, args, status_callback=None):
             status_callback(msg)
         else:
             _diag(f"\n{msg}")
-        _compact_messages(messages, args.model)
+        _compact_messages(messages, model)
 
 
 # ---------------------------------------------------------------------------
@@ -605,37 +611,33 @@ def _emit_status(text, status_callback):
 # Main LLM loop
 # ---------------------------------------------------------------------------
 def call_llm(messages,
-             args,
-             available_tools,
+             model,
+             tools,
+             strict_format=None,
+             force_tools=False,
+             max_turns=None,
+             reasoning_effort=None,
+             temperature=None,
+             oneline=False,
              stream_callback=None,
              status_callback=None,
              tool_callback=None,
              ctx_callback=None,
              interrupt_event=None,
              reasoning_callback=None):
-    # Build the tool list sent to the LLM — only tools the user has selected.
-    # available_tools is the unified list (all servers, prefixed names).
-    selected_tool_names = getattr(args, 'selected_tools', set())
-    included_tools = [
-        tool for tool in available_tools
-        if tool.get('function', {}).get('name') in selected_tool_names
-    ]
-
     # Names the LLM was given — used to gate execution in _execute_tool.
-    allowed_tool_names = {t.get('function', {}).get('name') for t in included_tools}
+    allowed_tool_names = {t.get('function', {}).get('name') for t in tools}
 
-    profile = get_model_profile(args.model)
-
-    max_turns = getattr(args, 'max_turns', None)  # None = unlimited
+    profile = get_model_profile(model)
 
     log.info("call_llm: model=%s tier=%s context=%d messages=%d tools=%d streaming=%s strict_format=%s max_turns=%s",
-             args.model,
+             model,
              profile['tier'],
              profile['context'],
              len(messages),
-             len(included_tools),
+             len(tools),
              stream_callback,
-             args.strict_format or "none",
+             strict_format or "none",
              max_turns if max_turns is not None else "unlimited")
 
     call_history = {}  # (tool_name, args_str) -> call count, for stuck detection
@@ -655,8 +657,7 @@ def call_llm(messages,
         # doesn't skip tools and answer directly from training data.
         # Skip when reasoning is enabled — Anthropic rejects tool_choice=required
         # combined with extended thinking.
-        reasoning = getattr(args, 'reasoning_effort', None)
-        if args.force_tools and turn == 1 and not reasoning:
+        if force_tools and turn == 1 and not reasoning_effort:
             tool_choice = "required"
         else:
             tool_choice = "auto"
@@ -669,9 +670,12 @@ def call_llm(messages,
             "  tool_choice=required (force_tools)" if tool_choice == "required" else ""))
 
         content, reasoning, tool_calls, usage = run_turn(messages,
-                                                         args,
-                                                         included_tools,
-                                                         stream_callback,
+                                                         tools,
+                                                         model,
+                                                         strict_format=strict_format,
+                                                         reasoning_effort=reasoning_effort,
+                                                         temperature=temperature,
+                                                         stream_callback=stream_callback,
                                                          tool_choice=tool_choice,
                                                          interrupt_event=interrupt_event,
                                                          reasoning_callback=reasoning_callback)
@@ -709,7 +713,7 @@ def call_llm(messages,
         if content and stream_callback:
             stream_callback('\n')
 
-        if not getattr(args, 'oneline', False):
+        if not oneline:
             def _fmt_call(c):
                 name = c.get('function', {}).get('name', '?')
                 raw_args = c.get('function', {}).get('arguments', '')
@@ -738,7 +742,7 @@ def call_llm(messages,
             _warn_if_stuck(tool_calls, call_history, messages)
 
         # _check_context_budget may compact (replace) messages
-        _check_context_budget(messages, usage, profile, args, status_callback)
+        _check_context_budget(messages, usage, profile, model, status_callback)
         _cai_logger.pop_nest(1)              # pop at end of loop body
 
     log.warning("call_llm: reached max_turns=%s", max_turns)

@@ -56,6 +56,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from cai import logger as _cai_logger
+from cai.tools import select_tools
 
 log = logging.getLogger("cai.harness")
 
@@ -536,10 +537,17 @@ def run_block(block, global_messages, user_prompt, base_args, available_tools):
     _status_cb(f"running")
     _cai_logger.push_nest(1)
     try:
+        tools = select_tools(available_tools, getattr(block_args, 'selected_tools', set()))
         content = call_llm(
             local_messages,
-            block_args,
-            available_tools,
+            block_args.model,
+            tools,
+            strict_format=block_args.strict_format,
+            force_tools=block_args.force_tools,
+            max_turns=block_args.max_turns,
+            reasoning_effort=block_args.reasoning_effort,
+            temperature=block_args.temperature,
+            oneline=getattr(block_args, 'oneline', False),
             stream_callback=stream_cb,
             tool_callback=_tool_cb,
             status_callback=_status_cb,

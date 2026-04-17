@@ -186,6 +186,15 @@ def get_tool_entries() -> list:
     ]
 
 
+def select_tools(available_tools: list, selected_names) -> list:
+    """Filter the unified tool list down to the names the user has selected."""
+    names = selected_names if selected_names is not None else set()
+    return [
+        tool for tool in available_tools
+        if tool.get('function', {}).get('name') in names
+    ]
+
+
 if __name__ == '__main__':
     from cai import adb_tools, files_tools, frida_tools, git_tools, smali_tools, web_tools
 

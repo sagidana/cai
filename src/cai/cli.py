@@ -19,6 +19,7 @@ from cai.llm import (
     _compact_messages,
 )
 import cai.llm as _llm
+from cai.tools import select_tools
 
 
 global config
@@ -256,9 +257,16 @@ def prompt_line_by_line(args, messages, available_tools):
         local_messages.append({"role": "user", "content": line})
         local_messages.append({"role": "user", "content": args.prompt})
 
+        tools = select_tools(available_tools, getattr(args, 'selected_tools', set()))
         response = call_llm(local_messages,
-                            args,
-                            available_tools,
+                            args.model,
+                            tools,
+                            strict_format=args.strict_format,
+                            force_tools=args.force_tools,
+                            max_turns=args.max_turns,
+                            reasoning_effort=args.reasoning_effort,
+                            temperature=args.temperature,
+                            oneline=args.oneline,
                             interrupt_event=shutdown_event)
 
         with lock:
@@ -547,18 +555,14 @@ def action_prompt(args, available_tools):
 
     messages.append({"role": "user", "content": args.prompt})
 
-    def _stderr_tool(chunk, error=False):
+    def _stderr_dim(chunk):
         if _STDERR_TTY:
             sys.stderr.write(_DIM + chunk + _RESET)
             sys.stderr.flush()
             _note_output(chunk)
 
-    def _stderr_status(text):
-        if text:
-            _diag(f"[{text}]")
-
-    def _stderr_ctx(ctx_str):
-        _diag(f"[{ctx_str}]")
+    def _stderr_tool(chunk, error=False):
+        _stderr_dim(chunk)
 
     _tools_str = ", ".join(sorted(getattr(args, 'selected_tools', set()) or [])) or "none"
     _flags = []
@@ -575,45 +579,41 @@ def action_prompt(args, available_tools):
         f"tools=[{_tools_str}]  flags={_flags}\n{args.prompt}"
     ))
 
-    if not args.non_streaming and not args.oneline and not args.strict_format:
-        log.info("action_prompt: calling LLM (streaming)")
-        try:
-            def _stream_to_stdout(chunk):
-                sys.stdout.write(chunk)
-                sys.stdout.flush()
-                _note_output(chunk)
+    streaming = not args.non_streaming and not args.oneline and not args.strict_format
+    log.info("action_prompt: calling LLM (%s)", "streaming" if streaming else "non-streaming")
 
-            _cai_logger.push_nest(1)
-            call_llm(messages,
-                     args,
-                     available_tools,
-                     stream_callback=_stream_to_stdout,
-                     tool_callback=_stderr_tool,
-                     status_callback=_stderr_status,
-                     ctx_callback=_stderr_ctx)
-            _cai_logger.pop_nest(1)
-            print()
-        except LLMError as e:
-            _cai_logger.pop_nest(1)
-            print()
-            _diag(f"[error] {e}")
-    else:
-        log.info("action_prompt: calling LLM (non-streaming)")
-        try:
-            _cai_logger.push_nest(1)
-            content = call_llm(messages,
-                               args,
-                               available_tools,
-                               tool_callback=_stderr_tool,
-                               status_callback=_stderr_status,
-                               ctx_callback=_stderr_ctx)
-            _cai_logger.pop_nest(1)
-            if args.oneline:
-                content = content.replace('\n', ' ')
-            print(content)
-        except LLMError as e:
-            _cai_logger.pop_nest(1)
-            _diag(f"[error] {e}")
+    tools = select_tools(available_tools, getattr(args, 'selected_tools', set()))
+
+    openai_api.error_cb = lambda msg: _diag(f"[error] {msg}")
+    try:
+        _cai_logger.push_nest(1)
+        content = call_llm(messages,
+                           args.model,
+                           tools,
+                           strict_format=args.strict_format,
+                           force_tools=args.force_tools,
+                           max_turns=args.max_turns,
+                           reasoning_effort=args.reasoning_effort,
+                           temperature=args.temperature,
+                           oneline=args.oneline,
+                           stream_callback=_stderr_dim if streaming else None,
+                           tool_callback=_stderr_tool)
+        _cai_logger.pop_nest(1)
+        if streaming and _STDERR_TTY:
+            sys.stderr.write('\n')
+            sys.stderr.flush()
+        if args.oneline:
+            content = (content or '').replace('\n', ' ')
+        print(content)
+    except KeyboardInterrupt:
+        _cai_logger.pop_nest(1)
+        _diag("[interrupted]")
+        sys.exit(130)
+    except LLMError as e:
+        _cai_logger.pop_nest(1)
+        _diag(f"[error] {e}")
+    finally:
+        openai_api.error_cb = None
 
 def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_ctx):
     """Execute a vim-style colon command from interactive mode."""
@@ -903,7 +903,14 @@ def action_interactive(args, available_tools):
                 _cai_logger.push_nest(1)
                 _reasoning_buf.clear()
                 try:
-                    response = call_llm(messages, args, available_tools,
+                    tools = select_tools(available_tools, getattr(args, 'selected_tools', set()))
+                    response = call_llm(messages, args.model, tools,
+                                        strict_format=args.strict_format,
+                                        force_tools=args.force_tools,
+                                        max_turns=args.max_turns,
+                                        reasoning_effort=args.reasoning_effort,
+                                        temperature=args.temperature,
+                                        oneline=args.oneline,
                                         stream_callback=stream_cb,
                                         status_callback=status_callback,
                                         tool_callback=tool_cb,
