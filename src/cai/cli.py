@@ -10,17 +10,21 @@ import threading
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from cai import logger as _cai_logger
-from cai.llm import (
-    call_llm,
-    LLMError,
-    get_model_profile,
-    MODEL_PROFILES,
-    AGENTIC_SYSTEM_PROMPTS,
-    _compact_messages,
-)
-import cai.llm as _llm
-from cai.tools import select_tools
 from cai import core
+
+# cai.tools pulls in mcp/httpx/pydantic/rich (~300ms on a warm cache);
+# cai.llm is cheap on its own but pulling it at top-level has historically
+# dragged in the same chain. Both are deferred into init() — which only
+# runs after argcomplete.autocomplete() has already short-circuited — so
+# tab completion doesn't pay for them. init() binds the symbols below to
+# module globals, so the rest of the file can still reference call_llm,
+# LLMError, select_tools, etc. unqualified.
+call_llm = None
+LLMError = None
+get_model_profile = None
+_compact_messages = None
+select_tools = None
+_llm = None
 
 
 global config
@@ -139,6 +143,23 @@ def init():
     global api_key
     global openai_api
     global openrouter_api
+    global call_llm, LLMError, get_model_profile, _compact_messages, select_tools, _llm
+
+    # Heavy imports deferred from module-level to keep tab completion snappy.
+    from cai.llm import (
+        call_llm as _call_llm,
+        LLMError as _LLMError,
+        get_model_profile as _get_model_profile,
+        _compact_messages as _compact,
+    )
+    import cai.llm as _llm_mod
+    from cai.tools import select_tools as _select_tools
+    call_llm = _call_llm
+    LLMError = _LLMError
+    get_model_profile = _get_model_profile
+    _compact_messages = _compact
+    select_tools = _select_tools
+    _llm = _llm_mod
 
     ctx = core.bootstrap(diag_fn=_diag)
     config = ctx.config
