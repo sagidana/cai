@@ -17,13 +17,13 @@ Usage:
     python examples/harnesses/streaming.py "what are the main classes in src/cai/?"
 """
 from cai import Harness
-from cai import logger as cai_logger
 from _helpers import get_task
 
 
 READ_TOOLS = [
-    "read", "read_lines", "list_files", "pattern_search",
-    "symbol_search", "file_code_outline", "project_code_outline",
+    "read_file",
+    "list_files",
+    "search",
 ]
 
 # Write this run's structured log somewhere obvious so the example can
@@ -43,13 +43,14 @@ def main() -> None:
         # starts when we begin iterating the Result below. Naming the block
         # (here, "explore") makes the BLOCK record self-describing in the log.
         r = h.run_agent(
-            tools=READ_TOOLS,
-            system_prompt=(
-                "You are a senior engineer exploring a codebase. Use tools to read "
-                "what you need, then explain your findings clearly."
-            ),
-            prompt=task,
-            name="explore",
+                            # tools=READ_TOOLS,
+                            skills=['files'],
+                            system_prompt=(
+                                "You are a senior engineer exploring a codebase. Use tools to read "
+                                "what you need, then explain your findings clearly."
+                            ),
+                            prompt=task,
+                            name="explore",
         )
 
         # iterate the Result to stream events as they happen. Each event has a

@@ -343,13 +343,12 @@ class Harness:
             self._system_prompt = "\n\n".join(parts)
 
         # 6. Tool allowlist. Refresh available_tools after any registrations.
+        # Only tools explicitly listed (or pulled in by skills) are exposed —
+        # omitting `tools=` yields an empty toolset, not "everything".
         ctx.available_tools = _cai_tools.get_all_tools()
         all_names = [t["function"]["name"] for t in ctx.available_tools]
         allowlist = set(tools or []) | set(skill_tool_names)
-        if allowlist:
-            self._tools = [n for n in all_names if n in allowlist]
-        else:
-            self._tools = list(all_names)
+        self._tools = [n for n in all_names if n in allowlist]
 
         # 7. Model + task_mode
         self._model = model or ctx.config.get("model")
