@@ -504,14 +504,28 @@ class Harness:
     def enrich(self, data) -> None:
         """Merge a Result's output back into harness.messages.
 
-        - ``list[dict]`` → replace harness.messages entirely (full adoption)
+        - ``list[dict]`` → prefix-merge: detect the fork point between ``data``
+          and current ``harness.messages`` and append only the diverging tail.
+          A leading system message in ``data`` is stripped — the harness owns
+          its system prompt and never mutates it here, even when a per-call
+          ``skills=`` / ``system_prompt=`` augmented the prompt for that run.
+          This lets multiple parallel Results be enriched without clobbering
+          each other.
         - ``str``        → append as ``{"role": "assistant", "content": data}``
         """
         if isinstance(data, list):
-            self.messages = list(data)
+            incoming = data[1:] if data and data[0].get("role") == "system" else list(data)
+            common = 0
+            for a, b in zip(self.messages, incoming):
+                if a != b:
+                    break
+                common += 1
+            tail = incoming[common:]
+            self.messages.extend(tail)
             _cai_logger.log(1, f"ENRICHMENT harness={self._name!r}  "
-                            f"kind=messages  count={len(data)}")
-            for m in data:
+                            f"kind=messages  fork_at={common}  "
+                            f"appended={len(tail)}  total={len(self.messages)}")
+            for m in tail:
                 _cai_logger.log(2, json.dumps(m, ensure_ascii=False, default=str))
         elif isinstance(data, str):
             self.messages.append({"role": "assistant", "content": data})
