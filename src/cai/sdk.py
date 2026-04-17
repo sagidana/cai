@@ -258,6 +258,12 @@ class Result:
             # accumulated it via stream_cb, but override with the returned
             # value as the authoritative final text.
             self._text = content or self._text
+            # call_llm appends intermediate tool-calling turns to `messages`
+            # but returns the terminal assistant turn without appending it.
+            # Add it so r.messages is self-contained and enrich() picks up
+            # the final reply without the caller also having to pass r.text.
+            if self._text:
+                messages.append({"role": "assistant", "content": self._text})
             self._finish_reason = "stop"
             _cai_logger.log(1, f"BLOCK RESULT  name={self._block_name!r}  "
                             f"len={len(self._text)}\n{self._text}")

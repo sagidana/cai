@@ -5,12 +5,23 @@ from cai import Harness
 
 harness = Harness(system_prompt="", log_path="/tmp/cai/cai.log") # do not use any defaults
 
-r = harness.agent(  system_prompt="",
-                    prompt="list current files",
-                    skills=['files'])
+cloned = harness.clone()
+
+def add(a: int, b: int):
+    """
+    adding a to b, returning sum.
+    """
+    return a + b
+for _ in range(3):
+    r = harness.agent(  system_prompt="you are an expert python source writer",
+                        prompt="return a list of all functions in this project",
+                        skills=['files'])
+    r.wait()
+    cloned.enrich(r.messages)
+
+r = cloned.agent(system_prompt="you are an expert python source writer",
+                 prompt="summerazie all found functions into one comprehensive list")
 r.wait()
 
-harness.enrich(r.messages)
-
-r = harness.gate(options=["yes", "no"], prompt="is that enough?")
-print(r)
+print(r.text)
+# harness.enrich(r.text)
