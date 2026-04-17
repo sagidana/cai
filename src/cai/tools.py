@@ -8,6 +8,7 @@ import logging
 import threading
 import atexit
 import shlex
+import inspect
 
 logging.basicConfig(
     filename="/tmp/cai.log",
@@ -24,6 +25,7 @@ _registry_lock = threading.Lock()
 _servers: dict = {}        # cmd_str -> MCPServerConnection
 _server_labels: dict = {}  # cmd_str -> label string
 _dispatch: dict = {}       # prefixed_name -> (cmd_str, original_name)
+_local_functions: dict = {}  # name -> (callable, openai_schema_dict)
 
 
 # ── Connection ────────────────────────────────────────────────────────────────
@@ -123,6 +125,88 @@ def register_server(cmd_str: str, label: str = None) -> None:
                 log.info("register_server: %r -> label=%r", cmd_str, _server_labels[cmd_str])
 
 
+# ── Local function registration (in-process, no MCP subprocess) ──────────────
+# Used by the SDK to expose plain Python callables as tools. Registered
+# alongside MCP tools in the same dispatch + schema flow.
+
+_PY_TO_JSON_TYPE = {
+    str: "string",
+    int: "integer",
+    float: "number",
+    bool: "boolean",
+    list: "array",
+    dict: "object",
+}
+
+
+def _derive_function_schema(fn):
+    """Build an OpenAI tool schema dict from a Python callable.
+
+    Param types come from annotations; description is the first line of
+    the docstring (empty if absent). Unannotated params default to string.
+    Unsupported annotation types raise TypeError.
+    """
+    sig = inspect.signature(fn)
+    properties = {}
+    required = []
+    for pname, param in sig.parameters.items():
+        ann = param.annotation
+        if ann is inspect.Parameter.empty:
+            json_type = "string"
+        elif ann in _PY_TO_JSON_TYPE:
+            json_type = _PY_TO_JSON_TYPE[ann]
+        else:
+            # Handle generic aliases like list[int] by checking origin.
+            origin = getattr(ann, "__origin__", None)
+            if origin in _PY_TO_JSON_TYPE:
+                json_type = _PY_TO_JSON_TYPE[origin]
+            else:
+                raise TypeError(
+                    f"register_local_functions: unsupported annotation "
+                    f"{ann!r} on parameter {pname!r} of {fn.__name__}"
+                )
+        properties[pname] = {"type": json_type}
+        if param.default is inspect.Parameter.empty:
+            required.append(pname)
+
+    doc = (fn.__doc__ or "").strip()
+    description = doc.splitlines()[0] if doc else ""
+
+    return {
+        "type": "function",
+        "function": {
+            "name": fn.__name__,
+            "description": description,
+            "parameters": {
+                "type": "object",
+                "properties": properties,
+                "required": required,
+            },
+        },
+    }
+
+
+def register_local_functions(functions) -> None:
+    """Register Python callables as tools, dispatched in-process.
+
+    Name collisions against any registered tool (MCP or local) raise
+    ValueError. Idempotent per-function: re-registering the same callable
+    object is a no-op.
+    """
+    with _registry_lock:
+        for fn in functions:
+            name = fn.__name__
+            # Idempotent if the exact same callable object was already registered.
+            existing = _local_functions.get(name)
+            if existing and existing[0] is fn:
+                continue
+            if existing or name in _dispatch:
+                raise ValueError(f"tool name collision: {name!r}")
+            schema = _derive_function_schema(fn)
+            _local_functions[name] = (fn, schema)
+            log.info("register_local_functions: %r registered", name)
+
+
 def get_all_tools() -> list:
     """Return the unified OpenAI-format tool list from all registered servers.
 
@@ -157,19 +241,37 @@ def get_all_tools() -> list:
                 }
             })
 
+    # Also surface any in-process Python functions registered via the SDK.
+    for name, (_fn, schema) in _local_functions.items():
+        openai_tools.append(schema)
+        # Dispatch entry marker: cmd_str=None signals "local function".
+        new_dispatch[name] = (None, name)
+
     _dispatch = new_dispatch
-    log.info("get_all_tools: %d tools from %d servers", len(openai_tools), len(_servers))
+    log.info("get_all_tools: %d tools from %d servers (+%d local)",
+             len(openai_tools), len(_servers), len(_local_functions))
     return openai_tools
 
 
 def call_tool(prefixed_name: str, arguments: dict):
-    """Call a tool by its prefixed name, dispatching to the correct MCP server."""
+    """Call a tool by its prefixed name, dispatching to the correct MCP server
+    or — if registered locally — invoking a Python callable in-process."""
     log.info("call_tool: %s %s", prefixed_name, arguments)
     entry = _dispatch.get(prefixed_name)
     if entry is None:
         log.error("call_tool: unknown tool %r", prefixed_name)
         return f"Error: unknown tool '{prefixed_name}'"
     cmd_str, original_name = entry
+    # Local function path
+    if cmd_str is None:
+        fn, _schema = _local_functions[original_name]
+        try:
+            result = fn(**arguments) if arguments else fn()
+        except Exception as e:
+            log.error("call_tool local %r raised: %s", prefixed_name, e)
+            return f"Error: tool {prefixed_name!r} raised: {e}"
+        return "" if result is None else str(result)
+    # MCP subprocess path
     conn = _servers[cmd_str]
     try:
         response = conn.call("tools/call", {"name": original_name, "arguments": arguments})
@@ -180,10 +282,11 @@ def call_tool(prefixed_name: str, arguments: dict):
 
 def get_tool_entries() -> list:
     """Return [(prefixed_name, label), ...] for all registered tools — used by the /tools UI."""
-    return [
-        (prefixed_name, _server_labels[_dispatch[prefixed_name][0]])
-        for prefixed_name in _dispatch
-    ]
+    entries = []
+    for prefixed_name, (cmd_str, _original) in _dispatch.items():
+        label = "local" if cmd_str is None else _server_labels[cmd_str]
+        entries.append((prefixed_name, label))
+    return entries
 
 
 def select_tools(available_tools: list, selected_names) -> list:

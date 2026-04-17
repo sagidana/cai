@@ -217,7 +217,8 @@ def _execute_tool(call_name, arguments, allowed_tool_names, usage=None, profile=
 
 
 def handle_tool_calls(tool_calls, messages, call_content, allowed_tool_names,
-                      tool_callback=None, usage=None, profile=None, reasoning=None):
+                      tool_callback=None, usage=None, profile=None, reasoning=None,
+                      event_callback=None):
     log.info("handle_tool_calls: dispatching %d tool call(s)", len(tool_calls))
     for call in tool_calls:
         if call.get('type') != 'function':
@@ -241,6 +242,13 @@ def handle_tool_calls(tool_calls, messages, call_content, allowed_tool_names,
 
         if tool_callback:
             tool_callback(f"-> {call_name}({args_preview})\n")
+        if event_callback:
+            event_callback({
+                'type': 'tool_call',
+                'name': call_name,
+                'args': parsed_args if isinstance(parsed_args, dict) else {},
+                'id': call_id,
+            })
 
         result = _execute_tool(call_name, arguments, allowed_tool_names,
                                usage=usage, profile=profile)
@@ -255,6 +263,14 @@ def handle_tool_calls(tool_calls, messages, call_content, allowed_tool_names,
                 tool_callback(f"  \u2717 {call_name}: {result}\n", error=True)
             else:
                 tool_callback(f"  <- {call_name}: {len(result)} chars\n")
+        if event_callback:
+            event_callback({
+                'type': 'tool_result',
+                'name': call_name,
+                'result': result,
+                'id': call_id,
+                'is_error': result.startswith('Error:'),
+            })
 
         assistant_msg = {
             'role': 'assistant',
@@ -624,7 +640,8 @@ def call_llm(messages,
              tool_callback=None,
              ctx_callback=None,
              interrupt_event=None,
-             reasoning_callback=None):
+             reasoning_callback=None,
+             event_callback=None):
     # Names the LLM was given — used to gate execution in _execute_tool.
     allowed_tool_names = {t.get('function', {}).get('name') for t in tools}
 
@@ -733,7 +750,7 @@ def call_llm(messages,
 
         handle_tool_calls(tool_calls, messages, content, allowed_tool_names,
                           tool_callback=tool_callback, usage=usage, profile=profile,
-                          reasoning=reasoning)
+                          reasoning=reasoning, event_callback=event_callback)
         if tool_callback:
             tool_callback("\n")
 
