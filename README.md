@@ -1,6 +1,6 @@
 # cai — Command-line AI
 
-`cai` is a lightweight CLI tool that brings LLM intelligence into your terminal and editor workflow. It supports plain prompts, cursor-aware code generation, line-by-line batch processing, MCP tool integration, harness orchestration, and a full interactive TUI — all powered by any OpenAI-compatible API (defaults to [OpenRouter](https://openrouter.ai)).
+`cai` is a lightweight CLI tool that brings LLM intelligence into your terminal and editor workflow. It supports plain prompts, cursor-aware code generation, line-by-line batch processing, MCP tool integration, and a full interactive TUI — all powered by any OpenAI-compatible API (defaults to [OpenRouter](https://openrouter.ai)).
 
 ---
 
@@ -8,7 +8,6 @@
 
 - **`prompt`** — Send a prompt with optional file, stdin, cursor location, and tool context.
 - **`--interactive`** — Full-screen TUI chat session with persistent history, streaming output, and vim-style commands.
-- **`--harness`** — Run a `.harness.cai` orchestration file: multi-block agentic pipelines with control flow (labels, gotos, conditionals, loops, for-each sub-harnesses).
 - **`--logger`** — Launch the interactive hierarchical log viewer TUI (tails `/tmp/cai/cai.log`).
 - **`--force-tools`** — Require the LLM to use a tool at least once (sets `tool_choice=required`).
 - **MCP tool support** — Add any MCP server via `--mcp <command>`; tools from all servers are unified under a prefixed namespace (e.g. `cai__generic_linux_command`, `myserver__scan_target`). The built-in server is always registered automatically.
@@ -138,13 +137,6 @@ cai --strict-format "regex:^(yes|no)$" -p "Is this code thread-safe?" --file ./w
 cai --strict-format "regex-each-line:^\w+" -p "List the function names" --file ./api.py
 ```
 
-### Run a harness orchestration file
-
-```bash
-cai --harness harnesses/bug-fix.harness.cai -- "fix the crash in auth.py"
-cai --harness harnesses/code-review.harness.cai -- "review src/payments/"
-```
-
 ### Launch the log viewer
 
 ```bash
@@ -173,7 +165,6 @@ cai --oneline -p "Summarize this function in one sentence" --file ./cli.py
 |------|---------|
 | `-p` / `--` | The prompt |
 | `--interactive` / `-i` | Full-screen TUI chat session |
-| `--harness` | Path to a `.harness.cai` orchestration file |
 | `--logger` | Launch the interactive hierarchical log viewer |
 | `--force-tools` | Require the LLM to call a tool at least once |
 | `--max-turns N` | Max tool-call turns (default: tier-based 5/10/20) |
@@ -188,7 +179,6 @@ cai --oneline -p "Summarize this function in one sentence" --file ./cli.py
 | `--model` | Override model |
 | `--system-prompt` | Set system prompt |
 | `--non-streaming` | Use blocking API instead of streaming |
-| `--progress` | Show progress bar (for `--line-by-line`) |
 
 ---
 
@@ -258,87 +248,6 @@ In interactive mode (and when tools are enabled in prompt mode), `cai` runs a mu
 5. **Context compaction:** when prompt token usage exceeds the configured threshold (default 75%), older conversation turns are summarized into a compact memory message to free up context space.
 
 Use `--force-tools` to require a tool call at least once (`tool_choice=required`).
-
----
-
-## Harness Orchestration
-
-`.harness.cai` files are multi-block agentic programs — each block calls the LLM with its own prompt, tools, model, and format, and the blocks are connected by control flow instructions.
-
-```bash
-cai --harness harnesses/bug-fix.harness.cai -- "fix the NoneType crash in auth.py"
-```
-
-### Harness format
-
-```
-# Comments start with #
-
-label:               # jump target (bare word followed by colon)
-
----                  # opens a block
-    --name "x"                          # required: block identifier for branching
-    --enrich full                       # required: none | result-only | full
-    --prepend-user-prompt               # prepend the user's task to this block's prompt
-    --tools cai__read_file, cai__list_files  # prefixed tool names (comma or space separated)
-    --model gpt-4o                      # override model for this block
-    --max-turns 100                     # override max tool-call turns
-    --strict-format "regex:^(ok|retry)$"  # enforce output format
-    --system-prompt "..."               # block-specific system prompt
-    --force-tools                       # require at least one tool call
-    '''
-    Prompt text goes here.
-    Multiple lines are fine.
-    '''
----
-
-if x == ok: goto label       # conditional jump (exact string match)
-goto label                   # unconditional jump
-exit                         # terminate harness
-compact-if-more-than 30      # compact global context if usage exceeds 30% of window
-if-more-than 5 done          # jump to 'done' if this point has been passed more than 5 times
-for-each item in block: harness "path/to/sub.harness.cai"
-```
-
-### Context enrichment
-
-`--enrich <mode>` is required on every block and controls what it contributes to `global_messages`:
-
-- `--enrich full`: adds the user prompt, all tool calls/results, and the final assistant response. Use for context-gathering blocks.
-- `--enrich result-only`: adds only the final assistant response. Use for classify/gate blocks with `--strict-format` where only the verdict matters downstream.
-- `--enrich none`: nothing is added. Use for transient blocks whose deliberation is not needed downstream.
-
-### `compact-if-more-than <percentage>`
-
-Checks whether the accumulated `global_messages` exceed `<percentage>%` of the model's context window. If so, summarises the middle turns into a single `[memory]` entry. No-op if under the threshold. Useful in retry loops.
-
-### `for-each <item> in <block>: harness "<path>"`
-
-Runs a sub-harness once for each line of a named block's output. Each run starts with a fresh context and receives one line as its `user_prompt`. After all iterations complete, a structured summary is injected into the parent's global context so subsequent parent blocks can reference all results.
-
-### Built-in harnesses
-
-A collection of ready-to-use harnesses is included in `harnesses/`:
-
-| Harness | Purpose |
-|---------|---------|
-| `context-and-execute` | Gather context → verify → execute. The canonical pattern for any code task. |
-| `bug-fix` | Gather → verify → fix → self-review → summary |
-| `code-review` | Gather → verify → deep analysis → severity → report |
-| `test-writer` | Gather source → gather patterns → plan → validate → write |
-| `refactor` | Gather → verify → plan → validate → execute → sanity check → summary |
-| `feature` | Gather → verify → design → validate → implement → write tests |
-| `security-audit` | Gather → verify → threat model → deep audit → severity → report |
-| `migrate` | Gather → audit callsites → validate → plan → execute → verify → summary |
-| `explain` | Gather → verify → trace execution/data flow → layered explanation |
-| `document` | Gather code → gather doc conventions → outline → validate → write |
-| `web-search` | Decompose into sub-questions → search each → synthesize |
-| `multi-task` | Decompose task → run sub-harness for each part → aggregate |
-
-```bash
-cai --harness harnesses/refactor.harness.cai -- "extract retry logic in api.py into a reusable decorator"
-cai --harness harnesses/web-search.harness.cai -- "trade-offs between PostgreSQL and MongoDB"
-```
 
 ---
 
@@ -507,10 +416,10 @@ cai/
 │   ├── cli.py      # CLI entry point, argument parsing, agentic loop, model profiles
 │   ├── api.py      # OpenAI-compatible API clients (OpenAiApi, OpenRouterApi)
 │   ├── screen.py   # Terminal TUI for --interactive (raw ANSI, no dependencies)
-│   ├── harness.py  # .harness.cai parser and executor (blocks, labels, gotos, for-each)
+│   ├── sdk.py      # Programmatic SDK (Harness, Result, Event)
 │   ├── logger.py   # Hierarchical JSONL logger + interactive log viewer TUI
 │   └── tools.py    # MCP tool server + tool dispatch logic (tree-sitter codebase parsing)
-├── harnesses/      # Ready-to-use .harness.cai orchestration files
+├── examples/harnesses/  # Python SDK example scripts
 └── pyproject.toml  # Build config; entry point: cai = "cai.cli:main"
 ```
 

@@ -184,16 +184,6 @@ def prompt_line_by_line(args, messages, available_tools):
     completed_count = [0]
     lock = threading.Lock()
 
-    def update_progress(completed):
-        if args.progress:
-            if total is not None:
-                bar_len = 30
-                filled = int(bar_len * completed / total)
-                bar = '█' * filled + '░' * (bar_len - filled)
-                _diag(f'\rProgress: [{bar}] {completed}/{total} ', end='')
-                if completed == total:
-                    _diag('', end='\n')
-
     def process_line(line):
         if shutdown_event.is_set():
             return
@@ -215,7 +205,6 @@ def prompt_line_by_line(args, messages, available_tools):
 
         with lock:
             completed_count[0] += 1
-            update_progress(completed_count[0])
             if args.oneline:
                 oneline_response = response.replace('\n', ' ')
                 print(f"{line}:{oneline_response}", flush=True)
@@ -374,7 +363,6 @@ def _load_context(path, args, merge_tools=False):
     return messages
 
 
-ACTION_PROMPT = "prompt"
 def action_prompt(args, available_tools):
     if not args.prompt:
         print("this action require --prompt to be provided.")
@@ -853,12 +841,6 @@ def main():
 
     parser = argparse.ArgumentParser(description="cai is a command line utility to make use of LLM intelegent in multiple cases.")
 
-    parser.add_argument("-a", "--action",
-                        choices=[
-                            ACTION_PROMPT,
-                            ],
-                        default=ACTION_PROMPT,
-                        help="the actiont to be performed.")
     parser.add_argument("-p", "--prompt",
                         help="the prompt to send to the LLM.")
     parser.add_argument("--system-prompt",
@@ -878,14 +860,10 @@ def main():
                         help="the model to be used by the LLM")
     parser.add_argument("--force-tools", action="store_true",
                         help="require from llm to make tool use")
-    parser.add_argument("--progress", action="store_true",
-                        help="show progess bar.")
     parser.add_argument("--oneline", action="store_true",
                         help="print results in a oneline all data.")
     parser.add_argument("--strict-format", default=None,
                         help="the expected format from the LLM response: 'json', 'regex:<pattern>', or 'regex-each-line:<pattern>'.")
-    parser.add_argument("--include-reasoning", action="store_true",
-                        help="let the action know whether or not to include reasoning in the output.")
     parser.add_argument("--reasoning-effort", default=None,
                         choices=["high", "medium", "low"],
                         help="enable extended thinking via OpenRouter reasoning.effort")
@@ -917,8 +895,6 @@ def main():
     parser.add_argument('--context', default=None, metavar='PATH',
                         help="path to a .flow file (from /save) to resume from. "
                              "Tools from --tools are appended; --model overrides.")
-    parser.add_argument('--harness', default=None,
-                        help="path to a .harness.cai orchestration file.")
     parser.add_argument('--naked', action='store_true',
                         help="do not prepend any default system prompts. overridden by --system-prompt / --system-prompt-file.")
     parser.add_argument('--logger', action='store_true',
@@ -984,28 +960,19 @@ def main():
         if args.line_by_line or args.oneline:
             parser.error("--interactive is incompatible with --line-by-line / --oneline")
 
-    log.info("main: action=%s model=%s selected_tools=%s interactive=%s",
-             args.action, args.model, sorted(args.selected_tools), args.interactive)
+    log.info("main: model=%s selected_tools=%s interactive=%s",
+             args.model, sorted(args.selected_tools), args.interactive)
 
     if args.logger:
         from cai.logger import launch_tui
         launch_tui(args.log_path)
         return
 
-    if args.harness:
-        from cai.harness import execute_harness, parse_harness_file
-        instructions, label_map = parse_harness_file(args.harness)
-        user_prompt = args.prompt or ""
-        execute_harness(instructions, label_map, user_prompt, args, available_tools,
-                        harness_path=args.harness)
-        return
-
     if args.interactive:
         action_interactive(args, available_tools)
         return
 
-    if args.action == ACTION_PROMPT:
-        action_prompt(args, available_tools)
+    action_prompt(args, available_tools)
 
 
 if __name__ == "__main__":
