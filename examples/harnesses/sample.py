@@ -12,6 +12,5 @@ r.wait()
 
 harness.enrich(r.messages)
 
-r = harness.gate(options=["yes", "no"],
-                 prompt="is that enough?")
+r = harness.gate(options=["yes", "no"], prompt="is that enough?")
 print(r)

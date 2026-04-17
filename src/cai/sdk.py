@@ -474,8 +474,7 @@ class Harness:
 
     # ─── gate ─────────────────────────────────────────────────────────────────
 
-    def gate(self, options: list, prompt: str,
-             *, system_prompt: Optional[str] = None) -> str:
+    def gate(self, options: list, prompt: str, *, system_prompt: Optional[str] = None) -> str:
         """Single-turn strict-format gate: ask a question, get back exactly one
         of ``options``. Wraps the common agent(strict_format=..., ...) idiom
         used for quality checks and routing between harness stages.
@@ -579,6 +578,40 @@ class Harness:
         _cai_logger.log(1, f"COMPACT DONE  harness={self._name!r}  "
                         f"{n_before} \u2192 {len(self.messages)} messages")
         return len(self.messages) != n_before
+
+    # ─── clone ────────────────────────────────────────────────────────────────
+
+    def clone(self, *, name: Optional[str] = None) -> "Harness":
+        """Return an independent copy of this harness.
+
+        Shares the underlying bootstrap context (config, tool registry, MCP
+        servers — so no re-registration cost) but owns its own ``messages``
+        list. ``agent()`` / ``enrich()`` / ``compact()`` on the clone do not
+        touch the original's conversation state.
+
+        Useful for speculative branches: clone, try something, drop the clone
+        if the path didn't pan out — or enrich the original from it if it did.
+
+        Note: per-call ``functions=`` registers globally in ``cai.tools`` (same
+        behaviour as a single harness), so new functions registered via the
+        clone's ``agent()`` become visible to the original's subsequent calls.
+        """
+        new = object.__new__(Harness)
+        new._ctx = self._ctx
+        new._name = name or f"{self._name}-clone-{next(_harness_seq)}"
+        new._functions = list(self._functions)
+        new._system_prompt = self._system_prompt
+        new._tools = list(self._tools)
+        new._model = self._model
+        new._task_mode = self._task_mode
+        new.messages = list(self.messages)
+
+        _cai_logger.log(1, f"HARNESS {new._name}  (clone of {self._name!r})  "
+                        f"model={new._model}  tools={len(new._tools)}  "
+                        f"messages={len(new.messages)}")
+        _cai_logger.push_nest(1)
+        new._nest_active = True
+        return new
 
     # ─── lifecycle ────────────────────────────────────────────────────────────
 
