@@ -9,7 +9,7 @@ runs. The SDK yields four event types:
     tool_result   — a tool invocation has returned
 
 This example also demonstrates the hierarchical JSONL log: every Harness +
-run_agent + enrich call writes structured records to the configured log
+agent + enrich call writes structured records to the configured log
 path. Tail the log in another terminal with ``cai --logger`` to watch the
 session live, or open it with any JSONL viewer afterwards.
 
@@ -39,10 +39,10 @@ def main() -> None:
     # produced inside the `with` block folds as a child of the HARNESS
     # record. log_path overrides the default /tmp/cai/cai.log.
     with Harness(name="streaming-example", log_path=LOG_PATH) as h:
-        # kick off the run. run_agent returns immediately — the worker thread
+        # kick off the run. agent returns immediately — the worker thread
         # starts when we begin iterating the Result below. Naming the block
         # (here, "explore") makes the BLOCK record self-describing in the log.
-        r = h.run_agent(
+        r = h.agent(
                             # tools=READ_TOOLS,
                             skills=['files'],
                             system_prompt=(

@@ -28,7 +28,7 @@ def main() -> None:
 
     # stage 1: decompose the task into atomic subtasks.
     h_decompose = Harness()
-    r = h_decompose.run_agent(
+    r = h_decompose.agent(
         tools=["list_files", "read_lines"],
         system_prompt=(
             "Output a plain list of independent tasks — one per line, no bullets, "
@@ -53,7 +53,7 @@ def main() -> None:
         child = Harness()
 
         # enrichment: gather context for this subtask.
-        r = child.run_agent(
+        r = child.agent(
             tools=READ_TOOLS,
             system_prompt=(
                 "You are a meticulous context-gathering agent. Your only job in this "
@@ -73,7 +73,7 @@ def main() -> None:
         child.enrich(r.messages)
 
         # execute: produce the final result for this subtask.
-        r = child.run_agent(
+        r = child.agent(
             tools=EDIT_TOOLS,
             system_prompt=(
                 "You are an expert software engineer executing a task with full context "
@@ -95,7 +95,7 @@ def main() -> None:
         parent.messages.extend(child.messages)
 
     # stage 3: aggregate all child transcripts into a final summary.
-    r = parent.run_agent(
+    r = parent.agent(
         system_prompt="You are a concise technical writer summarising completed work.",
         prompt=(
             "All subtasks have been completed (their results are in your context). "

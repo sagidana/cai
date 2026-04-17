@@ -22,7 +22,7 @@ def main() -> None:
 
     # stage 1: gather. loop up to 3 times until verify says 'ok'.
     for _ in range(3):
-        r = h.run_agent(
+        r = h.agent(
             tools=READ_TOOLS,
             system_prompt=(
                 "You are an experienced code reviewer in the context-gathering phase. "
@@ -48,7 +48,7 @@ def main() -> None:
             break
 
     # stage 2: analyze. produce structured findings without writing the report.
-    r = h.run_agent(
+    r = h.agent(
         system_prompt=(
             "You are a senior engineer performing a thorough code review. You are "
             "thorough, fair, and constructive. Distinguish blocking issues from "
@@ -100,7 +100,7 @@ def main() -> None:
             "Write the final review with verdict APPROVED. 2–4 sentence summary "
             "and 2–3 specific highlights. Keep it short."
         )
-    r = h.run_agent(system_prompt=system, prompt=prompt)
+    r = h.agent(system_prompt=system, prompt=prompt)
     r.wait()
     print(r.text)
 

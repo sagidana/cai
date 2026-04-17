@@ -26,7 +26,7 @@ def main() -> None:
 
     # stage 1: gather. loop up to 3 times until verify says 'ok'.
     for _ in range(3):
-        r = h.run_agent(
+        r = h.agent(
             tools=READ_TOOLS,
             system_prompt=(
                 "You are an expert debugger in the context-gathering phase. Your only "
@@ -57,7 +57,7 @@ def main() -> None:
 
     # stage 2: fix. loop up to 3 times until review says 'ok'.
     for _ in range(3):
-        r = h.run_agent(
+        r = h.agent(
             tools=FIX_TOOLS,
             system_prompt=(
                 "You are an expert software engineer applying a surgical bug fix. You "
@@ -89,7 +89,7 @@ def main() -> None:
             break
 
     # stage 3: done. write a concise summary.
-    r = h.run_agent(
+    r = h.agent(
         system_prompt="You are a clear technical communicator. Write a concise, accurate summary.",
         prompt=(
             "Summarize the root cause, what was changed, any edge cases addressed, "

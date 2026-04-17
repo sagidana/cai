@@ -25,7 +25,7 @@ def main() -> None:
 
     # stage 1: gather. loop up to 3 times until verify says 'ok'.
     for _ in range(3):
-        r = h.run_agent(
+        r = h.agent(
             tools=READ_TOOLS,
             system_prompt=(
                 "You are an expert refactoring engineer in the context-gathering phase. "
@@ -50,7 +50,7 @@ def main() -> None:
 
     # stage 2: plan. loop up to 3 times until validate_plan says 'ok'.
     for _ in range(3):
-        r = h.run_agent(
+        r = h.agent(
             system_prompt=(
                 "You are a senior engineer designing a refactor plan. A good plan is "
                 "a sequence of small, safe, independently-verifiable steps."
@@ -79,7 +79,7 @@ def main() -> None:
 
     # stage 3: execute the plan. loop up to 3 times until sanity check is 'clean'.
     for _ in range(3):
-        r = h.run_agent(
+        r = h.agent(
             tools=EXEC_TOOLS,
             system_prompt=(
                 "You are an expert engineer executing an approved refactor plan. "
@@ -105,7 +105,7 @@ def main() -> None:
             break
 
     # stage 4: done. final summary.
-    r = h.run_agent(
+    r = h.agent(
         system_prompt="You are a clear technical communicator. Write a concise, accurate refactor summary.",
         prompt=(
             "Summarize: what was refactored, which files changed, which callsites "

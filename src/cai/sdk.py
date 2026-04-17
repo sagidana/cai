@@ -5,7 +5,7 @@ Three public classes: Harness, Result, Event. Import via::
 
     import cai
     h = cai.Harness(system_prompt="...")
-    result = h.run_agent(prompt="...")
+    result = h.agent(prompt="...")
     for event in result:
         ...
     h.enrich(result.messages)
@@ -30,7 +30,7 @@ from cai import logger as _cai_logger
 
 log = logging.getLogger("cai.sdk")
 
-# Auto-generated names for anonymous Harness and run_agent calls, so log
+# Auto-generated names for anonymous Harness and agent() calls, so log
 # records in the TUI have stable, identifying labels.
 _harness_seq = itertools.count(1)
 _block_seq = itertools.count(1)
@@ -62,7 +62,7 @@ _DONE = object()  # sentinel pushed onto the queue to signal iterator end
 
 
 class Result:
-    """Lazy, single-consumption handle for a run_agent call.
+    """Lazy, single-consumption handle for a Harness.agent() call.
 
     Iterating yields Event objects as the agent runs. Reading any final-state
     attribute implicitly drains the iterator first. ``wait()`` drains without
@@ -282,7 +282,7 @@ class Harness:
     """A configured agent session.
 
     Constructor-immutable (except for ``.messages``). Per-call overrides on
-    ``run_agent`` layer on top of harness state: ``system_prompt``/``skills``/
+    ``agent()`` layer on top of harness state: ``system_prompt``/``skills``/
     ``tools``/``functions`` append (union); ``model``/``task_mode`` override.
     """
 
@@ -383,9 +383,9 @@ class Harness:
     def functions(self) -> list:
         return list(self._functions)
 
-    # ─── run_agent ────────────────────────────────────────────────────────────
+    # ─── agent ────────────────────────────────────────────────────────────────
 
-    def run_agent(self, *,
+    def agent(self, *,
                   prompt: Optional[str] = None,
                   messages: Optional[list] = None,
                   system_prompt: Optional[str] = None,
@@ -399,7 +399,7 @@ class Harness:
         import cai.tools as _cai_tools
 
         if prompt is None and messages is None:
-            raise ValueError("run_agent requires prompt or messages")
+            raise ValueError("agent() requires prompt or messages")
 
         # Build effective messages: defensive copy of caller's list, then
         # append the prompt as a user turn if supplied.
@@ -477,7 +477,7 @@ class Harness:
     def gate(self, options: list, prompt: str,
              *, system_prompt: Optional[str] = None) -> str:
         """Single-turn strict-format gate: ask a question, get back exactly one
-        of ``options``. Wraps the common run_agent(strict_format=..., ...) idiom
+        of ``options``. Wraps the common agent(strict_format=..., ...) idiom
         used for quality checks and routing between harness stages.
 
         ``system_prompt`` overrides the default "strict quality gate" persona —
@@ -491,7 +491,7 @@ class Harness:
         quoted = ", ".join(f"'{o}'" for o in options)
         if system_prompt is None:
             system_prompt = f"You are a strict quality gate. Answer only {quoted}."
-        r = self.run_agent(
+        r = self.agent(
             strict_format=f"regex:^({pattern})$",
             system_prompt=system_prompt,
             prompt=prompt,

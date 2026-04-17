@@ -23,7 +23,7 @@ def main() -> None:
 
     # stage 1: gather. loop up to 3 times until verify says 'ok'.
     for _ in range(3):
-        r = h.run_agent(
+        r = h.agent(
             tools=READ_TOOLS,
             system_prompt=(
                 "You are an expert security engineer performing a code audit. Read "
@@ -48,7 +48,7 @@ def main() -> None:
             break
 
     # stage 2: threat model.
-    r = h.run_agent(
+    r = h.agent(
         system_prompt=(
             "You are a senior application security engineer building a threat "
             "model. Think like an attacker. Map every attack surface "
@@ -63,7 +63,7 @@ def main() -> None:
     h.enrich(r.messages)
 
     # stage 3: audit for vulnerabilities.
-    r = h.run_agent(
+    r = h.agent(
         tools=AUDIT_TOOLS,
         system_prompt=(
             "You are an expert application security engineer performing a "
@@ -137,7 +137,7 @@ def main() -> None:
             "Write: ## SECURITY AUDIT REPORT — NO SIGNIFICANT FINDINGS — Summary, "
             "Areas Reviewed, Security Strengths (be specific), Optional Hardening."
         )
-    r = h.run_agent(system_prompt=system, prompt=prompt)
+    r = h.agent(system_prompt=system, prompt=prompt)
     r.wait()
     print(r.text)
 

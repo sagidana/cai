@@ -16,7 +16,7 @@ def main() -> None:
     envelope_json = get_task()
     h = Harness()
 
-    r = h.run_agent(
+    r = h.agent(
         tools=[
             "smali_find_callers", "smali_find_callees",
             "smali_find_implementations", "read_lines",

@@ -7,10 +7,10 @@ the cai SDK. Harness runtime concepts map to SDK idioms like this:
   --enrich result-only  →  h.enrich(result.text)          # append assistant turn
   --enrich none         →  (skip — don't call enrich)
   --prepend-user-prompt →  prepend the user task to the block prompt
-  --tools a, b, c       →  run_agent(tools=["a", "b", "c"])
+  --tools a, b, c       →  agent(tools=["a", "b", "c"])
   --mcp "cmd …"         →  Harness(mcp_servers=["cmd …"])
-  --system-prompt "…"   →  run_agent(system_prompt="…")
-  --strict-format regex →  run_agent(strict_format="regex:<pattern>")
+  --system-prompt "…"   →  agent(system_prompt="…")
+  --strict-format regex →  agent(strict_format="regex:<pattern>")
   --strict-format "…" + 1-word gate →  h.gate(["ok", "retry"], "prompt")
   if x == y: goto L     →  ordinary Python if/elif → function call
   for-each x in B: …    →  ordinary for-loop over B.text.splitlines()
@@ -18,7 +18,7 @@ the cai SDK. Harness runtime concepts map to SDK idioms like this:
 Things the v1 SDK deliberately does not surface (so the ports omit them):
   --max-turns            — let llm.py run to completion
   --force-tools          — rely on prompt wording
-  --reasoning-effort     — not exposed in run_agent
+  --reasoning-effort     — not exposed in agent
   compact-if-more-than   — llm.py auto-compacts via config
 """
 from __future__ import annotations

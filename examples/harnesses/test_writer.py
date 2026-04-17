@@ -25,7 +25,7 @@ def main() -> None:
     h = Harness()
 
     # stage 1: gather the source code to test.
-    r = h.run_agent(
+    r = h.agent(
         tools=READ_TOOLS,
         system_prompt=(
             "You are a test engineer in the context-gathering phase. Deeply "
@@ -42,7 +42,7 @@ def main() -> None:
     h.enrich(r.messages)
 
     # stage 2: gather the project's testing conventions.
-    r = h.run_agent(
+    r = h.agent(
         tools=CONV_TOOLS,
         system_prompt=(
             "You are a test engineer studying the project's testing conventions. "
@@ -59,7 +59,7 @@ def main() -> None:
 
     # stage 3: plan. loop up to 3 times until validate_plan says 'ok'.
     for _ in range(3):
-        r = h.run_agent(
+        r = h.agent(
             system_prompt=(
                 "You are a senior test engineer planning a comprehensive test suite. "
                 "A plan is only good if it covers every meaningful case — not just "
@@ -85,7 +85,7 @@ def main() -> None:
             break
 
     # stage 4: write the tests per the approved plan.
-    r = h.run_agent(
+    r = h.agent(
         tools=WRITE_TOOLS,
         system_prompt=(
             "You are a test engineer implementing a pre-approved plan. Write "

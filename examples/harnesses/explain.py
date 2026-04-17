@@ -21,7 +21,7 @@ def main() -> None:
 
     # stage 1: gather. loop up to 3 times until the verify gate says 'ok'.
     for _ in range(3):
-        r = h.run_agent(
+        r = h.agent(
             tools=READ_TOOLS,
             system_prompt=(
                 "You are an expert engineer in the context-gathering phase. Your goal "
@@ -45,7 +45,7 @@ def main() -> None:
             break
 
     # stage 2: trace. build a structural mental model of the system.
-    r = h.run_agent(
+    r = h.agent(
         system_prompt=(
             "You are an expert engineer building a precise mental model of a "
             "system. Think in terms of execution paths, data transformations, and "
@@ -61,7 +61,7 @@ def main() -> None:
     h.enrich(r.messages)
 
     # stage 3: explain. write the final layered explanation.
-    r = h.run_agent(
+    r = h.agent(
         system_prompt=(
             "You are a senior engineer who excels at explaining complex systems "
             "clearly. You are precise, layered, concrete, and use real names from "

@@ -20,7 +20,7 @@ def main() -> None:
     h = Harness(mcp_servers=["aidle mcp --username bob"])
 
     # stage 1: start. gather all buckets.
-    r = h.run_agent(
+    r = h.agent(
         system_prompt=SOLVER_PROMPT,
         prompt=(
             "choose the haystack challenge in medium difficulty and start reading "
@@ -33,7 +33,7 @@ def main() -> None:
 
     # stage 2: search → verify. loop up to 30 times until verify says 'ok'.
     for _ in range(30):
-        r = h.run_agent(
+        r = h.agent(
             system_prompt=SOLVER_PROMPT,
             prompt=(
                 "your goal is to return for each bucket the places (if there are "
@@ -56,7 +56,7 @@ def main() -> None:
             break
 
     # stage 3: submit.
-    r = h.run_agent(
+    r = h.agent(
         system_prompt=SOLVER_PROMPT,
         prompt="you have the result, submit it and finish the challenge!",
     )

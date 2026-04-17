@@ -27,7 +27,7 @@ def main() -> None:
 
     # stage 1: enrichment. loop up to 3 times until verify says 'ok'.
     for _ in range(3):
-        r = h.run_agent(
+        r = h.agent(
             tools=READ_TOOLS,
             system_prompt=(
                 "You are a meticulous context-gathering agent. Your only job in this "
@@ -55,7 +55,7 @@ def main() -> None:
             break
 
     # stage 2: execute. produce the final result.
-    r = h.run_agent(
+    r = h.agent(
         tools=EDIT_TOOLS,
         system_prompt=(
             "You are an expert software engineer executing a task with full context "

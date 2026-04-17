@@ -16,7 +16,7 @@ def main() -> None:
             "you as fast and as efficient as possible."
         ),
     )
-    r = h.run_agent(prompt="choose the maze challenge and solve it as fast as possible")
+    r = h.agent(prompt="choose the maze challenge and solve it as fast as possible")
     r.wait()
     print(r.text)
 

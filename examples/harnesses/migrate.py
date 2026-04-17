@@ -24,7 +24,7 @@ def main() -> None:
 
     # stage 1: gather + audit. loop up to 3 times until validate_audit says 'ok'.
     for _ in range(3):
-        r = h.run_agent(
+        r = h.agent(
             tools=READ_TOOLS,
             system_prompt=(
                 "You are a migration engineer in the context-gathering phase. Find "
@@ -40,7 +40,7 @@ def main() -> None:
         r.wait()
         h.enrich(r.messages)
 
-        r = h.run_agent(
+        r = h.agent(
             system_prompt=(
                 "You are a migration engineer cataloguing every usage that needs to "
                 "change. Every usage you miss becomes a production bug."
@@ -64,7 +64,7 @@ def main() -> None:
             break
 
     # stage 2: plan the migration sequence.
-    r = h.run_agent(
+    r = h.agent(
         system_prompt=(
             "You are a migration engineer sequencing a safe migration. Order "
             "matters: migrate shared utilities before callers; tests last."
@@ -79,7 +79,7 @@ def main() -> None:
 
     # stage 3: execute. loop up to 3 times until verify says 'clean'.
     for _ in range(3):
-        r = h.run_agent(
+        r = h.agent(
             tools=EXEC_TOOLS,
             system_prompt=(
                 "You are a migration engineer executing an approved plan. Every "
@@ -105,7 +105,7 @@ def main() -> None:
             break
 
     # stage 4: done. final report.
-    r = h.run_agent(
+    r = h.agent(
         system_prompt="You are a clear technical communicator writing a migration completion report.",
         prompt=(
             "Report: what was migrated, how many files/usages changed, behaviour "

@@ -25,7 +25,7 @@ def main() -> None:
 
     # stage 1: gather. loop up to 3 times until verify says 'ok'.
     for _ in range(3):
-        r = h.run_agent(
+        r = h.agent(
             tools=READ_TOOLS,
             system_prompt=(
                 "You are a senior engineer in the context-gathering phase before "
@@ -51,7 +51,7 @@ def main() -> None:
 
     # stage 2: design. loop up to 3 times until validate_design says 'ok'.
     for _ in range(3):
-        r = h.run_agent(
+        r = h.agent(
             system_prompt=(
                 "You are a senior engineer designing a new feature. Design for the "
                 "codebase as it is. Reuse what exists. Follow established patterns. "
@@ -80,7 +80,7 @@ def main() -> None:
             break
 
     # stage 3: implement the feature per the approved design.
-    r = h.run_agent(
+    r = h.agent(
         tools=IMPL_TOOLS,
         system_prompt=(
             "You are a senior engineer implementing an approved feature design. "
@@ -97,7 +97,7 @@ def main() -> None:
     h.enrich(r.messages)
 
     # stage 4: write tests for the implementation.
-    r = h.run_agent(
+    r = h.agent(
         tools=IMPL_TOOLS,
         system_prompt=(
             "You are a test engineer writing tests for a newly implemented feature. "

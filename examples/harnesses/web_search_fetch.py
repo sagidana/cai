@@ -18,7 +18,7 @@ def main() -> None:
 
     # stage 1: search. loop up to 3 times until verify says 'ok'.
     for _ in range(3):
-        r = h.run_agent(
+        r = h.agent(
             tools=["fetch_url"],
             system_prompt=(
                 "You are a focused web research agent. Your only tool is "
@@ -51,7 +51,7 @@ def main() -> None:
             break
 
     # stage 2: report. produce the sourced summary.
-    r = h.run_agent(
+    r = h.agent(
         system_prompt=(
             "You are a research analyst distilling web findings into a precise, "
             "well-sourced summary. Every key claim must have a source URL."

@@ -18,7 +18,7 @@ def main() -> None:
 
     # stage 1: decompose the task into focused sub-questions.
     h_decompose = Harness()
-    r = h_decompose.run_agent(
+    r = h_decompose.agent(
         system_prompt=(
             "Output a plain list of focused research sub-questions — one per "
             "line, no bullets, no numbering, no extra text. Maximum 5."
@@ -42,7 +42,7 @@ def main() -> None:
 
         # search loop: loop up to 3 times until verify says 'ok'.
         for _ in range(3):
-            r = h_research.run_agent(
+            r = h_research.agent(
                 tools=["fetch_url"],
                 system_prompt=(
                     "You are a focused web research agent. Your only tool is "
@@ -75,7 +75,7 @@ def main() -> None:
                 break
 
         # report: produce the per-question sourced summary.
-        r = h_research.run_agent(
+        r = h_research.agent(
             system_prompt=(
                 "You are a research analyst distilling web findings into a precise, "
                 "well-sourced summary. Every key claim must have a source URL."
@@ -98,7 +98,7 @@ def main() -> None:
     for q, ans in findings:
         h_synth.enrich(f"Sub-question: {q}\n\n{ans}")
 
-    r = h_synth.run_agent(
+    r = h_synth.agent(
         system_prompt=(
             "You are an expert research analyst. Synthesize gathered research "
             "into a comprehensive, well-structured, accurate answer. Prioritise "

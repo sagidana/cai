@@ -22,7 +22,7 @@ def main() -> None:
     h = Harness()
 
     # stage 1: gather code being documented.
-    r = h.run_agent(
+    r = h.agent(
         tools=READ_TOOLS,
         system_prompt=(
             "You are a technical writer in the context-gathering phase. Read the "
@@ -39,7 +39,7 @@ def main() -> None:
     h.enrich(r.messages)
 
     # stage 2: gather doc conventions used in the project.
-    r = h.run_agent(
+    r = h.agent(
         tools=CONV_TOOLS,
         system_prompt=(
             "You are a technical writer studying the project's documentation "
@@ -57,7 +57,7 @@ def main() -> None:
 
     # stage 3: outline. loop up to 3 times until validate_outline says 'ok'.
     for _ in range(3):
-        r = h.run_agent(
+        r = h.agent(
             system_prompt=(
                 "You are a technical writer planning a documentation structure. A "
                 "good outline ensures every public interface is covered and nothing "
@@ -86,7 +86,7 @@ def main() -> None:
             break
 
     # stage 4: write final docs.
-    r = h.run_agent(
+    r = h.agent(
         tools=WRITE_TOOLS,
         system_prompt=(
             "You are a technical writer producing final documentation. Write with "

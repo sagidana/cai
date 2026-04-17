@@ -24,7 +24,7 @@ def main() -> None:
 
     # stage 1: classify. resolve the descriptor and emit one JSON envelope line
     # (or ERROR:…). Strict format enforces the single-line output shape.
-    r = h.run_agent(
+    r = h.agent(
         strict_format=r"regex:^(\{\"descriptor\":\"L.+\}|ERROR:.+)$",
         tools=["smali_resolve_descriptor", "list_files", "pattern_search"],
         system_prompt=(
@@ -59,7 +59,7 @@ def main() -> None:
     )
     if verdict != "ok":
         # error path: explain why we couldn't resolve the query.
-        r = h.run_agent(
+        r = h.agent(
             system_prompt="You are a helpful assistant explaining why a smali XRef query could not be completed.",
             prompt=(
                 f"User asked: {task}\nResolution failure: {envelope}\n\n"
@@ -80,7 +80,7 @@ def main() -> None:
         # expand each frontier node in isolation.
         for env in frontier:
             h_expand = Harness()
-            r = h_expand.run_agent(
+            r = h_expand.agent(
                 tools=[
                     "smali_find_callers", "smali_find_callees",
                     "smali_find_implementations", "read_lines",
@@ -122,7 +122,7 @@ def main() -> None:
             break
 
         # compute the next frontier: one JSON envelope line per not-yet-visited descriptor.
-        r = h.run_agent(
+        r = h.agent(
             system_prompt=(
                 "You are a BFS frontier manager. Emit JSON envelope lines for the "
                 "next expansion round — one per non-visited descriptor. No "
@@ -147,7 +147,7 @@ def main() -> None:
             break
 
     # stage 5: synthesize the accumulated graph into the user-facing answer.
-    r = h.run_agent(
+    r = h.agent(
         tools=[
             "smali_find_callers", "smali_find_callees",
             "smali_find_implementations", "read_lines",
