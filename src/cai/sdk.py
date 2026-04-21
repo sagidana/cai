@@ -238,6 +238,10 @@ class Result:
                     tool_result=ev["result"],
                     is_error=ev["is_error"],
                 ))
+            elif ev["type"] == "usage":
+                # Latest turn's usage. prompt_tokens reflects current context
+                # depth; completion_tokens/total_tokens are this turn only.
+                self._usage = ev["usage"]
 
         _cai_logger.push_nest(1)
         try:
