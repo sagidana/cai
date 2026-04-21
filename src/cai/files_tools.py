@@ -18,8 +18,8 @@ def register(mcp):
         (ripgrep-backed), unicode-aware, and automatically skips binary files, hidden files,
         and paths listed in .gitignore.
 
-        **Result pagination:** At most 500 result lines are returned per call.
-        By default you get lines 1–500. To read further results, call again with
+        **Result pagination:** At most 100 result lines are returned per call.
+        By default you get lines 1–100. To read further results, call again with
         start/end — for example start=501, end=1000 for the next page. When the
         output is truncated a footer line tells you the total number of matches so
         you know whether more pages exist.
@@ -35,7 +35,7 @@ def register(mcp):
                        Defaults to 1. Use this to paginate: start=1 gives the first
                        page, start=501 gives the second page, etc.
             end:       1-based index of the last result line to return (inclusive).
-                       Defaults to start + 499 (i.e. a window of 500 lines).
+                       Defaults to start + 499 (i.e. a window of 100 lines).
                        Set explicitly to narrow or widen the window. For example,
                        start=1, end=50 returns only the first 50 matches;
                        start=200, end=250 returns matches 200–250.
@@ -67,7 +67,7 @@ def register(mcp):
             if end is not None:
                 e = end
             else:
-                e = s + 500
+                e = s + 100
             sliced = lines[s:e]
             result_text = "\n".join(sliced)
             if len(sliced) < total:
@@ -156,8 +156,8 @@ def register(mcp):
         "src/.*\\.ts$" for TypeScript files under src/).  Directory traversal always goes full-depth
         regardless of the filter so nested matches are never missed.
 
-        **Result pagination:** At most 500 result lines are returned per call.
-        By default you get lines 1–500. To read further results, call again with
+        **Result pagination:** At most 100 result lines are returned per call.
+        By default you get lines 1–100. To read further results, call again with
         start/end — for example start=501, end=1000 for the next page. When the
         output is truncated a footer line tells you the total number of entries so
         you know whether more pages exist.
@@ -171,7 +171,7 @@ def register(mcp):
                      Defaults to 1. Use this to paginate: start=1 gives the first
                      page, start=501 gives the second page, etc.
             end:     1-based index of the last result line to return (inclusive).
-                     Defaults to start + 499 (i.e. a window of 500 lines).
+                     Defaults to start + 499 (i.e. a window of 100 lines).
                      Set explicitly to narrow or widen the window. For example,
                      start=1, end=50 returns only the first 50 entries;
                      start=200, end=250 returns entries 200–250.
@@ -227,7 +227,7 @@ def register(mcp):
         if end is not None:
             e = end
         else:
-            e = s + 500
+            e = s + 100
         sliced = entries[s:e]
 
         result_text = "\n".join(sliced)
