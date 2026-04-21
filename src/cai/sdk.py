@@ -358,8 +358,10 @@ class Harness:
         self._model = model or ctx.config.get("model")
         self._task_mode = task_mode
 
-        # 8. Hooks (see llm.DEFAULT_HOOKS for the built-in context-budget
-        # strategy). None -> llm uses DEFAULT_HOOKS; pass [] to disable all.
+        # 8. Hooks. No hooks run by default. For the built-in context-budget
+        # behaviour, opt in by passing hooks=[("after_turn", mask_hook),
+        # ("after_turn", compact_hook)] — both are exported from the cai
+        # package.
         self._hooks = hooks
 
         # Caller-owned conversation state

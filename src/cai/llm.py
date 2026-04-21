@@ -592,9 +592,11 @@ def _compact_messages(messages, model):
         len(compactable), len(summary), summary))
 
 
-def default_mask_hook(ctx):
+def mask_hook(ctx):
     """after_turn hook. Fires at observation_mask_pct — masks old tool results
-    with a short placeholder. No LLM call."""
+    with a short placeholder. No LLM call.
+
+    Opt-in: register via Harness(hooks=[("after_turn", mask_hook), ...])."""
     messages = ctx["messages"]
     usage = ctx["usage"]
     profile = get_model_profile(ctx["model"])
@@ -613,9 +615,11 @@ def default_mask_hook(ctx):
     _apply_observation_mask(messages)
 
 
-def default_compact_hook(ctx):
+def compact_hook(ctx):
     """after_turn hook. Fires at context_budget_pct — LLM-summarises middle
-    turns into a memory message."""
+    turns into a memory message.
+
+    Opt-in: register via Harness(hooks=[("after_turn", compact_hook), ...])."""
     messages = ctx["messages"]
     usage = ctx["usage"]
     model = ctx["model"]
@@ -635,10 +639,9 @@ def default_compact_hook(ctx):
     _compact_messages(messages, model)
 
 
-DEFAULT_HOOKS = [
-    ("after_turn", default_mask_hook),
-    ("after_turn", default_compact_hook),
-]
+# No hooks run by default. mask_hook and compact_hook are exported from the
+# cai package for users who want the built-in context-budget behaviour.
+DEFAULT_HOOKS = []
 
 
 # ---------------------------------------------------------------------------
