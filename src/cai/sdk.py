@@ -382,6 +382,16 @@ class Harness:
         return list(self._tools)
 
     @property
+    def available_tools(self) -> list:
+        """Names of every tool registered across all MCP servers (internal +
+        external). This is the superset you can draw from when passing
+        ``tools=[...]`` to ``Harness`` or ``agent()``. Contrast with ``.tools``,
+        which is only the allowlisted subset this harness was configured with.
+        """
+        import cai.tools as _cai_tools
+        return [t["function"]["name"] for t in _cai_tools.get_all_tools()]
+
+    @property
     def system_prompt(self) -> str:
         return self._system_prompt
 

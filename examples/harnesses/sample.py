@@ -26,19 +26,29 @@ all_hooks = [
 
 # No hooks run by default. Pass hooks=all_hooks to register the no-ops above
 # (plus the commented-out built-ins if you uncomment them).
-harness = Harness(system_prompt="", log_path="/tmp/cai/cai.log", hooks=all_hooks) # do not use any defaults
+harness = Harness(system_prompt="",
+                  log_path="/tmp/cai/cai.log",
+                  # hooks=all_hooks,
+                  mcp_servers=["harness-benchmark mcp --username bob"],
+                  tools =   [
+                              "harness_benchmark__list_challenges",
+                              "harness_benchmark__introspect_challenge",
+                              "harness_benchmark__join_challenge",
+                              "harness_benchmark__get_available_actions",
+                              "harness_benchmark__get_objective",
+                              "harness_benchmark__get_cost",
+                              "harness_benchmark__perform_action",
+                              "harness_benchmark__poll_events",
+                              "harness_benchmark__leave_challenge",
+                              "harness_benchmark__end_challenge"
+                            ])
 
-r = harness.agent(  system_prompt="return a list of items only",
-                    prompt="list all functions in this project",
-                    strict_format=r"regex-each-line:^(-).*$",
-                    skills=['files'])
+r = harness.agent(  system_prompt="",
+                    prompt="try and solve the cipher decoder challenge at dificulty easy.",
+                    tools=["list_challenges", "introspect_challenge", "join_challenge", "get_available_actions", "get_objective", "get_cost", "perform_action", "poll_events", "leave_challenge", "end_challenge"])
 r.wait()
 
-for function in r.text.splitlines():
-    r = harness.gate(   options=['yes', 'no'],
-                        skills=['files'],
-                        prompt=f"does the '{function}' function interacting with file system in some way?")
-    print(f"{function} -> {r}")
+print(r.text)
 
 # cloned = harness.clone()
 # for _ in range(3):
