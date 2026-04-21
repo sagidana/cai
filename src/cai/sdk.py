@@ -78,7 +78,8 @@ class Result:
                  max_turns: Optional[int] = None,
                  strict_format: Optional[str] = None,
                  block_name: str = "",
-                 log_ctx: Optional[contextvars.Context] = None):
+                 log_ctx: Optional[contextvars.Context] = None,
+                 hooks: Optional[list] = None):
         self._input_messages = messages
         self._system_prompt = system_prompt
         self._tool_dicts = tool_dicts     # OpenAI-format schema list for call_llm
@@ -86,6 +87,7 @@ class Result:
         self._config = config
         self._max_turns = max_turns
         self._strict_format = strict_format
+        self._hooks = hooks
         # Log plumbing: name used in BLOCK RESULT records, and a contextvars
         # snapshot so the worker thread inherits the caller's nesting level.
         self._block_name = block_name
@@ -253,6 +255,7 @@ class Result:
                 reasoning_callback=reasoning_cb,
                 event_callback=event_cb,
                 interrupt_event=self._interrupt,
+                hooks=self._hooks,
             )
             # content is the last assistant turn's text; self._text already
             # accumulated it via stream_cb, but override with the returned
@@ -301,7 +304,8 @@ class Harness:
                  task_mode: Optional[str] = None,
                  mcp_servers: Optional[list] = None,
                  name: Optional[str] = None,
-                 log_path: Optional[str] = None):
+                 log_path: Optional[str] = None,
+                 hooks: Optional[list] = None):
         import cai.tools as _cai_tools
 
         # 0. Lazy-init the structured logger so SDK-only users get the same
@@ -354,6 +358,10 @@ class Harness:
         self._model = model or ctx.config.get("model")
         self._task_mode = task_mode
 
+        # 8. Hooks (see llm.DEFAULT_HOOKS for the built-in context-budget
+        # strategy). None -> llm uses DEFAULT_HOOKS; pass [] to disable all.
+        self._hooks = hooks
+
         # Caller-owned conversation state
         self.messages: list = []
 
@@ -395,7 +403,8 @@ class Harness:
                   model: Optional[str] = None,
                   task_mode: Optional[str] = None,
                   strict_format: Optional[str] = None,
-                  name: Optional[str] = None) -> Result:
+                  name: Optional[str] = None,
+                  hooks: Optional[list] = None) -> Result:
         import cai.tools as _cai_tools
 
         if prompt is None and messages is None:
@@ -470,6 +479,7 @@ class Harness:
             strict_format=strict_format,
             block_name=block_name,
             log_ctx=contextvars.copy_context(),
+            hooks=hooks if hooks is not None else self._hooks,
         )
 
     # ─── gate ─────────────────────────────────────────────────────────────────

@@ -183,6 +183,22 @@ def trim_tool_result(result, usage=None, profile=None, max_chars=None):
 
 
 # ---------------------------------------------------------------------------
+# Public one-shot LLM call for hook authors / SDK users.
+# ---------------------------------------------------------------------------
+def chat(messages, model):
+    """One-shot LLM call. Returns the assistant text content, or None on failure.
+
+    Intended for use from inside hooks (e.g. an after_tool_call hook that wants
+    to LLM-compress the last tool result) without reaching into openai_api.
+    """
+    result = openai_api.chat(messages, model=model)
+    if not result:
+        return None
+    content, _reasoning, _tool_calls, _usage = result
+    return content
+
+
+# ---------------------------------------------------------------------------
 # Tool execution
 # ---------------------------------------------------------------------------
 def _execute_tool(call_name, arguments, allowed_tool_names, usage=None, profile=None):
@@ -218,8 +234,9 @@ def _execute_tool(call_name, arguments, allowed_tool_names, usage=None, profile=
 
 def handle_tool_calls(tool_calls, messages, call_content, allowed_tool_names,
                       tool_callback=None, usage=None, profile=None, reasoning=None,
-                      event_callback=None):
+                      event_callback=None, hooks_by_event=None, model=None):
     log.info("handle_tool_calls: dispatching %d tool call(s)", len(tool_calls))
+    hooks_by_event = hooks_by_event if hooks_by_event is not None else _group_hooks(None)
     for call in tool_calls:
         if call.get('type') != 'function':
             log.warning("tool call with invalid type: %s", call.get('type'))
@@ -250,8 +267,22 @@ def handle_tool_calls(tool_calls, messages, call_content, allowed_tool_names,
                 'id': call_id,
             })
 
-        result = _execute_tool(call_name, arguments, allowed_tool_names,
-                               usage=usage, profile=profile)
+        tool_call_dict = {'name': call_name, 'arguments': arguments, 'id': call_id}
+        hook_ctx = {
+            'messages': messages,
+            'model': model,
+            'usage': usage or {},
+            'tool_call': tool_call_dict,
+            'content': None,
+        }
+        vetoed = _fire_hooks('before_tool_call', hook_ctx, hooks_by_event)
+
+        if vetoed:
+            result = f"Error: tool '{call_name}' was aborted by a before_tool_call hook"
+            log.info("tool call: %s vetoed by hook", call_name)
+        else:
+            result = _execute_tool(call_name, arguments, allowed_tool_names,
+                                   usage=usage, profile=profile)
 
         if result.startswith("Error:"):
             _cai_logger.log(2, "TOOL ERROR {} — {}".format(call_name, result))
@@ -284,6 +315,8 @@ def handle_tool_calls(tool_calls, messages, call_content, allowed_tool_names,
         tool_msg = {'role': 'tool', 'tool_call_id': call_id, 'content': result}
         messages.append(assistant_msg)
         messages.append(tool_msg)
+
+        _fire_hooks('after_tool_call', hook_ctx, hooks_by_event)
 
 
 # ---------------------------------------------------------------------------
@@ -559,45 +592,97 @@ def _compact_messages(messages, model):
         len(compactable), len(summary), summary))
 
 
-def _check_context_budget(messages, usage, profile, model, status_callback=None):
-    """Apply observation masking and/or LLM compaction based on context budget thresholds.
-
-    Two independent thresholds (both configurable):
-      observation_mask_pct  — lower threshold: mask old tool results (no LLM call)
-      context_budget_pct    — higher threshold: LLM-summarise middle turns as fallback
-    Both can fire in the same turn; masking always runs first.
-    """
+def default_mask_hook(ctx):
+    """after_turn hook. Fires at observation_mask_pct — masks old tool results
+    with a short placeholder. No LLM call."""
+    messages = ctx["messages"]
+    usage = ctx["usage"]
+    profile = get_model_profile(ctx["model"])
     prompt_tokens = usage.get('prompt_tokens', 0)
     context_limit = profile.get('context', 16000)
     if not prompt_tokens or not context_limit:
         return
-
     budget_pct = prompt_tokens / context_limit
+    default_threshold = OBSERVATION_MASK_THRESHOLDS.get(profile['tier'], 0.60)
+    threshold = config.get('observation_mask_pct', default_threshold) if config else default_threshold
+    if budget_pct < threshold:
+        return
+    log.warning("context budget: %.0f%% used (%d/%d tokens), applying observation mask",
+                budget_pct * 100, prompt_tokens, context_limit)
+    _diag(f"\n[context {budget_pct:.0%} >= {threshold:.0%}] masking old tool results...")
+    _apply_observation_mask(messages)
 
-    default_mask_threshold = OBSERVATION_MASK_THRESHOLDS.get(profile['tier'], 0.60)
-    default_compact_threshold = CONTEXT_BUDGET_THRESHOLDS.get(profile['tier'], 0.75)
-    mask_threshold = config.get('observation_mask_pct', default_mask_threshold) if config else default_mask_threshold
-    compact_threshold = config.get('context_budget_pct', default_compact_threshold) if config else default_compact_threshold
 
-    if budget_pct >= mask_threshold:
-        log.warning("context budget: %.0f%% used (%d/%d tokens), applying observation mask",
-                    budget_pct * 100, prompt_tokens, context_limit)
-        msg = f"[context {budget_pct:.0%} >= {mask_threshold:.0%}] masking old tool results..."
-        if status_callback:
-            status_callback(msg)
-        else:
-            _diag(f"\n{msg}")
-        _apply_observation_mask(messages)
+def default_compact_hook(ctx):
+    """after_turn hook. Fires at context_budget_pct — LLM-summarises middle
+    turns into a memory message."""
+    messages = ctx["messages"]
+    usage = ctx["usage"]
+    model = ctx["model"]
+    profile = get_model_profile(model)
+    prompt_tokens = usage.get('prompt_tokens', 0)
+    context_limit = profile.get('context', 16000)
+    if not prompt_tokens or not context_limit:
+        return
+    budget_pct = prompt_tokens / context_limit
+    default_threshold = CONTEXT_BUDGET_THRESHOLDS.get(profile['tier'], 0.75)
+    threshold = config.get('context_budget_pct', default_threshold) if config else default_threshold
+    if budget_pct < threshold:
+        return
+    log.warning("context budget: %.0f%% used (%d/%d tokens), compacting",
+                budget_pct * 100, prompt_tokens, context_limit)
+    _diag(f"\n[context {budget_pct:.0%} >= {threshold:.0%}] compacting...")
+    _compact_messages(messages, model)
 
-    if budget_pct >= compact_threshold:
-        log.warning("context budget: %.0f%% used (%d/%d tokens), compacting",
-                    budget_pct * 100, prompt_tokens, context_limit)
-        msg = f"[context {budget_pct:.0%} >= {compact_threshold:.0%}] compacting..."
-        if status_callback:
-            status_callback(msg)
-        else:
-            _diag(f"\n{msg}")
-        _compact_messages(messages, model)
+
+DEFAULT_HOOKS = [
+    ("after_turn", default_mask_hook),
+    ("after_turn", default_compact_hook),
+]
+
+
+# ---------------------------------------------------------------------------
+# Hook dispatch
+# ---------------------------------------------------------------------------
+VALID_HOOK_EVENTS = ("before_tool_call", "after_tool_call", "after_turn", "on_final_response")
+
+
+def _group_hooks(hooks):
+    """Group a list of (event, fn) tuples into {event: [fn, ...]}. Validates event names."""
+    grouped = {e: [] for e in VALID_HOOK_EVENTS}
+    for event, fn in (hooks if hooks is not None else DEFAULT_HOOKS):
+        if event not in grouped:
+            raise ValueError(f"unknown hook event: {event!r}. Valid: {VALID_HOOK_EVENTS}")
+        grouped[event].append(fn)
+    return grouped
+
+
+def _fire_hooks(event, ctx, hooks_by_event):
+    """Fire hooks for `event` in registration order.
+
+    Exceptions are logged and do not stop the chain.
+    Return value:
+      before_tool_call  -> True if any hook vetoed (returned False), else False.
+      on_final_response -> the replacement string if the last hook returned one, else None.
+      other events      -> None.
+    """
+    vetoed = False
+    replacement = None
+    for fn in hooks_by_event.get(event, ()):
+        try:
+            result = fn(ctx)
+        except Exception:
+            log.exception("hook %r for %s raised", getattr(fn, '__name__', repr(fn)), event)
+            continue
+        if event == "before_tool_call" and result is False:
+            vetoed = True
+        elif event == "on_final_response" and isinstance(result, str):
+            replacement = result
+    if event == "before_tool_call":
+        return vetoed
+    if event == "on_final_response":
+        return replacement
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -641,11 +726,15 @@ def call_llm(messages,
              ctx_callback=None,
              interrupt_event=None,
              reasoning_callback=None,
-             event_callback=None):
+             event_callback=None,
+             hooks=None):
     # Names the LLM was given — used to gate execution in _execute_tool.
     allowed_tool_names = {t.get('function', {}).get('name') for t in tools}
 
     profile = get_model_profile(model)
+
+    # Group hooks by event once. hooks=None picks up DEFAULT_HOOKS.
+    hooks_by_event = _group_hooks(hooks)
 
     log.info("call_llm: model=%s tier=%s context=%d messages=%d tools=%d streaming=%s strict_format=%s max_turns=%s",
              model,
@@ -725,6 +814,16 @@ def call_llm(messages,
             ctx_callback(ctx_str)
 
         if not tool_calls:
+            final_ctx = {
+                'messages': messages,
+                'model': model,
+                'usage': usage or {},
+                'tool_call': None,
+                'content': content,
+            }
+            replacement = _fire_hooks('on_final_response', final_ctx, hooks_by_event)
+            if replacement is not None:
+                content = replacement
             log.info("call_llm: done turn=%d length=%d", turn, len(content))
             _cai_logger.log(2, "[assistant]\n{}".format(content))
             _emit_status("ready", status_callback)
@@ -754,7 +853,8 @@ def call_llm(messages,
 
         handle_tool_calls(tool_calls, messages, content, allowed_tool_names,
                           tool_callback=tool_callback, usage=usage, profile=profile,
-                          reasoning=reasoning, event_callback=event_callback)
+                          reasoning=reasoning, event_callback=event_callback,
+                          hooks_by_event=hooks_by_event, model=model)
         if tool_callback:
             tool_callback("\n")
 
@@ -762,8 +862,14 @@ def call_llm(messages,
         if config.get('stuck_detection', False):
             _warn_if_stuck(tool_calls, call_history, messages)
 
-        # _check_context_budget may compact (replace) messages
-        _check_context_budget(messages, usage, profile, model, status_callback)
+        turn_ctx = {
+            'messages': messages,
+            'model': model,
+            'usage': usage or {},
+            'tool_call': None,
+            'content': None,
+        }
+        _fire_hooks('after_turn', turn_ctx, hooks_by_event)
         _cai_logger.pop_nest(1)              # pop at end of loop body
 
     log.warning("call_llm: reached max_turns=%s", max_turns)
