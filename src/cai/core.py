@@ -115,36 +115,58 @@ class BootstrapContext:
 
 def bootstrap(overrides: Optional[dict] = None,
               config_dir: Optional[str] = None,
-              diag_fn=None) -> BootstrapContext:
+              diag_fn=None,
+              load_user_init: bool = False) -> BootstrapContext:
     """Initialise cai's runtime dependencies.
 
     Reads the config + api key, builds the OpenAI/OpenRouter clients, registers
     the internal MCP tools server, and wires up the llm module. Returns a
     BootstrapContext exposing everything the caller may need.
 
-    :param overrides:   optional dict of config keys to override after loading
-                        (e.g. {"model": "openai/gpt-4o", "base_url": "..."})
-    :param config_dir:  override the default ~/.config/cai location
-    :param diag_fn:     optional diagnostic function passed to llm.setup()
+    Config precedence, low → high: ``config.json`` → ``init.py`` (if loaded,
+    either now via ``load_user_init=True`` or earlier via ``cai.load_init()``)
+    → ``overrides`` arg.
+
+    :param overrides:       optional dict of config keys to override after loading
+                            (e.g. {"model": "openai/gpt-4o", "base_url": "..."})
+    :param config_dir:      override the default ~/.config/cai location
+    :param diag_fn:         optional diagnostic function passed to llm.setup()
+    :param load_user_init:  if True, exec ~/.config/cai/init.py (creating a default
+                            on first run). The CLI opts in; the SDK leaves it off
+                            for reproducibility, but SDK users can call
+                            ``cai.load_init()`` explicitly before constructing a Harness.
     """
     import cai.tools as _cai_tools
     import cai.llm as _llm
+    from cai import userconfig
 
     log.info("bootstrap: starting")
 
     _cai_tools.register_server(_cai_tools.INTERNAL_SERVER)
 
     config = load_config(config_dir)
+
+    if load_user_init:
+        userconfig.load_init(config_dir)
+
+    init_overrides = userconfig.config._as_dict()
+    if init_overrides:
+        config.update(init_overrides)
+
     if overrides:
         config.update(overrides)
     api_key = load_api_key(config_dir)
     openai_api, openrouter_api = build_apis(config, api_key)
     available_tools = _cai_tools.get_all_tools()
 
+    # Promote user-registered hooks to the global default. Replace rather than
+    # extend so repeated bootstraps don't stack duplicates.
+    _llm.DEFAULT_HOOKS = list(userconfig._user_hooks)
+
     _llm.setup(config, openai_api, _cai_tools.call_tool, diag_fn=diag_fn)
 
-    log.info("bootstrap: done (base_url=%s, available_tools=%d)",
-             config.get('base_url'), len(available_tools))
+    log.info("bootstrap: done (base_url=%s, available_tools=%d, user_hooks=%d)",
+             config.get('base_url'), len(available_tools), len(userconfig._user_hooks))
 
     return BootstrapContext(
         config=config,

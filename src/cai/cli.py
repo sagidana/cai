@@ -161,7 +161,7 @@ def init():
     select_tools = _select_tools
     _llm = _llm_mod
 
-    ctx = core.bootstrap(diag_fn=_diag)
+    ctx = core.bootstrap(diag_fn=_diag, load_user_init=True)
     config = ctx.config
     api_key = ctx.api_key
     openai_api = ctx.openai_api
