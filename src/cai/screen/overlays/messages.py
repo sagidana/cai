@@ -719,66 +719,95 @@ def _fold_all(ctx: _MsgOverlayCtx, folded: bool) -> None:
         ctx.collapsed.clear()
 
 
-# ── Nvim edit (reuses context.py's logic verbatim, parameterised) ────────────
+# ── Nvim edit ────────────────────────────────────────────────────────────────
+
+def _unpack_tool_args(msg: dict) -> dict:
+    """Return a copy of *msg* with each tool_call's stringified ``arguments``
+    parsed into a nested JSON value. Arguments that don't parse (malformed
+    or already non-string) are left untouched.
+    """
+    out = copy.deepcopy(msg)
+    for tc in out.get('tool_calls') or []:
+        fn = tc.get('function')
+        if not isinstance(fn, dict):
+            continue
+        raw = fn.get('arguments')
+        if isinstance(raw, str) and raw.strip():
+            try:
+                fn['arguments'] = _json.loads(raw)
+            except _json.JSONDecodeError:
+                pass
+    return out
+
+
+def _repack_tool_args(msg: dict) -> dict:
+    """Inverse of :func:`_unpack_tool_args`: re-serialize any nested tool-call
+    ``arguments`` back to a string, which is the wire format the LLM and
+    tool dispatcher expect.
+    """
+    for tc in msg.get('tool_calls') or []:
+        fn = tc.get('function')
+        if not isinstance(fn, dict):
+            continue
+        args = fn.get('arguments')
+        if isinstance(args, (dict, list)):
+            fn['arguments'] = _json.dumps(args)
+    return msg
+
 
 def _edit_in_nvim(ctx: _MsgOverlayCtx, screen) -> None:
-    ai = ctx.view[ctx.selected_idx]
+    """Open the selected message in nvim.
+
+    Messages with structure (tool_calls, list content, or stored reasoning)
+    are edited as the raw JSON object so the user can rewrite tool names,
+    arguments, call ids, etc. Plain text messages edit as raw content —
+    no JSON escaping needed for the common case.
+    """
+    ai  = ctx.view[ctx.selected_idx]
     msg = ctx.messages[ai]
-    content = msg.get('content', '')
-    tool_calls = msg.get('tool_calls')
-    reasoning = msg.get('_reasoning', '')
-    is_json = not isinstance(content, str)
-    read_only = bool(tool_calls)
 
-    sections = []
-    if reasoning:
-        sections.append(f"--- Reasoning ---\n{reasoning}")
-    if tool_calls:
-        parts = []
-        for tc in tool_calls:
-            func = tc.get('function', {})
-            name = func.get('name', '?')
-            raw_args = func.get('arguments', '')
-            try:
-                parsed = _json.loads(raw_args) if raw_args else {}
-                args_str = _json.dumps(parsed, indent=2)
-            except Exception:
-                args_str = raw_args
-            parts.append(f"Tool: {name}\nArguments:\n{args_str}")
-        sections.append("--- Tool Calls ---\n" + '\n\n'.join(parts))
-    if content:
-        text = _json.dumps(content, indent=2) if is_json else content
-        sections.append(f"--- Content ---\n{text}" if sections else text)
-    text = '\n\n'.join(sections) if sections else (content or '')
+    needs_json = (
+        bool(msg.get('tool_calls'))
+        or isinstance(msg.get('content'), list)
+        or bool(msg.get('_reasoning'))
+    )
 
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+    if needs_json:
+        editable = _unpack_tool_args(msg)
+        # ensure_ascii=False so non-ASCII content stays readable in the editor.
+        text   = _json.dumps(editable, indent=2, ensure_ascii=False)
+        suffix = '.json'
+    else:
+        text   = msg.get('content', '') or ''
+        suffix = '.txt'
+
+    with tempfile.NamedTemporaryFile(mode='w', suffix=suffix, delete=False) as f:
         f.write(text)
         tmp = f.name
+
     try:
         sys.stdout.write(f'{ALT_EXIT}{CUR_SHOW}')
         sys.stdout.flush()
         termios.tcsetattr(screen._tty_fd, termios.TCSADRAIN, screen._cooked_attrs)
-        if read_only:
-            subprocess.run(['nvim', '-R', tmp])
+        subprocess.run(['nvim', tmp])
+        with open(tmp, 'r') as f:
+            new_text = f.read()
+
+        if needs_json:
+            try:
+                new_msg = _json.loads(new_text)
+            except _json.JSONDecodeError as e:
+                ctx.status_flash = f'edit: invalid JSON — {e}'
+                return
+            if not isinstance(new_msg, dict) or 'role' not in new_msg:
+                ctx.status_flash = 'edit: expected a JSON object with "role"'
+                return
+            _repack_tool_args(new_msg)
+            ctx.messages[ai] = new_msg
         else:
-            subprocess.run(['nvim', tmp])
-            with open(tmp, 'r') as f:
-                new_text = f.read()
-            if reasoning and new_text.startswith('--- Reasoning ---\n'):
-                marker = '\n\n--- Content ---\n'
-                p = new_text.find(marker)
-                if p >= 0:
-                    new_text = new_text[p + len(marker):]
-                elif not content:
-                    new_text = ''
-            if is_json:
-                try:
-                    ctx.messages[ai]['content'] = _json.loads(new_text)
-                except Exception:
-                    ctx.messages[ai]['content'] = new_text
-            else:
-                ctx.messages[ai]['content'] = new_text
-            _record_mutation(ctx, 'overlay:edit', {'idx': ai})
+            msg['content'] = new_text
+
+        _record_mutation(ctx, 'overlay:edit', {'idx': ai})
     finally:
         try:
             os.unlink(tmp)
