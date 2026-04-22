@@ -26,6 +26,11 @@ _compact_messages = None
 select_tools = None
 _llm = None
 
+# Sentinel value placed on the LLM worker's queue to request a continuation
+# turn — re-run call_llm against the existing messages[] without first
+# appending a new user prompt. Used by the fork action.
+_CONTINUE = object()
+
 
 global config
 global available_tools
@@ -545,7 +550,37 @@ def _render_messages_to_buffer(screen, messages: list) -> None:
             continue
 
 
-def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_ctx, tracker=None, request_rebuild=None):
+def _maybe_auto_continue(screen, messages, queue_continuation) -> None:
+    """After a fork, resume the agentic loop when messages[] is in a state
+    that owes the model (or the tool dispatcher) a next step.
+
+    Cases that trigger continuation:
+      - last message is a user prompt waiting for an assistant reply
+      - last message is an assistant with pending tool_calls (not yet
+        answered) — call_llm's pre-dispatch runs them before the next API
+        turn. This is the common "edit tool args + fork" flow.
+      - last message is a tool result (the assistant needs to synthesize
+        the next reply on top of it).
+    """
+    if queue_continuation is None or not messages:
+        return
+    last = messages[-1]
+    if not isinstance(last, dict):
+        return
+    role = last.get('role')
+    if role == 'user' and last.get('content'):
+        screen.write("[fork: continuing from here]\n", kind=screen.META)
+        queue_continuation()
+    elif role == 'assistant' and last.get('tool_calls'):
+        screen.write("[fork: dispatching pending tool calls]\n", kind=screen.META)
+        queue_continuation()
+    elif role == 'tool':
+        screen.write("[fork: continuing from tool result]\n", kind=screen.META)
+        queue_continuation()
+
+
+def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_ctx,
+                            tracker=None, request_rebuild=None, queue_continuation=None):
     """Execute a vim-style colon command from interactive mode."""
     if cmd == "compact":
         status_callback("compacting...")
@@ -600,7 +635,7 @@ def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_c
         _ctx_m = re.search(r'\((\d+)/(\d+)\)', last_ctx[0])
         _prompt_tok  = int(_ctx_m.group(1)) if _ctx_m else 0
         _ctx_size    = int(_ctx_m.group(2)) if _ctx_m else 0
-        _, _new_tok  = screen.prompt_messages_overlay(
+        _, _new_tok, _fork = screen.prompt_messages_overlay(
             messages, tracker,
             model=args.model,
             context_size=_ctx_size, prompt_tokens=_prompt_tok,
@@ -610,14 +645,18 @@ def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_c
             last_ctx[0] = f"ctx {_pct} ({_new_tok}/{_ctx_size})"
         if request_rebuild is not None:
             request_rebuild()
+        if _fork:
+            _maybe_auto_continue(screen, messages, queue_continuation)
         status_callback("ready")
     elif cmd == "history":
         if tracker is None:
             screen.write("[history: tracker not available]\n", kind=screen.META)
         else:
-            screen.prompt_history_overlay(tracker)
+            _fork = screen.prompt_history_overlay(tracker)
             if request_rebuild is not None:
                 request_rebuild()
+            if _fork:
+                _maybe_auto_continue(screen, messages, queue_continuation)
         status_callback("ready")
     elif cmd == "" or cmd == "skill":
         # /skill with no args → show active skills
@@ -952,21 +991,33 @@ def action_interactive(args, available_tools):
             screen._interrupt_event.clear()
             llm_state["phase"] = "thinking..."
             _refresh_status_line()
-            # Echo the prompt into the content buffer now — at the moment
-            # the LLM actually starts working on it — rather than at submit
-            # time. For queued prompts this keeps the conversation log in
-            # the same order the LLM sees them.
-            screen.write(f"> {user_input}\n\n", kind=Screen.USER)
-            _tools_str = ", ".join(sorted(getattr(args, 'selected_tools', set()) or [])) or "none"
-            _cai_logger.log(1, (
-                f"USER  model={args.model}  max_turns={getattr(args, 'max_turns', None)}  "
-                f"tools=[{_tools_str}]\n{user_input}"
-            ))
+            is_continuation = (user_input is _CONTINUE)
+            if is_continuation:
+                # Fork auto-continue: messages[] already ends with the
+                # user prompt the model should answer (kept by fork). Skip
+                # the echo + append; just run the turn.
+                _tools_str = ", ".join(sorted(getattr(args, 'selected_tools', set()) or [])) or "none"
+                _cai_logger.log(1, (
+                    f"CONTINUE  model={args.model}  max_turns={getattr(args, 'max_turns', None)}  "
+                    f"tools=[{_tools_str}]"
+                ))
+            else:
+                # Echo the prompt into the content buffer now — at the moment
+                # the LLM actually starts working on it — rather than at submit
+                # time. For queued prompts this keeps the conversation log in
+                # the same order the LLM sees them.
+                screen.write(f"> {user_input}\n\n", kind=Screen.USER)
+                _tools_str = ", ".join(sorted(getattr(args, 'selected_tools', set()) or [])) or "none"
+                _cai_logger.log(1, (
+                    f"USER  model={args.model}  max_turns={getattr(args, 'max_turns', None)}  "
+                    f"tools=[{_tools_str}]\n{user_input}"
+                ))
             try:
-                messages.append({"role": "user", "content": user_input})
-                _llm.fire_event('messages_mutated', {
-                    'messages': messages, 'label': 'turn:user',
-                })
+                if not is_continuation:
+                    messages.append({"role": "user", "content": user_input})
+                    _llm.fire_event('messages_mutated', {
+                        'messages': messages, 'label': 'turn:user',
+                    })
                 _cai_logger.push_nest(1)
                 _reasoning_buf.clear()
                 try:
@@ -1028,6 +1079,13 @@ def action_interactive(args, available_tools):
         message_queue.put(user_input)
         _refresh_status_line()
 
+    def _queue_continuation() -> None:
+        """Ask the worker to run a turn against the current messages[]
+        without appending a new user prompt (used by the fork action)."""
+        screen.set_busy(True)
+        message_queue.put(_CONTINUE)
+        _refresh_status_line()
+
     try:
         _refresh_status_line()
 
@@ -1056,7 +1114,8 @@ def action_interactive(args, available_tools):
             if screen._command_result is not None:
                 _handle_interactive_cmd(
                     screen._command_result, screen, messages, args,
-                    status_callback, last_ctx, tracker, _request_rebuild,
+                    status_callback, last_ctx,
+                    tracker, _request_rebuild, _queue_continuation,
                 )
                 screen._command_result = None
                 _refresh_status_line()

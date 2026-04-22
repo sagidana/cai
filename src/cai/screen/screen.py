@@ -482,10 +482,14 @@ class Screen:
         self._restore_after_overlay()
         return result
 
-    def prompt_history_overlay(self, tracker) -> None:
-        """Interactive undo-tree viewer. See overlays/history.py for docs."""
-        _history_overlay(self, tracker)
+    def prompt_history_overlay(self, tracker) -> bool:
+        """Interactive undo-tree viewer. See overlays/history.py for docs.
+
+        Returns True if the user pressed F to fork at a node.
+        """
+        result = _history_overlay(self, tracker)
         self._restore_after_overlay()
+        return bool(result)
 
     # ── Refresh helpers ───────────────────────────────────────────────────────
 

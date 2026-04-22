@@ -103,7 +103,7 @@ def _build_status(ctx: _MsgOverlayCtx, nv: int, nm: int, inner_w: int,
         dir_char = '/' if ctx.search_direction == 1 else '?'
         m = f' [{ctx.search_match_idx + 1}/{len(ctx.search_matches)}]' if ctx.search_matches else ''
         pos_str += f'   {dir_char}{ctx.search_pattern}{m}'
-    hints = '  Tab:fold  m/V:sel  >:fx  !:llm  gh:hist  ESC:close'
+    hints = '  Tab:fold  m/V:sel  >:fx  !:llm  F:fork  gh:hist  ESC:close'
     if len(ansi_strip(pos_str)) + len(hints) <= inner_w:
         pos_str += hints
     return pos_str, False
@@ -687,6 +687,17 @@ def overlay_nav_key(ctx: _MsgOverlayCtx, key: str, rows: int, screen) -> 'str | 
     elif key == '!':
         ctx.instruction_mode = True
         ctx.instruction_buf = []
+    elif key == 'F':
+        # Fork at cursor: keep messages up to and including the cursor,
+        # drop everything after. Close overlay so the CLI lands in the
+        # main view and (if the cursor ended on a user turn) auto-
+        # continues the agentic loop.
+        cursor_ai = ctx.view[sel]
+        if cursor_ai + 1 < len(ctx.messages):
+            del ctx.messages[cursor_ai + 1:]
+            _record_mutation(ctx, 'fork', {'at': cursor_ai})
+        ctx.fork_requested = True
+        return 'close'
     elif key == 'h' and pk == 'g':
         return 'history'
     elif key in KEY_ENTER:
@@ -830,9 +841,15 @@ def prompt_messages_overlay(
     context_size: int = 0,
     prompt_tokens: int = 0,
 ) -> tuple:
-    """Interactive messages overlay. Returns (messages, new_tokens_estimate)."""
+    """Interactive messages overlay.
+
+    Returns ``(messages, new_tokens_estimate, fork_requested)``.
+    ``fork_requested`` is ``True`` when the user pressed ``F`` to fork at
+    the cursor — the caller should cascade any wrapping overlay closed
+    and let the CLI auto-continue if the last message is a user prompt.
+    """
     if not messages:
-        return messages, 0
+        return messages, 0, False
 
     ctx = _MsgOverlayCtx(messages, tracker, model,
                         context_size=context_size,
@@ -936,7 +953,13 @@ def prompt_messages_overlay(
             if action == 'history':
                 from .history import prompt_history_overlay
                 pre_head = tracker.head() if tracker else None
-                prompt_history_overlay(screen, tracker)
+                history_forked = prompt_history_overlay(screen, tracker)
+                if history_forked:
+                    # Cascade: the user asked to fork from a history node.
+                    # Exit this overlay too so the CLI lands in the main
+                    # view and auto-continues the agentic loop.
+                    ctx.fork_requested = True
+                    break
                 sys.stdout.write(f'{ALT_ENTER}{ERASE_SCREEN}')
                 sys.stdout.flush()
                 tty.setraw(screen._tty_fd)
@@ -955,4 +978,4 @@ def prompt_messages_overlay(
         sys.stdout.write(f'{ALT_EXIT}{CUR_HIDE}')
         sys.stdout.flush()
 
-    return messages, ctx.tokens_est
+    return messages, ctx.tokens_est, ctx.fork_requested

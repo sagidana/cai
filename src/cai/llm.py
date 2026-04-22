@@ -789,6 +789,35 @@ def call_llm(messages,
 
     call_history = {}  # (tool_name, args_str) -> call count, for stuck detection
 
+    # Pre-dispatch: when messages arrive already ending on an assistant
+    # with pending tool_calls (typical after the :messages "fork" action
+    # leaves the user-edited tool call un-executed), run those calls now
+    # before asking the API for more. handle_tool_calls re-appends its
+    # own assistant+tool pairs, so pop the source row first.
+    if (messages and messages[-1].get('role') == 'assistant'
+            and (messages[-1].get('tool_calls') or [])):
+        _pending = messages.pop()
+        _pending_tc        = _pending.get('tool_calls') or []
+        _pending_content   = _pending.get('content', '') or ''
+        _pending_reasoning = _pending.get('_reasoning')
+        # Suppress the duplicate "-> name(args)" header from handle_tool_calls
+        # — the caller's view has already rendered the edited tool call.
+        # The result line ("  <- name: N chars") still comes through.
+        def _tc_filter(line, error=False):
+            if tool_callback is None:
+                return
+            if line.startswith('-> '):
+                return
+            tool_callback(line, error=error)
+        handle_tool_calls(
+            _pending_tc, messages, _pending_content, allowed_tool_names,
+            tool_callback=_tc_filter, profile=profile,
+            reasoning=_pending_reasoning, event_callback=event_callback,
+            hooks_by_event=hooks_by_event, model=model,
+        )
+        if tool_callback:
+            tool_callback("\n")
+
     # strict_format requires the full response before validation/retry, so it
     # cannot coexist with the streaming path (which emits chunks live and has
     # no format enforcement). Route to non-streaming whenever strict_format

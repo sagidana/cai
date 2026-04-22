@@ -203,7 +203,7 @@ def _draw(tracker, screen, state) -> None:
     diff = _diff_summary(parent_snap, sel_node.snapshot)
     status_left = (f' #{sel_node.id} {sel_node.label}  '
                    f'msgs={len(sel_node.snapshot)}  diff={diff or "·"}')
-    hints = (f'  {SGR_DIM_GRAY}j/k  Enter:jump  u/^R:undo/redo  '
+    hints = (f'  {SGR_DIM_GRAY}j/k  Enter:jump  F:fork  u/^R:undo/redo  '
              f'd:drop  ESC{SGR_RESET}')
     status = status_left + hints
     put(1 + visible_n + 1, f'{VL}{ansi_pad(status, inner_w)}{VL}')
@@ -228,10 +228,16 @@ def _draw(tracker, screen, state) -> None:
     sys.stdout.flush()
 
 
-def prompt_history_overlay(screen, tracker) -> None:
-    """Interactive undo-tree viewer. Mutates tracker/messages in place on jump."""
+def prompt_history_overlay(screen, tracker) -> bool:
+    """Interactive undo-tree viewer. Mutates tracker/messages in place on jump.
+
+    Returns ``True`` when the user pressed ``F`` to fork at the selected
+    node (tracker has already been jumped). The caller should cascade any
+    wrapping overlay closed and let the CLI auto-continue the agentic
+    loop if appropriate. Returns ``False`` on a normal ESC/q exit.
+    """
     if tracker is None:
-        return
+        return False
 
     state = {
         'selected_i': 0,
@@ -239,6 +245,7 @@ def prompt_history_overlay(screen, tracker) -> None:
         'prev_lines': {},
         'first_draw': True,
         'resize_pending': False,
+        'fork_requested': False,
     }
     # Start with cursor on the current HEAD node.
     walk = tracker.walk()
@@ -296,6 +303,14 @@ def prompt_history_overlay(screen, tracker) -> None:
             elif key in KEY_ENTER:
                 _d, node = walk[state['selected_i']]
                 tracker.jump(node.id)
+            elif key == 'F':
+                # Fork: jump to the selected snapshot AND cascade the
+                # overlay exit so the CLI lands in the main view and
+                # continues the conversation from there.
+                _d, node = walk[state['selected_i']]
+                tracker.jump(node.id)
+                state['fork_requested'] = True
+                break
             elif key == 'u':
                 if tracker.undo():
                     # Reposition cursor on new HEAD
@@ -341,3 +356,5 @@ def prompt_history_overlay(screen, tracker) -> None:
         signal.signal(signal.SIGWINCH, orig_handler)
         sys.stdout.write(f'{ALT_EXIT}{CUR_HIDE}')
         sys.stdout.flush()
+
+    return state['fork_requested']

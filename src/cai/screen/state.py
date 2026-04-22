@@ -416,6 +416,10 @@ class _MsgOverlayCtx:
 
         # Pending status-line message (errors / feedback)
         'status_flash',
+
+        # "Fork at cursor" request: truncate messages[] to cursor, exit
+        # all overlays, let the CLI auto-continue the agentic loop.
+        'fork_requested',
     )
 
     def __init__(self, messages: list, tracker, model: str,
@@ -468,6 +472,7 @@ class _MsgOverlayCtx:
         self.tokens_est    = prompt_tokens
 
         self.status_flash  = ''
+        self.fork_requested = False
 
 
 def _msg_is_folded(ctx: _MsgOverlayCtx, msg_idx: int) -> bool:
