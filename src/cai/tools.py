@@ -25,7 +25,7 @@ _registry_lock = threading.Lock()
 _servers: dict = {}        # cmd_str -> MCPServerConnection
 _server_labels: dict = {}  # cmd_str -> label string
 _dispatch: dict = {}       # prefixed_name -> (cmd_str, original_name)
-_local_functions: dict = {}  # name -> (callable, openai_schema_dict)
+_local_functions: dict = {}  # name -> (callable, openai_schema_dict, label)
 
 
 # ── Connection ────────────────────────────────────────────────────────────────
@@ -186,12 +186,17 @@ def _derive_function_schema(fn):
     }
 
 
-def register_local_functions(functions) -> None:
+def register_local_functions(functions, label: str = "local") -> None:
     """Register Python callables as tools, dispatched in-process.
 
     Name collisions against any registered tool (MCP or local) raise
     ValueError. Idempotent per-function: re-registering the same callable
     object is a no-op.
+
+    :param label: surfaced by :func:`get_tool_entries` (and thus the /tools UI)
+                  to tell different registration sources apart — e.g. "init"
+                  for tools registered via ~/.config/cai/init.py vs "local"
+                  for tools passed directly to ``Harness(functions=...)``.
     """
     with _registry_lock:
         for fn in functions:
@@ -203,8 +208,8 @@ def register_local_functions(functions) -> None:
             if existing or name in _dispatch:
                 raise ValueError(f"tool name collision: {name!r}")
             schema = _derive_function_schema(fn)
-            _local_functions[name] = (fn, schema)
-            log.info("register_local_functions: %r registered", name)
+            _local_functions[name] = (fn, schema, label)
+            log.info("register_local_functions: %r registered (label=%s)", name, label)
 
 
 def get_all_tools() -> list:
@@ -242,7 +247,7 @@ def get_all_tools() -> list:
             })
 
     # Also surface any in-process Python functions registered via the SDK.
-    for name, (_fn, schema) in _local_functions.items():
+    for name, (_fn, schema, _label) in _local_functions.items():
         openai_tools.append(schema)
         # Dispatch entry marker: cmd_str=None signals "local function".
         new_dispatch[name] = (None, name)
@@ -264,7 +269,7 @@ def call_tool(prefixed_name: str, arguments: dict):
     cmd_str, original_name = entry
     # Local function path
     if cmd_str is None:
-        fn, _schema = _local_functions[original_name]
+        fn, _schema, _label = _local_functions[original_name]
         try:
             result = fn(**arguments) if arguments else fn()
         except Exception as e:
@@ -283,8 +288,11 @@ def call_tool(prefixed_name: str, arguments: dict):
 def get_tool_entries() -> list:
     """Return [(prefixed_name, label), ...] for all registered tools — used by the /tools UI."""
     entries = []
-    for prefixed_name, (cmd_str, _original) in _dispatch.items():
-        label = "local" if cmd_str is None else _server_labels[cmd_str]
+    for prefixed_name, (cmd_str, original) in _dispatch.items():
+        if cmd_str is None:
+            label = _local_functions[original][2]
+        else:
+            label = _server_labels[cmd_str]
         entries.append((prefixed_name, label))
     return entries
 

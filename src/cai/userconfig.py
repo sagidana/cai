@@ -54,6 +54,31 @@ class _Config:
 config = _Config()
 
 _user_hooks: list = []
+_user_tools: list = []
+
+
+def tool(fn):
+    """Register a Python callable as a tool available to every Harness/CLI turn.
+
+    Equivalent to passing ``functions=[fn]`` to a ``Harness(...)`` — but global,
+    so every Harness/CLI session in this process sees it once bootstrap() has
+    run. The OpenAI tool schema is derived from the function signature: type
+    annotations drive param types, the first docstring line becomes the
+    description. Parameters without defaults are required.
+
+    Usage::
+
+        @cai.tool
+        def weather(city: str) -> str:
+            '''Return current weather for a city.'''
+            ...
+
+    Registered tools join the shared ``available_tools`` list; Harness callers
+    still need to list them in ``tools=[...]`` to expose them for a given run,
+    matching how MCP-server tools behave.
+    """
+    _user_tools.append(fn)
+    return fn
 
 
 def hook(event: str):
@@ -104,6 +129,19 @@ import cai
 # cai.config.observation_mask_keep = 3
 # cai.config.context_budget_pct = 0.75
 # cai.config.tool_result_max_chars = 40000
+
+# ─── Tools ──────────────────────────────────────────────────────────────────
+# Register any Python callable as a tool. Type annotations drive the schema;
+# the first docstring line becomes the tool description. Params without
+# defaults are required.
+#
+# Registered tools are added to available_tools; Harness callers still need
+# to list them in `tools=[...]` to expose them for a given run.
+#
+#     @cai.tool
+#     def word_count(text: str) -> int:
+#         """Return the number of whitespace-separated words in text."""
+#         return len(text.split())
 
 # ─── Hooks ──────────────────────────────────────────────────────────────────
 # Four events fire during each agent turn:
@@ -163,5 +201,5 @@ def load_init(config_dir=None) -> None:
         print(f"[!] Error in {init_path}: {type(e).__name__}: {e}")
 
     _loaded_paths.add(init_path)
-    log.info("load_init: loaded %s (overrides=%d, hooks=%d)",
-             init_path, len(config._overrides), len(_user_hooks))
+    log.info("load_init: loaded %s (overrides=%d, hooks=%d, tools=%d)",
+             init_path, len(config._overrides), len(_user_hooks), len(_user_tools))

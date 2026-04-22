@@ -157,6 +157,14 @@ def bootstrap(overrides: Optional[dict] = None,
         config.update(overrides)
     api_key = load_api_key(config_dir)
     openai_api, openrouter_api = build_apis(config, api_key)
+
+    # Promote user-registered tools before listing: get_all_tools() also
+    # rebuilds the dispatch table, so local functions must be registered
+    # first to be callable. register_local_functions is idempotent per
+    # callable identity, so repeated bootstraps don't raise.
+    if userconfig._user_tools:
+        _cai_tools.register_local_functions(userconfig._user_tools, label="init")
+
     available_tools = _cai_tools.get_all_tools()
 
     # Promote user-registered hooks to the global default. Replace rather than
@@ -165,8 +173,9 @@ def bootstrap(overrides: Optional[dict] = None,
 
     _llm.setup(config, openai_api, _cai_tools.call_tool, diag_fn=diag_fn)
 
-    log.info("bootstrap: done (base_url=%s, available_tools=%d, user_hooks=%d)",
-             config.get('base_url'), len(available_tools), len(userconfig._user_hooks))
+    log.info("bootstrap: done (base_url=%s, available_tools=%d, user_hooks=%d, user_tools=%d)",
+             config.get('base_url'), len(available_tools),
+             len(userconfig._user_hooks), len(userconfig._user_tools))
 
     return BootstrapContext(
         config=config,
