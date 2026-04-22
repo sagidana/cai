@@ -37,6 +37,8 @@ from .input import read_key
 from .overlays.tools import prompt_tools_overlay as _tools_overlay
 from .overlays.context import prompt_context_overlay as _ctx_overlay
 from .overlays.model import prompt_model_overlay as _model_overlay
+from .overlays.messages import prompt_messages_overlay as _msg_overlay
+from .overlays.history import prompt_history_overlay as _history_overlay
 
 
 class Screen:
@@ -467,6 +469,23 @@ class Screen:
         result = _model_overlay(self, models)
         self._restore_after_overlay()
         return result
+
+    def prompt_messages_overlay(
+        self, messages: list, tracker, *,
+        model: str = '', context_size: int = 0, prompt_tokens: int = 0,
+    ) -> tuple:
+        """Interactive messages overlay. See overlays/messages.py for docs."""
+        result = _msg_overlay(self, messages, tracker,
+                              model=model,
+                              context_size=context_size,
+                              prompt_tokens=prompt_tokens)
+        self._restore_after_overlay()
+        return result
+
+    def prompt_history_overlay(self, tracker) -> None:
+        """Interactive undo-tree viewer. See overlays/history.py for docs."""
+        _history_overlay(self, tracker)
+        self._restore_after_overlay()
 
     # ── Refresh helpers ───────────────────────────────────────────────────────
 

@@ -103,6 +103,28 @@ def hook(event: str):
     return deco
 
 
+def transform(name: str):
+    """Register a message-transform callable under ``name``.
+
+    A transform has the shape ``(messages: list[dict], **kwargs) -> list[dict]``:
+    it receives the selected slice from the :messages overlay and returns a
+    replacement slice. The overlay splices the return value back in.
+
+    Usage::
+
+        @cai.transform("uppercase")
+        def shout(messages):
+            return [{**m, "content": (m.get("content") or "").upper()} for m in messages]
+
+    Registered transforms show up in the :messages overlay's ``>`` picker.
+    """
+    def deco(fn):
+        from cai.transforms import register_transform
+        register_transform(name, fn)
+        return fn
+    return deco
+
+
 _loaded_paths: set = set()
 
 
@@ -144,11 +166,13 @@ import cai
 #         return len(text.split())
 
 # ─── Hooks ──────────────────────────────────────────────────────────────────
-# Four events fire during each agent turn:
+# Five events fire around an agent turn:
 #   before_tool_call    — return False to veto the call
 #   after_tool_call     — inspect/rewrite the result
 #   after_turn          — fires once per LLM round trip
 #   on_final_response   — return a str to rewrite the final reply
+#   messages_mutated    — fires after any change to messages[] during a
+#                         cai -i session; ctx = {messages, label, meta}
 #
 # The ctx dict passed to each hook is documented in examples/harnesses/sample.py.
 #
@@ -163,6 +187,16 @@ import cai
 #     def block_rm(ctx):
 #         if ctx["name"] == "run_shell" and "rm -rf" in ctx["args"].get("cmd", ""):
 #             return False
+
+# ─── Transforms ─────────────────────────────────────────────────────────────
+# Register a callable to show up in the :messages overlay's `>` picker. A
+# transform has the shape (messages: list[dict], **kwargs) -> list[dict]; the
+# overlay splices the return value back over the selected slice.
+#
+#     @cai.transform("uppercase")
+#     def shout(messages):
+#         return [{**m, "content": (m.get("content") or "").upper()}
+#                 for m in messages]
 '''
 
 

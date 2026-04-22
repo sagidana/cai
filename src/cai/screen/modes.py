@@ -740,8 +740,9 @@ class ModeHandler:
     # ── Command mode ──────────────────────────────────────────────────────────
 
     def _handle_command(self, key: str, state: TUIState, screen) -> None:
-        if key == KEY_ESC:
+        if key == KEY_ESC or key == KEY_CTRL_C:
             state.mode = Mode.NORMAL
+            state.command_history_pos = -1
             screen._refresh_all()
             return
 
@@ -749,6 +750,15 @@ class ModeHandler:
             cmd = ''.join(state.command_buf).strip()
             state.mode = Mode.NORMAL
             if cmd:
+                # Record at front of history (newest-first), dropping any
+                # older duplicate so re-running a command doesn't bloat the
+                # list.
+                try:
+                    state.command_history.remove(cmd)
+                except ValueError:
+                    pass
+                state.command_history.insert(0, cmd)
+                state.command_history_pos = -1
                 raise _CommandException(cmd)
             screen._refresh_all()
             return
@@ -757,11 +767,40 @@ class ModeHandler:
             if state.command_buf:
                 del state.command_buf[state.command_cursor - 1]
                 state.command_cursor -= 1
+                state.command_history_pos = -1
                 screen._refresh_status()
             else:
                 # Empty backspace cancels command mode
                 state.mode = Mode.NORMAL
+                state.command_history_pos = -1
                 screen._refresh_all()
+            return
+
+        if key == KEY_UP:
+            # Older entry
+            if state.command_history:
+                state.command_history_pos = min(
+                    state.command_history_pos + 1,
+                    len(state.command_history) - 1,
+                )
+                entry = state.command_history[state.command_history_pos]
+                state.command_buf[:] = list(entry)
+                state.command_cursor = len(state.command_buf)
+                screen._refresh_status()
+            return
+
+        if key == KEY_DOWN:
+            # Newer entry, or empty past the newest.
+            if state.command_history_pos > 0:
+                state.command_history_pos -= 1
+                entry = state.command_history[state.command_history_pos]
+                state.command_buf[:] = list(entry)
+                state.command_cursor = len(state.command_buf)
+            else:
+                state.command_history_pos = -1
+                state.command_buf[:] = []
+                state.command_cursor = 0
+            screen._refresh_status()
             return
 
         if key == KEY_TAB:
@@ -772,6 +811,7 @@ class ModeHandler:
         if len(key) == 1 and ord(key) >= 32:
             state.command_buf.insert(state.command_cursor, key)
             state.command_cursor += 1
+            state.command_history_pos = -1
             screen._refresh_status()
 
     def _command_tab_complete(self, state: TUIState, screen) -> None:

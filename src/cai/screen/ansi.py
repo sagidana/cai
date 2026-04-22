@@ -88,6 +88,22 @@ def ansi_strip(text: str) -> str:
     return _ANSI_RE.sub('', text)
 
 
+def ansi_pad(text: str, width: int) -> str:
+    """Right-pad *text* to *width* visual columns, ignoring ANSI sequences.
+
+    If the visible length already exceeds *width*, truncates via
+    ``ansi_strip`` (losing color) so the result still fits. This keeps
+    frame borders aligned when status lines contain colored tokens.
+    """
+    visible = len(ansi_strip(text))
+    if visible < width:
+        return text + ' ' * (width - visible)
+    if visible == width:
+        return text
+    # Overflow — strip ANSI to make truncation safe.
+    return ansi_strip(text)[:width]
+
+
 def osc52_copy(text: str) -> str:
     """Return OSC 52 escape sequence to copy *text* to the system clipboard."""
     import base64

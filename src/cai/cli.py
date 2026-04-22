@@ -462,7 +462,7 @@ def action_prompt(args, available_tools):
     finally:
         openai_api.error_cb = None
 
-def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_ctx):
+def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_ctx, tracker=None):
     """Execute a vim-style colon command from interactive mode."""
     if cmd == "compact":
         status_callback("compacting...")
@@ -478,6 +478,7 @@ def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_c
             messages[1:] = []
         else:
             messages.clear()
+        _llm.fire_event('messages_mutated', {'messages': messages, 'label': 'clear'})
         screen.clear_buffer()
         profile = get_model_profile(args.model)
         last_ctx[0] = f"ctx 0% (0/{profile['context']})"
@@ -499,9 +500,31 @@ def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_c
         _, _new_tok  = screen.prompt_context_overlay(
             messages, context_size=_ctx_size, prompt_tokens=_prompt_tok
         )
+        _llm.fire_event('messages_mutated', {
+            'messages': messages, 'label': 'context-overlay-exit',
+        })
         if _new_tok and _ctx_size:
             _pct        = f"{_new_tok / _ctx_size:.0%}"
             last_ctx[0] = f"ctx {_pct} ({_new_tok}/{_ctx_size})"
+        status_callback("ready")
+    elif cmd == "messages":
+        _ctx_m = re.search(r'\((\d+)/(\d+)\)', last_ctx[0])
+        _prompt_tok  = int(_ctx_m.group(1)) if _ctx_m else 0
+        _ctx_size    = int(_ctx_m.group(2)) if _ctx_m else 0
+        _, _new_tok  = screen.prompt_messages_overlay(
+            messages, tracker,
+            model=args.model,
+            context_size=_ctx_size, prompt_tokens=_prompt_tok,
+        )
+        if _new_tok and _ctx_size:
+            _pct        = f"{_new_tok / _ctx_size:.0%}"
+            last_ctx[0] = f"ctx {_pct} ({_new_tok}/{_ctx_size})"
+        status_callback("ready")
+    elif cmd == "history":
+        if tracker is None:
+            screen.write("[history: tracker not available]\n", kind=screen.META)
+        else:
+            screen.prompt_history_overlay(tracker)
         status_callback("ready")
     elif cmd == "" or cmd == "skill":
         # /skill with no args → show active skills
@@ -547,6 +570,10 @@ def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_c
             messages[0]['content'] = new_system
         else:
             messages.insert(0, {"role": "system", "content": new_system})
+        _llm.fire_event('messages_mutated', {
+            'messages': messages, 'label': 'skill',
+            'meta': {'active': list(args.skill or [])},
+        })
         active_str = ', '.join(args.skill) if args.skill else 'none'
         screen.write(f"[active skills: {active_str}]\n", kind=screen.META)
         status_callback("ready")
@@ -598,6 +625,10 @@ def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_c
             try:
                 loaded = _load_context(path, args)
                 messages[:] = loaded
+                _llm.fire_event('messages_mutated', {
+                    'messages': messages, 'label': 'load',
+                    'meta': {'path': path},
+                })
                 screen.write(f"[loaded from {path} — {len(messages)} messages, "
                              f"{len(args.selected_tools)} tools, "
                              f"skills: {', '.join(args.skill) or 'none'}]\n", kind=screen.META)
@@ -615,10 +646,46 @@ def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_c
     else:
         screen.write(f"[unknown command: {cmd}]\n", kind=screen.META)
 
+_COMMAND_HISTORY_CAP = 500
+
+
+def _command_history_path() -> str:
+    return os.path.join(core.CONFIG_DIR_DEFAULT, ".commands_history")
+
+
+def _load_command_history() -> list[str]:
+    """Load newest-first command history from ~/.config/cai/.commands_history."""
+    path = _command_history_path()
+    try:
+        with open(path, "r") as f:
+            # File is stored oldest-first (easy to tail -f); reverse for in-memory
+            # "newest-first" convention used by TUIState.command_history.
+            lines = [ln.rstrip("\n") for ln in f if ln.strip()]
+    except OSError:
+        return []
+    return list(reversed(lines[-_COMMAND_HISTORY_CAP:]))
+
+
+def _save_command_history(history: list[str]) -> None:
+    """Persist command history (newest-first in memory → oldest-first on disk)."""
+    path = _command_history_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        # Cap, then reverse so the file reads chronologically top-to-bottom.
+        trimmed = history[:_COMMAND_HISTORY_CAP]
+        with open(path, "w") as f:
+            for entry in reversed(trimmed):
+                f.write(entry + "\n")
+    except OSError as e:
+        log.warning("failed to save command history to %s: %s", path, e)
+
+
 ACTION_INTERACTIVE = "interactive"
 def action_interactive(args, available_tools):
     """Multi-turn TUI conversation loop using Screen for display."""
     from cai.screen import Screen
+    from cai.history import MessageHistoryTracker
+    from cai import userconfig
 
     if not sys.stdout.isatty():
         _diag("[!] --interactive requires a TTY stdout.")
@@ -632,7 +699,15 @@ def action_interactive(args, available_tools):
     else:
         messages = _build_base_messages(args, stdin_content=stdin_content)
 
+    # Undo-tree tracker: subscribes to the "messages_mutated" hook event
+    # for the lifetime of this function; removed in the finally block below.
+    tracker = MessageHistoryTracker(messages)
+    _history_handler = ("messages_mutated", tracker.on_event)
+    userconfig._user_hooks.append(_history_handler)
+
     screen = Screen()
+    # Seed the prompt-command history from disk (newest-first in memory).
+    screen._state.command_history[:] = _load_command_history()
     _skill_cmds = [f"skill {n}" for n in core.list_skill_names()] + ["skill", "skill off"]
     _live_models = []
     if _llm.openai_api is not None:
@@ -646,6 +721,8 @@ def action_interactive(args, available_tools):
         "clear": [],
         "tools": [],
         "context": [],
+        "messages": [],
+        "history": [],
         "model": [],
         "save": [],
         "load": [],
@@ -764,6 +841,9 @@ def action_interactive(args, available_tools):
             ))
             try:
                 messages.append({"role": "user", "content": user_input})
+                _llm.fire_event('messages_mutated', {
+                    'messages': messages, 'label': 'turn:user',
+                })
                 _cai_logger.push_nest(1)
                 _reasoning_buf.clear()
                 try:
@@ -794,6 +874,9 @@ def action_interactive(args, available_tools):
                     if _reasoning_buf:
                         assistant_msg['_reasoning'] = ''.join(_reasoning_buf)
                     messages.append(assistant_msg)
+                    _llm.fire_event('messages_mutated', {
+                        'messages': messages, 'label': 'turn:assistant',
+                    })
             except LLMError as e:
                 screen.write(f"\n[error] {e}\n\n", kind=Screen.ERROR)
                 llm_state["phase"] = "error"
@@ -836,7 +919,7 @@ def action_interactive(args, available_tools):
         while True:
             user_input = screen.prompt("> ")
             if screen._command_result is not None:
-                _handle_interactive_cmd(screen._command_result, screen, messages, args, status_callback, last_ctx)
+                _handle_interactive_cmd(screen._command_result, screen, messages, args, status_callback, last_ctx, tracker)
                 screen._command_result = None
                 _refresh_status_line()
                 continue
@@ -852,8 +935,13 @@ def action_interactive(args, available_tools):
         _drain_queue()
         message_queue.put(None)
         openai_api.error_cb = None
+        _save_command_history(screen._state.command_history)
         screen.close()
         worker.join(timeout=1.0)
+        try:
+            userconfig._user_hooks.remove(_history_handler)
+        except ValueError:
+            pass
 
 
 def main():

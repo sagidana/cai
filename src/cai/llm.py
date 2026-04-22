@@ -315,6 +315,11 @@ def handle_tool_calls(tool_calls, messages, call_content, allowed_tool_names,
         tool_msg = {'role': 'tool', 'tool_call_id': call_id, 'content': result}
         messages.append(assistant_msg)
         messages.append(tool_msg)
+        fire_event('messages_mutated', {
+            'messages': messages,
+            'label': 'tool_call',
+            'meta': {'name': call_name, 'id': call_id},
+        })
 
         _fire_hooks('after_tool_call', hook_ctx, hooks_by_event)
 
@@ -550,6 +555,11 @@ def _apply_observation_mask(messages):
              len(to_mask), chars_freed, chars_freed // _CHARS_PER_TOKEN)
     _cai_logger.log(2, "MASK replaced {} tool results with placeholders ({} chars freed)".format(
         len(to_mask), chars_freed))
+    fire_event('messages_mutated', {
+        'messages': messages,
+        'label': 'observation_mask',
+        'meta': {'masked': len(to_mask), 'chars_freed': chars_freed},
+    })
     return len(to_mask)
 
 
@@ -590,6 +600,11 @@ def _compact_messages(messages, model):
     messages[start_idx:end_idx] = [memory]
     _cai_logger.log(2, "TRIM done — replaced {} messages with 1 [memory] entry ({} chars)\n{}".format(
         len(compactable), len(summary), summary))
+    fire_event('messages_mutated', {
+        'messages': messages,
+        'label': 'compact',
+        'meta': {'compacted': len(compactable)},
+    })
 
 
 def mask_hook(ctx):
@@ -647,7 +662,7 @@ DEFAULT_HOOKS = []
 # ---------------------------------------------------------------------------
 # Hook dispatch
 # ---------------------------------------------------------------------------
-VALID_HOOK_EVENTS = ("before_tool_call", "after_tool_call", "after_turn", "on_final_response")
+VALID_HOOK_EVENTS = ("before_tool_call", "after_tool_call", "after_turn", "on_final_response", "messages_mutated")
 
 
 def _group_hooks(hooks):
@@ -658,6 +673,24 @@ def _group_hooks(hooks):
             raise ValueError(f"unknown hook event: {event!r}. Valid: {VALID_HOOK_EVENTS}")
         grouped[event].append(fn)
     return grouped
+
+
+def fire_event(event, ctx):
+    """Fire a user hook event from outside a call_llm turn.
+
+    call_llm groups hooks once at turn start and uses _fire_hooks with the
+    grouped dict. Mutation sites in cli.py and the screen overlays don't
+    have that grouping in scope — they use this helper, which reads
+    userconfig._user_hooks directly.
+    """
+    from cai.userconfig import _user_hooks
+    for e, fn in _user_hooks:
+        if e != event:
+            continue
+        try:
+            fn(ctx)
+        except Exception:
+            log.exception("hook %r for %s raised", getattr(fn, '__name__', repr(fn)), event)
 
 
 def _fire_hooks(event, ctx, hooks_by_event):
@@ -704,6 +737,11 @@ def _warn_if_stuck(tool_calls, call_history, messages):
                        f"Try a different approach or tool to make progress.")
             log.warning("stuck detection: '%s' called %d times with same args", name, call_history[key])
             messages.append({"role": "user", "content": warning})
+            fire_event('messages_mutated', {
+                'messages': messages,
+                'label': 'stuck_warning',
+                'meta': {'tool': name, 'count': call_history[key]},
+            })
 
 
 def _emit_status(text, status_callback):
