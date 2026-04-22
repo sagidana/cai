@@ -462,7 +462,90 @@ def action_prompt(args, available_tools):
     finally:
         openai_api.error_cb = None
 
-def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_ctx, tracker=None):
+def _render_messages_to_buffer(screen, messages: list) -> None:
+    """Rebuild the main view's content buffer as a rendering of messages[].
+
+    Imitates the format produced live by llm_worker's stream_cb/tool_cb/
+    reasoning_cb and cli.py's user-turn echo so the rebuilt view looks
+    like a natural continuation of the session. Session chatter (errors,
+    status meta lines) is dropped — the buffer is recreated from scratch.
+
+    Safe to call only from the main thread; relies on Screen.write()'s
+    internal render lock, not on higher-level coordination.
+    """
+    # Pre-map tool_call_id → tool name so tool-result rows can recover the
+    # call name in O(1) instead of rescanning messages[] per result.
+    tool_name_by_id: dict[str, str] = {}
+    for m in messages:
+        for tc in (m.get('tool_calls') or []):
+            tid = tc.get('id')
+            if tid:
+                tool_name_by_id[tid] = tc.get('function', {}).get('name', '?')
+
+    screen.clear_buffer()
+
+    for msg in messages:
+        role = msg.get('role')
+        if role == 'system':
+            continue
+
+        if role == 'user':
+            content = msg.get('content', '') or ''
+            screen.write(f"> {content}\n\n", kind=screen.USER)
+            continue
+
+        if role == 'assistant':
+            reasoning = msg.get('_reasoning') or ''
+            if reasoning:
+                screen.write(reasoning, kind=screen.REASONING)
+                screen.write("\n", kind=screen.DEFAULT)
+
+            content = msg.get('content', '') or ''
+            if content:
+                # Mirror the live path: stream_cb writes chunks as LLM kind,
+                # worker adds a trailing "\n" with DEFAULT after the turn.
+                screen.write(str(content), kind=screen.LLM)
+                screen.write("\n", kind=screen.DEFAULT)
+
+            for tc in (msg.get('tool_calls') or []):
+                fn = tc.get('function') or {}
+                name = fn.get('name', '?')
+                raw_args = fn.get('arguments', '') or ''
+                try:
+                    parsed = json.loads(raw_args) if raw_args else {}
+                    if isinstance(parsed, dict):
+                        args_preview = ', '.join(
+                            f"{k}={json.dumps(v)[:80]}"
+                            for k, v in parsed.items()
+                        )
+                    else:
+                        args_preview = str(raw_args)[:160]
+                except Exception:
+                    args_preview = str(raw_args)[:160]
+                screen.write(f"-> {name}({args_preview})\n", kind=screen.TOOL)
+            continue
+
+        if role == 'tool':
+            call_id = msg.get('tool_call_id', '') or ''
+            name = tool_name_by_id.get(call_id, '?')
+            result = msg.get('content', '') or ''
+            if not isinstance(result, str):
+                result = str(result)
+            if result.startswith('Error:'):
+                screen.write(f"  ✗ {name}: {result}\n", kind=screen.ERROR)
+            elif result.startswith('[result omitted'):
+                # Content was masked by the observation_mask hook. Rendering
+                # len(placeholder) would be misleading — show [masked].
+                screen.write(f"  <- {name}: [masked]\n", kind=screen.TOOL)
+            else:
+                screen.write(f"  <- {name}: {len(result)} chars\n", kind=screen.TOOL)
+            # Live path emits a trailing "\n" TOOL after the tool block. We
+            # emit it per tool result; at worst a single extra blank line.
+            screen.write("\n", kind=screen.TOOL)
+            continue
+
+
+def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_ctx, tracker=None, request_rebuild=None):
     """Execute a vim-style colon command from interactive mode."""
     if cmd == "compact":
         status_callback("compacting...")
@@ -482,6 +565,10 @@ def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_c
         screen.clear_buffer()
         profile = get_model_profile(args.model)
         last_ctx[0] = f"ctx 0% (0/{profile['context']})"
+        status_callback("ready")
+    elif cmd == "refresh":
+        if request_rebuild is not None:
+            request_rebuild()
         status_callback("ready")
     elif cmd == "tools":
         import cai.tools as _cai_tools
@@ -506,6 +593,8 @@ def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_c
         if _new_tok and _ctx_size:
             _pct        = f"{_new_tok / _ctx_size:.0%}"
             last_ctx[0] = f"ctx {_pct} ({_new_tok}/{_ctx_size})"
+        if request_rebuild is not None:
+            request_rebuild()
         status_callback("ready")
     elif cmd == "messages":
         _ctx_m = re.search(r'\((\d+)/(\d+)\)', last_ctx[0])
@@ -519,12 +608,16 @@ def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_c
         if _new_tok and _ctx_size:
             _pct        = f"{_new_tok / _ctx_size:.0%}"
             last_ctx[0] = f"ctx {_pct} ({_new_tok}/{_ctx_size})"
+        if request_rebuild is not None:
+            request_rebuild()
         status_callback("ready")
     elif cmd == "history":
         if tracker is None:
             screen.write("[history: tracker not available]\n", kind=screen.META)
         else:
             screen.prompt_history_overlay(tracker)
+            if request_rebuild is not None:
+                request_rebuild()
         status_callback("ready")
     elif cmd == "" or cmd == "skill":
         # /skill with no args → show active skills
@@ -574,6 +667,8 @@ def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_c
             'messages': messages, 'label': 'skill',
             'meta': {'active': list(args.skill or [])},
         })
+        if request_rebuild is not None:
+            request_rebuild()
         active_str = ', '.join(args.skill) if args.skill else 'none'
         screen.write(f"[active skills: {active_str}]\n", kind=screen.META)
         status_callback("ready")
@@ -629,6 +724,8 @@ def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_c
                     'messages': messages, 'label': 'load',
                     'meta': {'path': path},
                 })
+                if request_rebuild is not None:
+                    request_rebuild()
                 screen.write(f"[loaded from {path} — {len(messages)} messages, "
                              f"{len(args.selected_tools)} tools, "
                              f"skills: {', '.join(args.skill) or 'none'}]\n", kind=screen.META)
@@ -719,6 +816,7 @@ def action_interactive(args, available_tools):
     screen.set_cmd_completions({
         "compact": [],
         "clear": [],
+        "refresh": [],
         "tools": [],
         "context": [],
         "messages": [],
@@ -732,6 +830,31 @@ def action_interactive(args, available_tools):
     last_ctx = [""]
     llm_state = {"phase": "ready"}
     message_queue: _queue.Queue = _queue.Queue()
+
+    # Single-slot flag: when True, the main view needs to be rebuilt from
+    # messages[] at the next idle moment. Written only from the main thread
+    # (by _request_rebuild / the pre-prompt check). Consumed in the prompt
+    # loop and in :compact / :skill post-mutation sites.
+    pending_rebuild = [False]
+
+    def _request_rebuild() -> None:
+        """Rebuild the main view from messages[] now if the LLM worker is
+        idle, or defer until it goes idle.
+
+        Called after any overlay/command that can mutate messages[] out
+        of band. Mid-stream rebuild would wipe the chunks the worker just
+        wrote, so when the worker is busy we flag it and let the
+        pre-prompt check pick it up after the turn finishes.
+        """
+        if screen._busy or message_queue.qsize() > 0:
+            pending_rebuild[0] = True
+            screen.write(
+                "[messages edited — view will refresh after current turn]\n",
+                kind=screen.META,
+            )
+        else:
+            _render_messages_to_buffer(screen, messages)
+            pending_rebuild[0] = False
 
     def _drain_queue():
         while True:
@@ -908,6 +1031,12 @@ def action_interactive(args, available_tools):
     try:
         _refresh_status_line()
 
+        # If the session starts with prior turns (from --context or a
+        # pre-populated flow), seed the main view so the user sees that
+        # history from the first frame instead of a blank screen.
+        if any(m.get('role') != 'system' for m in messages):
+            _render_messages_to_buffer(screen, messages)
+
         # Seed with initial --prompt if provided. The worker echoes it
         # into the content buffer when it actually starts processing.
         if args.prompt:
@@ -917,9 +1046,18 @@ def action_interactive(args, available_tools):
                 _queue_prompt(seed)
 
         while True:
+            # Drain any deferred rebuild before the next prompt so the view
+            # is in sync with messages[] when the user is about to read it.
+            if pending_rebuild[0] and not screen._busy and message_queue.qsize() == 0:
+                pending_rebuild[0] = False
+                _render_messages_to_buffer(screen, messages)
+
             user_input = screen.prompt("> ")
             if screen._command_result is not None:
-                _handle_interactive_cmd(screen._command_result, screen, messages, args, status_callback, last_ctx, tracker)
+                _handle_interactive_cmd(
+                    screen._command_result, screen, messages, args,
+                    status_callback, last_ctx, tracker, _request_rebuild,
+                )
                 screen._command_result = None
                 _refresh_status_line()
                 continue

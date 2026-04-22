@@ -6,7 +6,7 @@ from .ansi import (
     KEY_BACKSPACE, KEY_ESC, KEY_ENTER, KEY_ALT_ENTER,
     KEY_CTRL_W, KEY_CTRL_BACKSPACE, KEY_ALT_BACKSPACE, KEY_DEL,
     KEY_CTRL_C, KEY_CTRL_D, KEY_CTRL_V, KEY_CTRL_A, KEY_CTRL_E,
-    KEY_CTRL_K, KEY_CTRL_U, KEY_TAB,
+    KEY_CTRL_K, KEY_CTRL_L, KEY_CTRL_U, KEY_TAB,
     KEY_UP, KEY_DOWN, KEY_RIGHT, KEY_LEFT, KEY_HOME, KEY_END,
     KEY_PGUP, KEY_PGDN,
     clipboard_copy,
@@ -242,6 +242,13 @@ class ModeHandler:
         internal state (input_buf, cursor_pos, etc.) and call its
         refresh methods.
         """
+        # Ctrl-L: refresh the main view from messages[]. vim convention is
+        # "redraw"; we piggyback on the :refresh command dispatch path so
+        # the behaviour is identical. Not intercepted in COMMAND or SEARCH
+        # mode where the user is typing text.
+        if key == KEY_CTRL_L and state.mode not in (Mode.COMMAND, Mode.SEARCH):
+            raise _CommandException("refresh")
+
         dispatch = {
             Mode.NORMAL:      self._handle_normal,
             Mode.INSERT:      self._handle_insert,
