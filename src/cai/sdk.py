@@ -572,6 +572,20 @@ class Harness:
                 f"enrich expects list[dict] or str, got {type(data).__name__}"
             )
 
+    # ─── usage ────────────────────────────────────────────────────────────────
+
+    def usage_percent(self) -> float:
+        """Estimated percentage (0–100) of the model's context window currently
+        consumed by ``self.messages``. Computed at call time using the same
+        chars/4 estimate as ``compact()``.
+        """
+        from cai.llm import get_model_profile
+
+        total_chars = sum(len(str(m.get('content', ''))) for m in self.messages)
+        estimated_tokens = total_chars // 4
+        context_limit = get_model_profile(self._model).get('context', 16000) or 16000
+        return 100.0 * estimated_tokens / context_limit
+
     # ─── compact ──────────────────────────────────────────────────────────────
 
     def compact(self, *, threshold_pct: Optional[float] = None) -> bool:
