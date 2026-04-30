@@ -1,6 +1,8 @@
 """Vim ``:undotree``-style history browser for MessageHistoryTracker.
 
-Left pane: ASCII tree of all recorded snapshots (pre-order walk).
+Left pane: 2D grid of all recorded snapshots (rows = chronological
+depth, columns = branches). Forks render as a new column to the right
+of the spine, joined by a ``──.`` connector at the fork point.
 Right pane: preview of the selected node's last few messages.
 
 Keys:
@@ -28,7 +30,7 @@ from ..ansi import (
     ansi_strip, ansi_pad,
     cur_move,
     KEY_BACKSPACE, KEY_ESC, KEY_ENTER, KEY_CTRL_C,
-    KEY_CTRL_D, KEY_CTRL_U, KEY_UP, KEY_DOWN,
+    KEY_CTRL_D, KEY_CTRL_U, KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT,
 )
 from ..input import read_key
 from ..state import _overlay_msg_text
@@ -83,6 +85,115 @@ def _diff_summary(parent_snap: list[dict] | None, snap: list[dict]) -> str:
     return f'-{a - b}'
 
 
+def _ordered_ids(tracker) -> list[int]:
+    """Pre-order DFS of node ids — used for absolute clamps and HEAD lookup."""
+    _coords, _forks, ordered, _max_col = tracker.layout()
+    return ordered
+
+
+def _move_vertical(display_rows: list, rows_to_cells: dict, coords: dict,
+                   current_nid: int, direction: int) -> int:
+    """j/k: step to the next/prev tree-row, preferring the same column."""
+    cur_row, cur_col = coords[current_nid]
+    cur_idx = display_rows.index(cur_row)
+    new_idx = cur_idx + direction
+    if new_idx < 0 or new_idx >= len(display_rows):
+        return current_nid
+    cells = rows_to_cells[display_rows[new_idx]]
+    for c, n in cells:
+        if c == cur_col:
+            return n
+    return min(cells, key=lambda x: abs(x[0] - cur_col))[1]
+
+
+def _move_horizontal(rows_to_cells: dict, coords: dict,
+                     current_nid: int, direction: int) -> int:
+    """h/l: step to the nearest node to the left/right at the same tree-row."""
+    cur_row, cur_col = coords[current_nid]
+    cells = sorted(rows_to_cells[cur_row])
+    if direction > 0:
+        for c, n in cells:
+            if c > cur_col:
+                return n
+    else:
+        for c, n in reversed(cells):
+            if c < cur_col:
+                return n
+    return current_nid
+
+
+def _render_grid_row(tree_row: int,
+                     rows_to_cells: dict,
+                     forks: dict,
+                     selected_nid: int,
+                     head_nid: int,
+                     max_col: int,
+                     tracker,
+                     cell_w: int) -> str:
+    """Render one row of the grid layout.
+
+    Each branch column occupies ``cell_w`` chars. Cells show
+    ``●N label`` (``> N label`` for HEAD), with the label truncated to
+    fit. Parents that fork emit ``─╮`` connectors from the end of
+    their cell text into the new column(s) so the branch visually drops
+    down to the next row. Selection gets SGR_REVERSE on the cell text;
+    HEAD gets SGR_BOLD. Connectors and padding stay unstyled.
+    """
+    total_w = (max_col + 1) * cell_w
+    chars = [' '] * total_w
+    spans: list[tuple[int, int, str]] = []
+    text_lens: dict[int, int] = {}
+
+    cells = rows_to_cells.get(tree_row, [])
+
+    for col, nid in cells:
+        node = tracker.node(nid)
+        marker = '>' if nid == head_nid else '●'
+        prefix = f'{marker}{nid}'
+        # Reserve 1 char gap before the next column; whatever space is
+        # left after marker+id+space goes to the label.
+        label_room = max(0, cell_w - 1 - len(prefix) - 1)
+        label = (node.label or '')[:label_room]
+        text = f'{prefix} {label}'.rstrip() if label else prefix
+        text = text[:cell_w - 1]
+        cs = col * cell_w
+        for i, ch in enumerate(text):
+            if cs + i < total_w:
+                chars[cs + i] = ch
+        text_lens[col] = len(text)
+        end = min(cs + len(text), total_w)
+        if nid == selected_nid:
+            spans.append((cs, end, 'sel'))
+        elif nid == head_nid:
+            spans.append((cs, end, 'head'))
+
+    for col, nid in cells:
+        if nid not in forks:
+            continue
+        p_end = col * cell_w + text_lens.get(col, 0)
+        for target_col in sorted(forks[nid]):
+            t_start = target_col * cell_w
+            for i in range(p_end, min(t_start, total_w)):
+                if chars[i] == ' ':
+                    chars[i] = '─'
+            if t_start < total_w:
+                chars[t_start] = '╮'
+            p_end = t_start + 1
+
+    plain = ''.join(chars)
+    if not spans:
+        return plain
+    spans.sort(key=lambda s: -s[0])
+    out = plain
+    for start, end, style in spans:
+        if style == 'sel':
+            prefix, suffix = SGR_REVERSE, SGR_RESET
+        else:
+            prefix, suffix = SGR_BOLD, SGR_RESET
+        out = out[:start] + prefix + out[start:end] + suffix + out[end:]
+    return out
+
+
 def _draw(tracker, screen, state) -> None:
     rows, cols = screen._rows, screen._cols
 
@@ -104,18 +215,33 @@ def _draw(tracker, screen, state) -> None:
     start_r = max(1, (rows - box_h) // 2 + 1)
     start_c = max(1, (cols - box_w) // 2 + 1)
 
-    walk = tracker.walk()
-    nodes = [n for _, n in walk]
-    if not nodes:
+    coords, forks, ordered, max_col = tracker.layout()
+    if not ordered:
         return
-    if state['selected_i'] >= len(nodes):
-        state['selected_i'] = len(nodes) - 1
+    if state['selected_i'] >= len(ordered):
+        state['selected_i'] = len(ordered) - 1
 
-    if state['selected_i'] >= state['scroll'] + visible_n:
-        state['scroll'] = state['selected_i'] - visible_n + 1
-    if state['selected_i'] < state['scroll']:
-        state['scroll'] = state['selected_i']
-    state['scroll'] = max(0, min(state['scroll'], max(0, len(walk) - visible_n)))
+    # Cell width adapts to the left pane and how many branch columns we
+    # need to fit. Wider when there are few branches (so labels breathe);
+    # narrower when many branches need to share the pane.
+    cell_w = max(7, min(16, left_w // (max_col + 1)))
+
+    # Group nodes by tree-row so each display row can place every node
+    # at that depth across its branch columns.
+    rows_to_cells: dict[int, list[tuple[int, int]]] = {}
+    for nid in ordered:
+        r, c = coords[nid]
+        rows_to_cells.setdefault(r, []).append((c, nid))
+    display_rows = sorted(rows_to_cells.keys())
+
+    selected_nid = ordered[state['selected_i']]
+    selected_disp_row = display_rows.index(coords[selected_nid][0])
+
+    if selected_disp_row >= state['scroll'] + visible_n:
+        state['scroll'] = selected_disp_row - visible_n + 1
+    if selected_disp_row < state['scroll']:
+        state['scroll'] = selected_disp_row
+    state['scroll'] = max(0, min(state['scroll'], max(0, len(display_rows) - visible_n)))
 
     H = '─'
     TL, TR, BL, BR = '┌', '┐', '└', '┘'
@@ -152,7 +278,8 @@ def _draw(tracker, screen, state) -> None:
     bottom_chars.append(BR)
     bottom_border = ''.join(bottom_chars)
 
-    sel_node = nodes[state['selected_i']]
+    sel_node = tracker.node(selected_nid)
+    head_nid = tracker.head()
     preview_rows = _preview_lines(sel_node.snapshot, right_w - 1, visible_n)
 
     new_lines: dict[int, tuple] = {}
@@ -168,25 +295,17 @@ def _draw(tracker, screen, state) -> None:
     for i in range(visible_n):
         src = i + state['scroll']
 
-        # Left (tree) cell
-        if src >= len(walk):
+        # Left (tree) cell — one tree-row, all columns at this depth.
+        if src >= len(display_rows):
             left_styled = ' ' * left_w
         else:
-            depth, node = walk[src]
-            is_head = (node.id == tracker.head())
-            is_cursor = (src == state['selected_i'])
-            gutter = '  ' * depth + '● '
-            age = _format_age(max(0.0, now - node.ts))
-            label = node.label[:30]
-            head_tag = ' ← HEAD' if is_head else ''
-            left_text = f'{gutter}#{node.id} {label}  {age}{head_tag}'
-            left_padded = ansi_pad(left_text, left_w)
-            if is_cursor:
-                left_styled = f'{SGR_REVERSE}{left_padded}{SGR_RESET}'
-            elif is_head:
-                left_styled = f'{SGR_BOLD}{left_padded}{SGR_RESET}'
-            else:
-                left_styled = left_padded
+            tree_row = display_rows[src]
+            left_text = _render_grid_row(
+                tree_row, rows_to_cells, forks,
+                selected_nid, head_nid, max_col,
+                tracker, cell_w,
+            )
+            left_styled = ansi_pad(left_text, left_w)
 
         # Right (preview) cell
         preview_line = preview_rows[i] if i < len(preview_rows) else ''
@@ -201,9 +320,17 @@ def _draw(tracker, screen, state) -> None:
     parent_snap = (tracker.node(sel_node.parent).snapshot
                    if sel_node.parent is not None else None)
     diff = _diff_summary(parent_snap, sel_node.snapshot)
-    status_left = (f' #{sel_node.id} {sel_node.label}  '
-                   f'msgs={len(sel_node.snapshot)}  diff={diff or "·"}')
-    hints = (f'  {SGR_DIM_GRAY}j/k  Enter:jump  F:fork  u/^R:undo/redo  '
+    age = _format_age(max(0.0, now - sel_node.ts))
+    ctx_str = ''
+    ctx_size = state.get('context_size') or 0
+    if ctx_size:
+        chars = sum(len(str(m.get('content', ''))) for m in sel_node.snapshot)
+        rough_tok = chars // 4
+        ctx_str = f'  ctx {rough_tok / ctx_size:.0%} (~{rough_tok}/{ctx_size})'
+    status_left = (f' #{sel_node.id} {sel_node.label}  {age}  '
+                   f'msgs={len(sel_node.snapshot)}  diff={diff or "·"}'
+                   f'{ctx_str}')
+    hints = (f'  {SGR_DIM_GRAY}h/j/k/l  Enter:jump  F:fork  u/^R:undo/redo  '
              f'd:drop  ESC{SGR_RESET}')
     status = status_left + hints
     put(1 + visible_n + 1, f'{VL}{ansi_pad(status, inner_w)}{VL}')
@@ -228,13 +355,19 @@ def _draw(tracker, screen, state) -> None:
     sys.stdout.flush()
 
 
-def prompt_history_overlay(screen, tracker) -> bool:
+def prompt_history_overlay(screen, tracker, *,
+                           context_size: int = 0) -> bool:
     """Interactive undo-tree viewer. Mutates tracker/messages in place on jump.
 
     Returns ``True`` when the user pressed ``F`` to fork at the selected
     node (tracker has already been jumped). The caller should cascade any
     wrapping overlay closed and let the CLI auto-continue the agentic
     loop if appropriate. Returns ``False`` on a normal ESC/q exit.
+
+    ``context_size`` (in tokens) lets the status bar surface a live
+    ``ctx N% (~tokens/limit)`` indicator for whichever snapshot is
+    selected, computed by the same chars/4 heuristic used elsewhere.
+    Pass 0 to suppress.
     """
     if tracker is None:
         return False
@@ -246,11 +379,12 @@ def prompt_history_overlay(screen, tracker) -> bool:
         'first_draw': True,
         'resize_pending': False,
         'fork_requested': False,
+        'context_size': context_size,
     }
     # Start with cursor on the current HEAD node.
-    walk = tracker.walk()
-    for i, (_d, n) in enumerate(walk):
-        if n.id == tracker.head():
+    ordered = _ordered_ids(tracker)
+    for i, nid in enumerate(ordered):
+        if nid == tracker.head():
             state['selected_i'] = i
             break
 
@@ -284,50 +418,65 @@ def prompt_history_overlay(screen, tracker) -> bool:
             if key in (KEY_ESC, 'q', KEY_CTRL_C):
                 break
 
-            walk = tracker.walk()
-            if not walk:
+            coords, _forks_nav, ordered, _max_col_nav = tracker.layout()
+            if not ordered:
                 break
+            rows_to_cells_nav: dict = {}
+            for nid in ordered:
+                r, c = coords[nid]
+                rows_to_cells_nav.setdefault(r, []).append((c, nid))
+            display_rows_nav = sorted(rows_to_cells_nav.keys())
+
+            def _select(nid: int) -> None:
+                state['selected_i'] = ordered.index(nid)
+
+            cur_nid = ordered[state['selected_i']]
 
             if key in (KEY_DOWN, 'j'):
-                state['selected_i'] = min(len(walk) - 1, state['selected_i'] + 1)
+                _select(_move_vertical(display_rows_nav, rows_to_cells_nav,
+                                        coords, cur_nid, +1))
             elif key in (KEY_UP, 'k'):
-                state['selected_i'] = max(0, state['selected_i'] - 1)
+                _select(_move_vertical(display_rows_nav, rows_to_cells_nav,
+                                        coords, cur_nid, -1))
+            elif key in (KEY_RIGHT, 'l'):
+                _select(_move_horizontal(rows_to_cells_nav, coords, cur_nid, +1))
+            elif key in (KEY_LEFT, 'h'):
+                _select(_move_horizontal(rows_to_cells_nav, coords, cur_nid, -1))
             elif key == 'G':
-                state['selected_i'] = len(walk) - 1
+                state['selected_i'] = len(ordered) - 1
             elif key == 'g':
                 state['selected_i'] = 0
             elif key == KEY_CTRL_D:
-                state['selected_i'] = min(len(walk) - 1, state['selected_i'] + 10)
+                state['selected_i'] = min(len(ordered) - 1, state['selected_i'] + 10)
             elif key == KEY_CTRL_U:
                 state['selected_i'] = max(0, state['selected_i'] - 10)
             elif key in KEY_ENTER:
-                _d, node = walk[state['selected_i']]
+                node = tracker.node(ordered[state['selected_i']])
                 tracker.jump(node.id)
             elif key == 'F':
                 # Fork: jump to the selected snapshot AND cascade the
                 # overlay exit so the CLI lands in the main view and
                 # continues the conversation from there.
-                _d, node = walk[state['selected_i']]
+                node = tracker.node(ordered[state['selected_i']])
                 tracker.jump(node.id)
                 state['fork_requested'] = True
                 break
             elif key == 'u':
                 if tracker.undo():
-                    # Reposition cursor on new HEAD
-                    walk = tracker.walk()
-                    for i, (_d, n) in enumerate(walk):
-                        if n.id == tracker.head():
+                    ordered = _ordered_ids(tracker)
+                    for i, nid in enumerate(ordered):
+                        if nid == tracker.head():
                             state['selected_i'] = i
                             break
             elif key == '\x12':  # Ctrl-R
                 if tracker.redo():
-                    walk = tracker.walk()
-                    for i, (_d, n) in enumerate(walk):
-                        if n.id == tracker.head():
+                    ordered = _ordered_ids(tracker)
+                    for i, nid in enumerate(ordered):
+                        if nid == tracker.head():
                             state['selected_i'] = i
                             break
             elif key == 'd':
-                _d, node = walk[state['selected_i']]
+                node = tracker.node(ordered[state['selected_i']])
                 # Can't drop root; can't drop HEAD (confuses the current-list
                 # invariant). Refuse silently for both.
                 if node.parent is not None and node.id != tracker.head():
@@ -345,9 +494,9 @@ def prompt_history_overlay(screen, tracker) -> bool:
                     for nid in victims:
                         tracker._drop(nid)
                     # Clamp cursor if it pointed into the dropped subtree.
-                    walk = tracker.walk()
-                    if state['selected_i'] >= len(walk):
-                        state['selected_i'] = max(0, len(walk) - 1)
+                    ordered = _ordered_ids(tracker)
+                    if state['selected_i'] >= len(ordered):
+                        state['selected_i'] = max(0, len(ordered) - 1)
 
             _draw(tracker, screen, state)
 

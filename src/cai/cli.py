@@ -652,7 +652,17 @@ def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_c
         if tracker is None:
             screen.write("[history: tracker not available]\n", kind=screen.META)
         else:
-            _fork = screen.prompt_history_overlay(tracker)
+            _ctx_m = re.search(r'\((?:~?)(\d+)/(\d+)\)', last_ctx[0])
+            _ctx_size = int(_ctx_m.group(2)) if _ctx_m else 0
+            if not _ctx_size:
+                _ctx_size = get_model_profile(args.model).get('context', 0) or 0
+            _fork = screen.prompt_history_overlay(tracker, context_size=_ctx_size)
+            # Jump (or fork) may have rewritten messages[]; refresh the
+            # main status line from the current snapshot so ctx% reflects
+            # what the next turn will actually see.
+            if _ctx_size:
+                _new_tok = sum(len(str(m.get('content', ''))) for m in messages) // 4
+                last_ctx[0] = f"ctx {_new_tok / _ctx_size:.0%} (~{_new_tok}/{_ctx_size})"
             if request_rebuild is not None:
                 request_rebuild()
             if _fork:

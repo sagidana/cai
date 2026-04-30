@@ -158,35 +158,56 @@ class MessageHistoryTracker:
         self._head = nid
 
     # ── rendering ─────────────────────────────────────────────────────────
-    def walk(self) -> list[tuple[int, HistoryNode]]:
-        """Pre-order walk of the tree. Returns list of (depth, node).
+    def layout(self) -> tuple[dict, dict, list, int]:
+        """2D grid layout of the tree for git-graph-style display.
 
-        Depth is a *fork* depth, not a chronological one. A straight-line
-        chain (each node has at most one child) stays at depth 0 and
-        renders as a single column. Siblings of the main line step out to
-        depth+1; the last-added child always continues the parent's line.
+        Each node gets a ``(row, col)`` coordinate:
 
-        This matches the vim-undotree style: the current branch reads like
-        a plain list, and only real forks introduce indentation.
+        * ``row`` = depth from the root (chronological / undo distance).
+        * ``col`` = branch column. The first child of any node inherits
+          the parent's col so the original timeline stays vertical;
+          subsequent children claim fresh columns from a global counter,
+          so a fork created by jumping back and mutating renders as a
+          new column to the right of the spine.
+
+        Returns a 4-tuple:
+
+        * ``coords``  — ``{node_id: (row, col)}``
+        * ``forks``   — ``{parent_id: [target_col, ...]}`` for parents
+          with more than one child; the list holds the cols their newer
+          children land in (used to draw ``──.`` fork connectors).
+          Single-child parents are absent from this dict.
+        * ``ordered`` — pre-order DFS of node ids (display order; used
+          for j/k navigation in the overlay).
+        * ``max_col`` — highest column index used (so the renderer knows
+          how wide the grid is).
         """
         if self._root not in self._nodes:
-            return []
-        out: list[tuple[int, HistoryNode]] = []
+            return {}, {}, [], 0
+        coords: dict[int, tuple[int, int]] = {}
+        forks: dict[int, list[int]] = {}
+        ordered: list[int] = []
+        next_col = [0]
 
-        def visit(nid: int, depth: int) -> None:
-            node = self._nodes[nid]
-            out.append((depth, node))
-            children = node.children
+        def visit(nid: int, row: int, col: int) -> None:
+            coords[nid] = (row, col)
+            ordered.append(nid)
+            children = self._nodes[nid].children
             if not children:
                 return
-            # Older siblings (children[:-1]) branch off to the side; the
-            # most recent child (children[-1]) continues the parent's lane.
-            for child_id in children[:-1]:
-                visit(child_id, depth + 1)
-            visit(children[-1], depth)
+            # First child inherits the parent's column; each subsequent
+            # child gets the next free column from the global counter.
+            child_cols = [col]
+            for _ in children[1:]:
+                next_col[0] += 1
+                child_cols.append(next_col[0])
+            if len(children) > 1:
+                forks[nid] = child_cols[1:]
+            for child_id, child_col in zip(children, child_cols):
+                visit(child_id, row + 1, child_col)
 
-        visit(self._root, 0)
-        return out
+        visit(self._root, 0, 0)
+        return coords, forks, ordered, next_col[0]
 
     # ── eviction ──────────────────────────────────────────────────────────
     def _maybe_evict(self) -> None:
