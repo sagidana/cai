@@ -354,7 +354,16 @@ def _retry_until_format(call_fn, system_prompt, check_fn, fail_msg_fn, format_la
             else:
                 messages.insert(0, {'role': 'system', 'content': system_prompt})
                 inserted_system = True
+        # Also drop the format hint at the tail as a fresh user message so it
+        # stays salient when recent tool results would otherwise dominate
+        # context. Pop after the call so it doesn't leak into history.
+        reminder_added = False
+        if messages is not None:
+            messages.append({'role': 'user', 'content': system_prompt})
+            reminder_added = True
         result = call_fn()
+        if reminder_added:
+            messages.pop()
         if original_system_msg is not None:
             messages[0] = original_system_msg
         elif inserted_system:
