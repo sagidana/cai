@@ -843,6 +843,11 @@ def call_llm(messages,
     else:
         run_turn = _run_nonstreaming_turn
 
+    # Pin temperature to 0 under strict_format — sampling drift is the main
+    # cause of format violations. Caller-supplied temperature is overridden.
+    if strict_format:
+        temperature = 0
+
     turn = 0
     while True:
         turn += 1
