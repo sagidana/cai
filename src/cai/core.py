@@ -315,8 +315,9 @@ def compose_system_prompt(config: dict, base, task_mode, skill_prompts) -> str:
 
     - ``base is None`` → use the default CAI prompt + mode block + skills
       (same behaviour as :func:`assemble_system_prompt`).
-    - ``base == ""``   → empty string. No mode block, no skills — the caller
-      explicitly wanted nothing.
+    - ``base == ""``   → no default prompt and no mode block, but skill prompts
+      are still appended. Lets callers opt out of the scaffolding while keeping
+      skill-supplied instructions in scope.
     - ``base`` is a non-empty string → ``base`` + mode block + skills.
 
     Single source of truth for composing the system prompt; called from
@@ -324,7 +325,7 @@ def compose_system_prompt(config: dict, base, task_mode, skill_prompts) -> str:
     that skill mutations reuse identical logic.
     """
     if base == "":
-        return ""
+        return "\n\n".join(skill_prompts)
     if base is None:
         return assemble_system_prompt(config, task_mode, skill_prompts)
     parts = [base]

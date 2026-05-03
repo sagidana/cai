@@ -298,21 +298,31 @@ def _build_base_messages(args, stdin_content=None):
     """Build the initial messages list (system prompt, stdin, file, cursor)."""
     messages = []
 
-    if args.system_prompt:
-        messages.append({"role": "system", "content": args.system_prompt})
-    elif getattr(args, 'naked', False):
-        log.info("_build_base_messages: --naked mode, skipping default system prompt")
-    else:
-        skill_names = getattr(args, 'skill', []) or []
-        skill_tools, skill_prompts = core.load_skills(skill_names)
-        if skill_tools:
-            args.selected_tools |= skill_tools
+    # Skill tools load in all modes (including --naked / --system-prompt).
+    skill_names = getattr(args, 'skill', []) or []
+    skill_tools, skill_prompts = core.load_skills(skill_names)
+    if skill_tools:
+        args.selected_tools |= skill_tools
 
-        task_mode = getattr(args, 'mode', 'research')
-        messages.append({"role": "system", "content": core.assemble_system_prompt(config, task_mode, skill_prompts)})
-        log.info("_build_base_messages: system prompt assembled "
-                 "(prompt_mode=%s, task_mode=%s, skills=%s)",
-                 config.get('prompt_mode', 'local'), task_mode, skill_names)
+    # Pick the base for compose_system_prompt:
+    #   --naked            → "" (no default scaffolding; skills still apply)
+    #   --system-prompt X  → X  (custom base + mode + skills)
+    #   default            → None (default prompt + mode + skills)
+    if getattr(args, 'naked', False):
+        base = ""
+    elif args.system_prompt:
+        base = args.system_prompt
+    else:
+        base = None
+
+    task_mode = getattr(args, 'mode', 'research')
+    system_prompt = core.compose_system_prompt(config, base, task_mode, skill_prompts)
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    log.info("_build_base_messages: system prompt assembled "
+             "(prompt_mode=%s, task_mode=%s, skills=%s, naked=%s, custom=%s)",
+             config.get('prompt_mode', 'local'), task_mode, skill_names,
+             getattr(args, 'naked', False), bool(args.system_prompt))
 
     line_by_line = getattr(args, 'line_by_line', False)
     if stdin_content is None and not line_by_line:
