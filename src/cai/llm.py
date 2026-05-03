@@ -340,9 +340,25 @@ def _retry_until_format(call_fn, system_prompt, check_fn, fail_msg_fn, format_la
     """
 
     for attempt in range(1, max_attempts + 1):
-        if messages: messages.insert(0, {'role': 'system', 'content': system_prompt})
+        # Append strict-format guidance to the existing system prompt rather than
+        # inserting a second system message — some providers reject conversations
+        # with more than one system message. Restore the original after the call.
+        original_system_msg = None
+        inserted_system = False
+        if messages:
+            if messages[0].get('role') == 'system':
+                original_system_msg = messages[0]
+                existing = original_system_msg.get('content', '') or ''
+                sep = "\n\n" if existing else ""
+                messages[0] = {**original_system_msg, 'content': existing + sep + system_prompt}
+            else:
+                messages.insert(0, {'role': 'system', 'content': system_prompt})
+                inserted_system = True
         result = call_fn()
-        if messages: messages.pop(0) # cleanup
+        if original_system_msg is not None:
+            messages[0] = original_system_msg
+        elif inserted_system:
+            messages.pop(0)
         if not result:
             return result
         orig_content, reasoning, tool_calls, usage = result
