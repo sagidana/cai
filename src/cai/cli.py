@@ -294,6 +294,49 @@ def _read_file_numbered(path):
     with open(path) as f:
         return "".join(f"{i + 1}: {line}" for i, line in enumerate(f))
 
+
+def _load_cai_md_prefix() -> str:
+    """Read CLI-only .cai.md system-prompt files in fixed order.
+
+    Search order: ``~/.config/cai/.cai.md`` then ``./.cai.md`` (cwd). Existing
+    files' contents are concatenated with blank-line separators; missing files
+    are skipped silently. Returns ``""`` if neither file exists.
+
+    Called once from ``main()`` and cached on ``args._cai_md_prefix``; the SDK
+    (cai.Harness) never invokes this so Python scripts using the SDK aren't
+    affected by these files.
+    """
+    parts = []
+    candidates = [
+        os.path.expanduser("~/.config/cai/.cai.md"),
+        os.path.join(os.getcwd(), ".cai.md"),
+    ]
+    for path in candidates:
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path) as f:
+                content = f.read().strip()
+        except OSError as e:
+            log.warning("could not read %s: %s", path, e)
+            continue
+        if content:
+            parts.append(content)
+            log.info("_load_cai_md_prefix: loaded %s (%d chars)", path, len(content))
+    return "\n\n".join(parts)
+
+
+def _compose_system_prompt(args, base, skill_prompts) -> str:
+    """CLI wrapper around ``core.compose_system_prompt`` that prepends the
+    .cai.md prefix captured at startup. Use this from CLI code paths;
+    the SDK calls ``core.compose_system_prompt`` directly so its prompt
+    composition stays unaffected by per-CLI .cai.md files.
+    """
+    prefix = getattr(args, '_cai_md_prefix', '') or ''
+    if prefix:
+        base = f"{prefix}\n\n{base}" if base else prefix
+    return core.compose_system_prompt(base, skill_prompts)
+
 def _build_base_messages(args, stdin_content=None):
     """Build the initial messages list (system prompt, stdin, file, cursor)."""
     messages = []
@@ -304,7 +347,7 @@ def _build_base_messages(args, stdin_content=None):
         args.selected_tools |= skill_tools
 
     base = args.system_prompt or None
-    system_prompt = core.compose_system_prompt(base, skill_prompts)
+    system_prompt = _compose_system_prompt(args, base, skill_prompts)
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
     log.info("_build_base_messages: system prompt assembled "
@@ -371,8 +414,8 @@ def _load_context(path, args, merge_tools=False):
     # Harness(system_prompt=...)). v1 and CLI-saved flows omit it.
     args.system_prompt_base = settings.get("system_prompt_base")
 
-    new_system = core.compose_system_prompt(
-        args.system_prompt_base, skill_prompts)
+    new_system = _compose_system_prompt(
+        args, args.system_prompt_base, skill_prompts)
     if messages and messages[0].get('role') == 'system':
         messages[0]['content'] = new_system
     else:
@@ -717,7 +760,7 @@ def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_c
         # Rebuild system message in-place via the shared composer so a
         # flow-loaded base (if any) survives skill mutations.
         base = getattr(args, 'system_prompt_base', None)
-        new_system = core.compose_system_prompt(base, skill_prompts)
+        new_system = _compose_system_prompt(args, base, skill_prompts)
         if messages and messages[0].get('role') == 'system':
             messages[0]['content'] = new_system
         else:
@@ -1249,6 +1292,7 @@ def main():
                 args.system_prompt = f.read()
         except OSError as e:
             parser.error(f"cannot read --system-prompt-file: {e}")
+    args._cai_md_prefix = _load_cai_md_prefix()
     if args.model is None:
         args.model = config.get('model', "arcee-ai/trinity-mini:free")
 
