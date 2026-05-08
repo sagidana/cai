@@ -10,6 +10,7 @@ The screen uses vim-like modal keybindings:
 Layout (top to bottom): content viewport | prompt | status line
 """
 
+import json
 import os
 import select
 import shutil
@@ -148,23 +149,39 @@ class Screen:
 
     @classmethod
     def _load_history(cls) -> list[str]:
-        """Load prompt history from disk. Returns most-recent-first list."""
+        """Load prompt history from disk. Returns most-recent-first list.
+
+        Each entry is one JSON-encoded string per file line, so multi-line
+        prompts round-trip as a single entry. Legacy plain-text lines (from
+        before this format) are treated as raw entries.
+        """
         try:
             with open(cls._HISTORY_FILE, 'r') as f:
-                lines = [l.rstrip('\n') for l in f if l.strip()]
-            lines.reverse()
-            return lines[:cls._HISTORY_MAX]
+                raw = [l.rstrip('\n') for l in f if l.strip()]
         except FileNotFoundError:
             return []
         except OSError:
             return []
+        entries: list[str] = []
+        for line in raw:
+            try:
+                value = json.loads(line)
+                entries.append(value if isinstance(value, str) else line)
+            except ValueError:
+                entries.append(line)
+        entries.reverse()
+        return entries[:cls._HISTORY_MAX]
 
     def _save_history_entry(self, entry: str) -> None:
-        """Append a single entry to the history file on disk."""
+        """Append a single entry to the history file on disk.
+
+        The entry is JSON-encoded so embedded newlines do not split it
+        across multiple physical lines.
+        """
         try:
             os.makedirs(os.path.dirname(self._HISTORY_FILE), exist_ok=True)
             with open(self._HISTORY_FILE, 'a') as f:
-                f.write(entry + '\n')
+                f.write(json.dumps(entry) + '\n')
         except OSError:
             pass
 
