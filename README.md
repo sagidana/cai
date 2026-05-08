@@ -10,7 +10,6 @@
 - **Interactive vim-modal TUI** — `cai -i` opens a persistent chat session with NORMAL / INSERT / VISUAL / VISUAL_LINE / COMMAND / SEARCH modes and inline tool-call streaming.
 - **Log viewer** — `cai --logger` tails the hierarchical JSONL log with folding, search, and yank.
 - **Skills** — `--skill files web adb ...` activates curated tool + prompt bundles.
-- **Task modes** — `--mode research|dev` tunes the system prompt toward investigation or implementation.
 - **MCP tools** — add any external MCP server via `--mcp <command>`; tool names are namespaced as `{label}__{name}`.
 - **Programmatic SDK** — `from cai import Harness, Result, Event` for building agents in Python.
 - **Flow save/load** — `:save` / `:load` in the TUI, or `Harness.save()` / `Harness.load()` in code, persist conversation + settings as JSON.
@@ -44,7 +43,6 @@ echo "sk-or-..." > ~/.config/cai/api_key
 {
   "base_url": "https://openrouter.ai/api/v1",
   "model": "arcee-ai/trinity-mini:free",
-  "prompt_mode": "local",
   "observation_mask_pct": 0.60,
   "observation_mask_keep": 3,
   "context_budget_pct": 0.75,
@@ -57,7 +55,6 @@ echo "sk-or-..." > ~/.config/cai/api_key
 
 Key settings:
 
-- `prompt_mode` — `local` (default) or `sota`. Picks the base system prompt file from `src/cai/prompts/`.
 - `context_budget_pct` — fraction of the context window before compaction kicks in.
 - `tool_result_max_chars` — cap on a single tool-call result before dynamic trimming.
 - `model_profiles` — override or add model capability entries.
@@ -102,7 +99,7 @@ The file is included with the cursor position marked — great for editor integr
 ```bash
 cai -i
 cai -i --file ./src/cai/cli.py -p "Walk me through this file"
-cai -i --skill files web --mode dev
+cai -i --skill files web
 ```
 
 ### Skills
@@ -113,15 +110,6 @@ cai --skill files web -p "Compare our implementation to the official docs"
 ```
 
 Built-in skills: `adb`, `files`, `frida`, `smali`, `web`. Each declares a tool set and a prompt fragment (see `src/cai/skills/*.md`). Skills can also be layered at runtime via `:skill` inside the TUI.
-
-### Task mode
-
-```bash
-cai --mode research -p "Why does the auth flow retry twice?"
-cai --mode dev -p "Implement a rate limiter middleware" --file ./app.py
-```
-
-`--mode` appends a focus block to the system prompt (`research` or `dev`). Default: `research`.
 
 ### External MCP server
 
@@ -178,7 +166,6 @@ cai --logger --log-path /tmp/cai/my-run.log
 ```bash
 cai --model "openai/gpt-4o" --system-prompt "You are a senior Go engineer." -p "Review this code" --file ./main.go
 cai --system-prompt-file ./prompts/reviewer.md -p "Review this diff" --file ./diff.patch
-cai --naked -p "raw prompt, no defaults"
 ```
 
 ### One-liner output
@@ -199,12 +186,10 @@ cai --oneline -p "Summarise this function in one sentence" --file ./cli.py
 | `--log-path PATH` | Log file to write and to view (default `/tmp/cai/cai.log`) |
 | `--file PATH` | Include a file in context |
 | `--cursor file:line:col` | Cursor-aware code generation |
-| `--mode research\|dev` | Task-focus hint prepended to the system prompt |
 | `--skill NAME [NAME ...]` | Activate one or more skills |
 | `--model` | Override model for this run |
-| `--system-prompt` | Override the base system prompt |
-| `--system-prompt-file PATH` | Load base system prompt from a file |
-| `--naked` | No default system prompt (overridden by `--system-prompt*`) |
+| `--system-prompt` | Set the system prompt |
+| `--system-prompt-file PATH` | Load the system prompt from a file |
 | `-t` / `--tools NAME [...]` | Enable specific tools (prefixed names, e.g. `cai__search`) |
 | `--mcp CMD [CMD ...]` | Launch external MCP servers |
 | `--force-tools` | Require at least one tool call (`tool_choice=required`) |
@@ -348,7 +333,6 @@ Harness(
     tools: list[str] | None = None,
     functions: list[callable] | None = None,
     model: str | None = None,
-    task_mode: str | None = None,     # 'research' | 'dev'
     mcp_servers: list[str] | None = None,
     name: str | None = None,
     log_path: str | None = None,
@@ -359,7 +343,7 @@ Methods:
 
 | Method | Purpose |
 |--------|---------|
-| `agent(prompt=..., messages=..., system_prompt=..., skills=..., tools=..., functions=..., model=..., task_mode=..., strict_format=..., name=...)` | Run a multi-turn agentic call. Returns a `Result`. Per-call `system_prompt`/`skills`/`tools`/`functions` **append** to the harness; `model`/`task_mode` override. |
+| `agent(prompt=..., messages=..., system_prompt=..., skills=..., tools=..., functions=..., model=..., strict_format=..., name=...)` | Run a multi-turn agentic call. Returns a `Result`. Per-call `system_prompt`/`skills`/`tools`/`functions` **append** to the harness; `model` overrides. |
 | `gate(options, prompt, *, system_prompt=..., tools=..., skills=...)` | Single-turn strict-format gate that returns exactly one of `options`. |
 | `enrich(data)` | Append a user-visible message (text or full message list) to `self.messages`. |
 | `compact(threshold_pct=...)` | Summarise older turns in-place. Returns True if compaction happened. |
@@ -432,7 +416,7 @@ User skills with the same name as a built-in take precedence.
 
 Both interactive mode and programmatic `Harness.agent()` run a multi-turn loop until the LLM answers without further tool calls (or hits `--max-turns`).
 
-- A tier-appropriate (small/mid/large) base system prompt is injected unless overridden.
+- The system prompt is built from `--system-prompt` (or `--system-prompt-file`) plus any active skill prompts; nothing is injected by default.
 - **Stuck detection** (opt-in via `config.json`): a warning is injected if the same tool is called with the same args repeatedly.
 - **Context compaction**: when prompt tokens exceed `context_budget_pct` of the model window, older turns are summarised in-place.
 - **Tool-result trimming**: individual tool results are capped by `tool_result_max_chars` and shrunk dynamically as remaining context tightens.
@@ -548,7 +532,7 @@ Enable specific tools with `-t` using the prefixed name. In the TUI, `:tools` to
 
 ## Flow Files
 
-A `.flow` file is a JSON snapshot of a session: composed system message (at index 0 of `messages`) plus a `settings` block with `system_prompt_base`, `task_mode`, `skills`, `selected_tools`, and `model`.
+A `.flow` file is a JSON snapshot of a session: composed system message (at index 0 of `messages`) plus a `settings` block with `system_prompt_base`, `skills`, `selected_tools`, and `model`.
 
 - CLI: `:save path` / `:load path` in interactive mode, or `cai --context path` to resume non-interactively.
 - SDK: `harness.save(path)` / `Harness.load(path, functions=..., mcp_servers=...)`.

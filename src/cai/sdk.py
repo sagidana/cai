@@ -296,7 +296,7 @@ class Harness:
 
     Constructor-immutable (except for ``.messages``). Per-call overrides on
     ``agent()`` layer on top of harness state: ``system_prompt``/``skills``/
-    ``tools``/``functions`` append (union); ``model``/``task_mode`` override.
+    ``tools``/``functions`` append (union); ``model`` overrides.
     """
 
     def __init__(self, *,
@@ -305,7 +305,6 @@ class Harness:
                  tools: Optional[list] = None,
                  functions: Optional[list] = None,
                  model: Optional[str] = None,
-                 task_mode: Optional[str] = None,
                  mcp_servers: Optional[list] = None,
                  name: Optional[str] = None,
                  log_path: Optional[str] = None,
@@ -343,12 +342,12 @@ class Harness:
         self._skills: list = list(skills or [])
         skill_tool_names, skill_prompts = core.load_skills(self._skills)
 
-        # 5. Assembled system prompt via the shared tri-state composer.
+        # 5. Assembled system prompt via the shared composer.
         # Retain the user-supplied base so skill mutations can recompose
         # without losing it (and so flow files can round-trip).
         self._system_prompt_base = system_prompt
         self._system_prompt = core.compose_system_prompt(
-            ctx.config, system_prompt, task_mode, skill_prompts)
+            system_prompt, skill_prompts)
 
         # 6. Tool allowlist. Refresh available_tools after any registrations.
         # Only tools explicitly listed (or pulled in by skills) are exposed —
@@ -358,9 +357,8 @@ class Harness:
         allowlist = set(tools or []) | set(skill_tool_names)
         self._tools = [n for n in all_names if n in allowlist]
 
-        # 7. Model + task_mode
+        # 7. Model
         self._model = model or ctx.config.get("model")
-        self._task_mode = task_mode
 
         # 8. Hooks. No hooks run by default. For the built-in context-budget
         # behaviour, opt in by passing hooks=[("after_turn", mask_hook),
@@ -417,7 +415,6 @@ class Harness:
                   tools: Optional[list] = None,
                   functions: Optional[list] = None,
                   model: Optional[str] = None,
-                  task_mode: Optional[str] = None,
                   strict_format: Optional[str] = None,
                   name: Optional[str] = None,
                   hooks: Optional[list] = None) -> Result:
@@ -441,13 +438,6 @@ class Harness:
             eff_system = f"{eff_system}\n\n{system_prompt}" if eff_system else system_prompt
         for p in call_skill_prompts:
             eff_system = f"{eff_system}\n\n{p}" if eff_system else p
-
-        # task_mode override: if supplied, replace harness's mode block.
-        # (Since the block was already baked into self._system_prompt we
-        # simply append the new one — recency bias gives it precedence.)
-        if task_mode and task_mode in core.MODE_BLOCKS:
-            block = core.MODE_BLOCKS[task_mode]
-            eff_system = f"{eff_system}\n\n{block}" if eff_system else block
 
         # functions append — register and surface them alongside MCP tools.
         call_fn_names: set = set()
@@ -641,12 +631,10 @@ class Harness:
         - ``messages`` with the current system prompt prepended at index 0
           (matches the shape CLI ``:load`` expects).
         - ``settings.system_prompt_base`` — the *user-supplied* base (what
-          was passed to ``Harness(system_prompt=...)``). ``None`` = default,
-          ``""`` = empty. The fully composed prompt is never stored; it's
-          always re-derived from base + task_mode + skills on load or on
-          skill mutation, so there is one source of truth.
-        - ``settings.task_mode``, ``settings.skills``, ``settings.selected_tools``,
-          ``settings.model``.
+          was passed to ``Harness(system_prompt=...)``). The fully composed
+          prompt is never stored; it's always re-derived from base + skills
+          on load or on skill mutation, so there is one source of truth.
+        - ``settings.skills``, ``settings.selected_tools``, ``settings.model``.
 
         Tools registered via ``functions=`` can't be serialised (Python
         callables). Their *names* are saved as part of ``selected_tools``,
@@ -662,7 +650,6 @@ class Harness:
             ),
             "settings": {
                 "system_prompt_base": self._system_prompt_base,
-                "task_mode": self._task_mode,
                 "skills": list(self._skills),
                 "selected_tools": list(self._tools),
                 "model": self._model,
@@ -706,7 +693,6 @@ class Harness:
             tools=settings.get("selected_tools") or [],
             functions=functions,
             model=settings.get("model"),
-            task_mode=settings.get("task_mode"),
             mcp_servers=mcp_servers,
             name=name,
             log_path=log_path,
@@ -754,7 +740,6 @@ class Harness:
         new._system_prompt = self._system_prompt
         new._tools = list(self._tools)
         new._model = self._model
-        new._task_mode = self._task_mode
         new.messages = list(self.messages)
 
         _cai_logger.log(1, f"HARNESS {new._name}  (clone of {self._name!r})  "

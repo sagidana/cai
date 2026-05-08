@@ -144,7 +144,6 @@ import cai
 
 # cai.config.model = "anthropic/claude-opus-4"
 # cai.config.base_url = "https://openrouter.ai/api/v1"
-# cai.config.prompt_mode = "local"            # or "sota"
 # cai.config.ssl_verify = True
 # cai.config.stuck_detection = False
 # cai.config.observation_mask_pct = 0.60

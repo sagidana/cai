@@ -22,7 +22,6 @@ log = logging.getLogger("cai.core")
 
 # ─── Paths ────────────────────────────────────────────────────────────────────
 
-PROMPTS_DIR = os.path.join(os.path.dirname(__file__), "prompts")
 SKILLS_DIR = os.path.join(os.path.dirname(__file__), "skills")
 USER_SKILLS_DIR = os.path.join(os.path.expanduser("~/.config/cai"), "skills")
 
@@ -65,9 +64,6 @@ def load_config(config_dir: Optional[str] = None) -> dict:
     updated = False
     if 'ssl_verify' not in config:
         config['ssl_verify'] = True
-        updated = True
-    if 'prompt_mode' not in config:
-        config['prompt_mode'] = 'local'
         updated = True
     if 'stuck_detection' not in config:
         config['stuck_detection'] = False
@@ -258,78 +254,20 @@ def load_skills(names):
 
 # ─── System prompt assembly ───────────────────────────────────────────────────
 
-MODE_BLOCKS = {
-    'research': (
-        "## Current Task Mode: Research\n"
-        "Your primary focus is investigation and analysis. Prioritize forming "
-        "hypotheses, gathering evidence, and stating confidence levels. "
-        "Treat development steps as secondary unless explicitly needed.\n"
-    ),
-    'dev': (
-        "## Current Task Mode: Development\n"
-        "Your primary focus is implementation and planning. Prioritize reading "
-        "existing code, making targeted edits, and producing a clear plan before "
-        "building. Treat research steps as secondary unless explicitly needed.\n"
-    ),
-}
+def compose_system_prompt(base, skill_prompts) -> str:
+    """Compose a system prompt from a user-supplied base and skill prompts.
 
-
-def load_cai_prompt(config: dict) -> str:
-    """Load the base cai system prompt from disk based on config prompt_mode.
-
-    Reads either prompts/local.md or prompts/sota.md from the package directory.
-    Falls back to the mid-tier agentic prompt if the file cannot be read.
-    Mode and skill blocks are assembled by the caller so they appear after the
-    base prompt (recency bias — more specific instructions carry more weight).
-    """
-    from cai.llm import AGENTIC_SYSTEM_PROMPTS
-
-    prompt_mode = config.get('prompt_mode', 'local')
-    if prompt_mode not in ('local', 'sota'):
-        log.warning("load_cai_prompt: unknown prompt_mode %r, falling back to 'local'", prompt_mode)
-        prompt_mode = 'local'
-    prompt_path = os.path.join(PROMPTS_DIR, f"{prompt_mode}.md")
-    try:
-        with open(prompt_path) as f:
-            return f.read()
-    except OSError as e:
-        log.error("load_cai_prompt: cannot read %s: %s", prompt_path, e)
-        return AGENTIC_SYSTEM_PROMPTS.get('mid')
-
-
-def assemble_system_prompt(config: dict, task_mode, skill_prompts) -> str:
-    """Assemble the full system prompt in specificity order.
-
-    Order: base → mode block → skill prompts
-    Most specific instructions last so they take precedence via recency bias.
-    """
-    parts = [load_cai_prompt(config)]
-    if task_mode and task_mode in MODE_BLOCKS:
-        parts.append(MODE_BLOCKS[task_mode])
-    parts.extend(skill_prompts)
-    return "\n\n".join(parts)
-
-
-def compose_system_prompt(config: dict, base, task_mode, skill_prompts) -> str:
-    """Tri-state composition of a system prompt.
-
-    - ``base is None`` → use the default CAI prompt + mode block + skills
-      (same behaviour as :func:`assemble_system_prompt`).
-    - ``base == ""``   → no default prompt and no mode block, but skill prompts
-      are still appended. Lets callers opt out of the scaffolding while keeping
-      skill-supplied instructions in scope.
-    - ``base`` is a non-empty string → ``base`` + mode block + skills.
+    ``base`` is the user-supplied system prompt (may be ``None`` or empty).
+    Skill prompts are appended after the base. Returns an empty string when
+    neither is provided — the caller decides whether to attach a system
+    message at all.
 
     Single source of truth for composing the system prompt; called from
     Harness.__init__, Harness.load, and the CLI :skill / :load handlers so
     that skill mutations reuse identical logic.
     """
-    if base == "":
-        return "\n\n".join(skill_prompts)
-    if base is None:
-        return assemble_system_prompt(config, task_mode, skill_prompts)
-    parts = [base]
-    if task_mode and task_mode in MODE_BLOCKS:
-        parts.append(MODE_BLOCKS[task_mode])
+    parts = []
+    if base:
+        parts.append(base)
     parts.extend(skill_prompts)
     return "\n\n".join(parts)

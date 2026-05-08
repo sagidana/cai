@@ -298,31 +298,17 @@ def _build_base_messages(args, stdin_content=None):
     """Build the initial messages list (system prompt, stdin, file, cursor)."""
     messages = []
 
-    # Skill tools load in all modes (including --naked / --system-prompt).
     skill_names = getattr(args, 'skill', []) or []
     skill_tools, skill_prompts = core.load_skills(skill_names)
     if skill_tools:
         args.selected_tools |= skill_tools
 
-    # Pick the base for compose_system_prompt:
-    #   --naked            → "" (no default scaffolding; skills still apply)
-    #   --system-prompt X  → X  (custom base + mode + skills)
-    #   default            → None (default prompt + mode + skills)
-    if getattr(args, 'naked', False):
-        base = ""
-    elif args.system_prompt:
-        base = args.system_prompt
-    else:
-        base = None
-
-    task_mode = getattr(args, 'mode', 'research')
-    system_prompt = core.compose_system_prompt(config, base, task_mode, skill_prompts)
+    base = args.system_prompt or None
+    system_prompt = core.compose_system_prompt(base, skill_prompts)
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
     log.info("_build_base_messages: system prompt assembled "
-             "(prompt_mode=%s, task_mode=%s, skills=%s, naked=%s, custom=%s)",
-             config.get('prompt_mode', 'local'), task_mode, skill_names,
-             getattr(args, 'naked', False), bool(args.system_prompt))
+             "(skills=%s, custom=%s)", skill_names, bool(args.system_prompt))
 
     line_by_line = getattr(args, 'line_by_line', False)
     if stdin_content is None and not line_by_line:
@@ -382,13 +368,11 @@ def _load_context(path, args, merge_tools=False):
     args.selected_tools |= skill_tools
 
     # v2 flows carry system_prompt_base (the user-supplied base passed to
-    # Harness(system_prompt=...)). v1 and CLI-saved flows omit it — falling
-    # back to None preserves the old "rebuild from config defaults" path.
+    # Harness(system_prompt=...)). v1 and CLI-saved flows omit it.
     args.system_prompt_base = settings.get("system_prompt_base")
 
-    task_mode = settings.get("task_mode") or getattr(args, 'mode', 'research')
     new_system = core.compose_system_prompt(
-        config, args.system_prompt_base, task_mode, skill_prompts)
+        args.system_prompt_base, skill_prompts)
     if messages and messages[0].get('role') == 'system':
         messages[0]['content'] = new_system
     else:
@@ -732,9 +716,8 @@ def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_c
         args.selected_tools |= skill_tools
         # Rebuild system message in-place via the shared composer so a
         # flow-loaded base (if any) survives skill mutations.
-        task_mode = getattr(args, 'mode', 'research')
         base = getattr(args, 'system_prompt_base', None)
-        new_system = core.compose_system_prompt(config, base, task_mode, skill_prompts)
+        new_system = core.compose_system_prompt(base, skill_prompts)
         if messages and messages[0].get('role') == 'system':
             messages[0]['content'] = new_system
         else:
@@ -759,7 +742,6 @@ def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_c
                 "messages": messages,
                 "settings": {
                     "system_prompt_base": getattr(args, 'system_prompt_base', None),
-                    "task_mode": getattr(args, 'mode', None),
                     "skills": list(getattr(args, 'skill', []) or []),
                     "selected_tools": sorted(getattr(args, 'selected_tools', set()) or []),
                     "model": getattr(args, 'model', None),
@@ -1192,8 +1174,6 @@ def main():
                         help="the system prompt to send to the LLM.")
     parser.add_argument("--system-prompt-file",
                         help="path to a file whose contents are used as the system prompt.")
-    parser.add_argument("--mode", choices=list(core.MODE_BLOCKS.keys()), default='research',
-                        help="task-focus hint prepended to the system prompt (default: research).")
     skill_arg = parser.add_argument("--skill", nargs='+', default=[], metavar='SKILL',
                         help=f"activate one or more skills (available: {', '.join(core.list_skill_names())}).")
     skill_arg.completer = _skills_completer
@@ -1240,8 +1220,6 @@ def main():
     parser.add_argument('--context', default=None, metavar='PATH',
                         help="path to a .flow file (from /save) to resume from. "
                              "Tools from --tools are appended; --model overrides.")
-    parser.add_argument('--naked', action='store_true',
-                        help="do not prepend any default system prompts. overridden by --system-prompt / --system-prompt-file.")
     parser.add_argument('--logger', action='store_true',
                         help="launch the interactive hierarchical log viewer.")
     parser.add_argument('--log-path', default=_cai_logger.LOG_PATH, metavar='PATH',

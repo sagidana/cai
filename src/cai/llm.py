@@ -73,26 +73,6 @@ MODEL_PROFILES = {
     "_default":                       {"tier": "mid",   "context": 128000,  "tool_calling": True},
 }
 
-AGENTIC_SYSTEM_PROMPTS = {
-    'small': (
-        "You are a CLI assistant with access to tools. "
-        "You MUST use the available tools to answer questions — do not guess or make up information. "
-        "Follow this process: 1) Call the appropriate tool. 2) Read the result carefully. "
-        "3) Answer based only on what the tool returned. "
-        "Do not ask clarifying questions. Output only the final answer, nothing else."
-    ),
-    'mid': (
-        "You are a CLI assistant with access to tools. "
-        "Use tools to gather information before answering. "
-        "Do not ask clarifying questions — make reasonable assumptions. "
-        "Be concise in your final response."
-    ),
-    'large': (
-        "You are a CLI assistant. Use available tools to answer accurately. "
-        "Do not ask clarifying questions. Be concise."
-    ),
-}
-
 def get_model_profile(model_id):
     """Return capability profile for model_id.
 
