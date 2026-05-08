@@ -592,7 +592,9 @@ def _maybe_auto_continue(screen, messages, queue_continuation) -> None:
 def _handle_interactive_cmd(cmd, screen, messages, args, status_callback, last_ctx,
                             tracker=None, request_rebuild=None, queue_continuation=None):
     """Execute a vim-style colon command from interactive mode."""
-    if cmd == "compact":
+    if cmd == "q" or cmd == "quit":
+        raise EOFError
+    elif cmd == "compact":
         status_callback("compacting...")
         try:
             _compact_messages(messages, args.model)
@@ -884,6 +886,8 @@ def action_interactive(args, available_tools):
         "save": [],
         "load": [],
         "skill": ["off"] + _skill_names,
+        "q": [],
+        "quit": [],
     })
 
     last_ctx = [""]
