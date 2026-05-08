@@ -313,12 +313,60 @@ def _rebind_view(ctx: _MsgOverlayCtx) -> None:
 
 
 def _record_mutation(ctx: _MsgOverlayCtx, label: str, meta: dict | None = None) -> None:
-    """Fire messages_mutated so the tracker records, then refresh the view."""
+    """Fire messages_mutated so the tracker records, then refresh the view.
+
+    The hook subscription set up in :func:`prompt_messages_overlay` would
+    also flip ``ctx.dirty`` here — clear it back so the tick handler
+    doesn't double-process this mutation right after we already rebuilt.
+    """
     from cai.llm import fire_event
     fire_event('messages_mutated', {
         'messages': ctx.messages, 'label': label, 'meta': meta or {},
     })
     _rebind_view(ctx)
+    ctx.dirty = False
+
+
+def _refresh_view_after_external_mutation(ctx: _MsgOverlayCtx) -> None:
+    """Rebuild ``ctx.view`` after the worker thread mutated ``ctx.messages``.
+
+    Unlike :func:`_rebind_view` (used for transforms/jumps that wholesale-
+    replace messages), this preserves marks, fold state, and the cursor
+    position where possible. The common case is a fresh assistant message
+    arriving at the tail while the user is browsing — keep their selection
+    pinned unless they were already at the bottom, in which case follow.
+    """
+    nv_before = len(ctx.view)
+    cursor_was_at_tail = (nv_before == 0) or (ctx.selected_idx >= nv_before - 1)
+
+    ctx.view = list(range(len(ctx.messages)))
+    if ctx.filter_pattern:
+        _overlay_apply_filter(ctx, ctx.filter_pattern)
+
+    nv = len(ctx.view)
+    if nv == 0:
+        ctx.selected_idx = 0
+    elif cursor_was_at_tail:
+        ctx.selected_idx = nv - 1
+    else:
+        ctx.selected_idx = max(0, min(ctx.selected_idx, nv - 1))
+
+    if ctx.search_pattern:
+        ctx.search_matches = _overlay_find_matches(ctx)
+        if ctx.search_matches:
+            _overlay_sync_search_cursor(ctx)
+        else:
+            ctx.search_match_idx = -1
+
+    # Newly-appended messages aren't in ctx.collapsed, so they render
+    # expanded — the user gets to read content as it lands without
+    # having to hit Tab. Existing fold state on prior messages is kept
+    # because we don't touch ctx.collapsed for known ids.
+
+    _overlay_recompute_tokens(ctx)
+
+    ctx.prev_lines.clear()
+    ctx.first_draw = True
 
 
 def _clear_selection(ctx: _MsgOverlayCtx) -> None:
@@ -864,6 +912,17 @@ def prompt_messages_overlay(
         ctx.resize_pending = True
         ctx.first_draw = True
 
+    # Live refresh: fired by the LLM worker thread (and any other site
+    # that calls fire_event) when messages[] changes under us. We only
+    # set a flag here — actually rebuilding the view from another thread
+    # would race against the event loop's reads.
+    def _on_messages_mutated(_evt_ctx):
+        ctx.dirty = True
+
+    from cai.userconfig import _user_hooks
+    _live_handler = ('messages_mutated', _on_messages_mutated)
+    _user_hooks.append(_live_handler)
+
     sys.stdout.write(f'{ALT_ENTER}{ERASE_SCREEN}')
     sys.stdout.flush()
     try:
@@ -874,6 +933,11 @@ def prompt_messages_overlay(
         while True:
             if ctx.resize_pending:
                 ctx.resize_pending = False
+                overlay_redraw(ctx, screen._rows, screen._cols)
+
+            if ctx.dirty:
+                ctx.dirty = False
+                _refresh_view_after_external_mutation(ctx)
                 overlay_redraw(ctx, screen._rows, screen._cols)
 
             rlist, _, _ = select.select([screen._tty_fd], [], [], 0.05)
@@ -975,6 +1039,10 @@ def prompt_messages_overlay(
     finally:
         termios.tcsetattr(screen._tty_fd, termios.TCSADRAIN, old_attrs)
         signal.signal(signal.SIGWINCH, orig_handler)
+        try:
+            _user_hooks.remove(_live_handler)
+        except ValueError:
+            pass
         sys.stdout.write(f'{ALT_EXIT}{CUR_HIDE}')
         sys.stdout.flush()
 

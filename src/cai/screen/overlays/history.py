@@ -380,6 +380,7 @@ def prompt_history_overlay(screen, tracker, *,
         'resize_pending': False,
         'fork_requested': False,
         'context_size': context_size,
+        'dirty': False,
     }
     # Start with cursor on the current HEAD node.
     ordered = _ordered_ids(tracker)
@@ -397,6 +398,17 @@ def prompt_history_overlay(screen, tracker, *,
         state['resize_pending'] = True
         state['first_draw'] = True
 
+    # Live refresh: the tracker's own subscription (registered earlier in
+    # cli.py) records each mutation, so by the time *our* hook fires the
+    # tree already includes the new node. Just flag dirty and let the
+    # tick handler redraw.
+    def _on_messages_mutated(_evt_ctx):
+        state['dirty'] = True
+
+    from cai.userconfig import _user_hooks
+    _live_handler = ('messages_mutated', _on_messages_mutated)
+    _user_hooks.append(_live_handler)
+
     sys.stdout.write(f'{ALT_ENTER}{ERASE_SCREEN}')
     sys.stdout.flush()
 
@@ -408,6 +420,10 @@ def prompt_history_overlay(screen, tracker, *,
         while True:
             if state['resize_pending']:
                 state['resize_pending'] = False
+                _draw(tracker, screen, state)
+
+            if state['dirty']:
+                state['dirty'] = False
                 _draw(tracker, screen, state)
 
             rlist, _, _ = select.select([screen._tty_fd], [], [], 0.05)
@@ -503,6 +519,10 @@ def prompt_history_overlay(screen, tracker, *,
     finally:
         termios.tcsetattr(screen._tty_fd, termios.TCSADRAIN, old_attrs)
         signal.signal(signal.SIGWINCH, orig_handler)
+        try:
+            _user_hooks.remove(_live_handler)
+        except ValueError:
+            pass
         sys.stdout.write(f'{ALT_EXIT}{CUR_HIDE}')
         sys.stdout.flush()
 

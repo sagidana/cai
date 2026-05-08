@@ -107,6 +107,13 @@ class Screen:
         self._render_lock = threading.RLock()
         self._interrupt_event = threading.Event()
 
+        # Focus stack: bottom is 'main' (the conversation view), each overlay
+        # pushes its name on entry and pops on exit. Only the focused window
+        # emits ANSI to the terminal — write()/set_status()/_handle_resize()
+        # still update the buffer and state when an overlay owns the screen,
+        # but skip the redraw so they don't paint over the overlay's frame.
+        self._focus_stack: list[str] = ['main']
+
         # Optional callback invoked on Ctrl-C when the input buffer is empty.
         # Returning True signals that the event was handled (e.g. the LLM was
         # interrupted) and the default double-tap quit logic should be skipped.
@@ -224,6 +231,13 @@ class Screen:
             else:
                 self._new_content_below = True
 
+            # An overlay owns the screen — buffer the write but don't paint.
+            # The eventual pop_focus → _restore_after_overlay does a full
+            # repaint with whatever accumulated.
+            if self._focus_stack[-1] != 'main':
+                self._write_pending = True
+                return
+
             # Batch rendering: don't redraw more than ~60fps
             now = time.monotonic()
             if now - self._last_render_time >= 0.016:
@@ -280,6 +294,8 @@ class Screen:
         """Update status bar text and refresh."""
         self._status_text = text
         with self._render_lock:
+            if self._focus_stack[-1] != 'main':
+                return
             if self._resize_pending:
                 self._resize_pending = False
                 self._handle_resize()
@@ -292,8 +308,9 @@ class Screen:
         old = self._status_text
         self._status_text = hint
         with self._render_lock:
-            self._refresh_status()
-            sys.stdout.flush()
+            if self._focus_stack[-1] == 'main':
+                self._refresh_status()
+                sys.stdout.flush()
         self._status_text = old
 
     def set_cmd_completions(self, completions: dict[str, list[str]]) -> None:
@@ -327,6 +344,8 @@ class Screen:
         self._new_content_below = False
         self._current_kind = None
         with self._render_lock:
+            if self._focus_stack[-1] != 'main':
+                return
             self._refresh_all()
             sys.stdout.flush()
 
@@ -450,6 +469,27 @@ class Screen:
 
     # ── Overlay entry points ──────────────────────────────────────────────────
 
+    def push_focus(self, name: str) -> None:
+        """Mark *name* as the currently-focused window.
+
+        While the focus stack is not at 'main', the conversation view's
+        ANSI emit is suppressed. write()/set_status() still update the
+        buffer so nothing is lost — they just don't paint.
+        """
+        with self._render_lock:
+            self._focus_stack.append(name)
+
+    def pop_focus(self) -> None:
+        """Pop the top window. When we land back on 'main', redraw fully."""
+        with self._render_lock:
+            if len(self._focus_stack) > 1:
+                self._focus_stack.pop()
+            if self._focus_stack[-1] == 'main':
+                self._restore_after_overlay()
+
+    def current_focus(self) -> str:
+        return self._focus_stack[-1]
+
     def _restore_after_overlay(self) -> None:
         """Restore the main TUI after an overlay exits.
 
@@ -466,47 +506,59 @@ class Screen:
         sys.stdout.write(ALT_ENTER + ERASE_SCREEN)
         self._refresh_all()
         sys.stdout.flush()
+        self._write_pending = False
+        self._last_render_time = time.monotonic()
 
     def prompt_tools_overlay(self, tool_entries: list, enabled: set) -> set:
         """Interactive tools toggle overlay. See overlays/tools.py for docs."""
-        result = _tools_overlay(self, tool_entries, enabled)
-        self._restore_after_overlay()
-        return result
+        self.push_focus('tools')
+        try:
+            return _tools_overlay(self, tool_entries, enabled)
+        finally:
+            self.pop_focus()
 
     def prompt_context_overlay(
         self, messages: list, context_size: int = 0, prompt_tokens: int = 0
     ) -> tuple:
         """Interactive context viewer/editor. See overlays/context.py for docs."""
-        result = _ctx_overlay(self, messages, context_size, prompt_tokens)
-        self._restore_after_overlay()
-        return result
+        self.push_focus('context')
+        try:
+            return _ctx_overlay(self, messages, context_size, prompt_tokens)
+        finally:
+            self.pop_focus()
 
     def prompt_model_overlay(self, models: list) -> 'str | None':
         """Interactive model picker. Returns selected model name or None."""
-        result = _model_overlay(self, models)
-        self._restore_after_overlay()
-        return result
+        self.push_focus('model')
+        try:
+            return _model_overlay(self, models)
+        finally:
+            self.pop_focus()
 
     def prompt_messages_overlay(
         self, messages: list, tracker, *,
         model: str = '', context_size: int = 0, prompt_tokens: int = 0,
     ) -> tuple:
         """Interactive messages overlay. See overlays/messages.py for docs."""
-        result = _msg_overlay(self, messages, tracker,
-                              model=model,
-                              context_size=context_size,
-                              prompt_tokens=prompt_tokens)
-        self._restore_after_overlay()
-        return result
+        self.push_focus('messages')
+        try:
+            return _msg_overlay(self, messages, tracker,
+                                model=model,
+                                context_size=context_size,
+                                prompt_tokens=prompt_tokens)
+        finally:
+            self.pop_focus()
 
     def prompt_history_overlay(self, tracker, *, context_size: int = 0) -> bool:
         """Interactive undo-tree viewer. See overlays/history.py for docs.
 
         Returns True if the user pressed F to fork at a node.
         """
-        result = _history_overlay(self, tracker, context_size=context_size)
-        self._restore_after_overlay()
-        return bool(result)
+        self.push_focus('history')
+        try:
+            return bool(_history_overlay(self, tracker, context_size=context_size))
+        finally:
+            self.pop_focus()
 
     # ── Refresh helpers ───────────────────────────────────────────────────────
 
@@ -624,7 +676,12 @@ class Screen:
         self._resize_pending = True
 
     def _handle_resize(self) -> None:
-        """Handle terminal resize: rewrap buffer and full redraw."""
+        """Handle terminal resize: rewrap buffer and full redraw.
+
+        While an overlay owns the screen, just rewrap the buffer/layout —
+        the overlay has its own SIGWINCH handler and will repaint itself.
+        Drawing the conversation view here would punch through the overlay.
+        """
         self._buffer.rewrap(self._cols)
         self._layout.resize(self._rows, self._cols)
         total = self._buffer.line_count()
@@ -640,6 +697,8 @@ class Screen:
             self._state.viewport_offset = self._state.cursor_row
         elif self._state.cursor_row >= self._state.viewport_offset + content_rows:
             self._state.viewport_offset = self._state.cursor_row - content_rows + 1
+        if self._focus_stack[-1] != 'main':
+            return
         sys.stdout.write(ERASE_SCREEN)
         self._refresh_all()
         sys.stdout.flush()

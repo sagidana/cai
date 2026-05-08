@@ -411,6 +411,11 @@ class _MsgOverlayCtx:
         # Event-loop plumbing
         'prev_key', 'resize_pending', 'prev_lines', 'first_draw',
 
+        # Live-refresh: set by the messages_mutated hook (worker thread)
+        # when ctx.messages has changed under the overlay; the event loop
+        # drains it on the next tick by rebuilding the view and redrawing.
+        'dirty',
+
         # Token estimate (same fields as _OverlayCtx)
         'context_size', 'base_chars', 'prompt_tokens', 'tokens_est',
 
@@ -465,6 +470,7 @@ class _MsgOverlayCtx:
         self.resize_pending     = False
         self.prev_lines: dict[int, str] = {}
         self.first_draw         = True
+        self.dirty              = False
 
         self.context_size  = context_size
         self.base_chars    = sum(len(_overlay_msg_text(m)) for m in messages) or 1
