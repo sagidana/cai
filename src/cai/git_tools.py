@@ -24,6 +24,12 @@ def register(mcp):
         return result.stdout or result.stderr
 
     @mcp.tool()
+    def git_show(target: str = "HEAD") -> str:
+        """Show a git commit's message and diff. target can be a commit hash, ref, or 'HEAD' (default)."""
+        result = subprocess.run(["git", "show", target], capture_output=True, text=True)
+        return result.stdout or result.stderr
+
+    @mcp.tool()
     def git_blame(file_path: str) -> str:
         """Show git blame for a file — who last changed each line and when."""
         try:
@@ -82,6 +88,14 @@ if __name__ == "__main__":
     # git_diff invalid ref
     r = T["git_diff"]("refs/NONEXISTENT_BRANCH_XYZ")
     check("git_diff invalid ref returns output", bool(r.strip()), r)
+
+    # git_show HEAD
+    r = T["git_show"]("HEAD")
+    check("git_show HEAD returns output", bool(r.strip()) and not r.startswith("fatal:"), r)
+
+    # git_show invalid ref
+    r = T["git_show"]("NONEXISTENT_COMMIT_XYZ")
+    check("git_show invalid ref returns output", bool(r.strip()), r)
 
     # git_blame a file that exists
     r = T["git_blame"]("src/cai/tools.py")
