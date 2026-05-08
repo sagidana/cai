@@ -475,7 +475,8 @@ def _run_nonstreaming_turn(messages, included_tools, model, strict_format=None,
                                                            tools=included_tools,
                                                            tool_choice=tool_choice,
                                                            reasoning_effort=reasoning_effort,
-                                                           temperature=temperature),
+                                                           temperature=temperature,
+                                                           interrupt_event=interrupt_event),
                                    strict_format,
                                    messages=messages)
     # Strip format-retry feedback messages so they never leak into global context via enrichment.
@@ -503,7 +504,8 @@ def _run_streaming_turn(messages, included_tools, model, strict_format=None,
                                                                              tools=included_tools,
                                                                              tool_choice=tool_choice,
                                                                              reasoning_effort=reasoning_effort,
-                                                                             temperature=temperature):
+                                                                             temperature=temperature,
+                                                                             interrupt_event=interrupt_event):
         if interrupt_event and interrupt_event.is_set():
             break
         if reasoning_chunk:
@@ -889,6 +891,15 @@ def call_llm(messages,
                                                          tool_choice=tool_choice,
                                                          interrupt_event=interrupt_event,
                                                          reasoning_callback=reasoning_callback)
+
+        # Bail out as soon as the user interrupted: skip tool dispatch on a
+        # half-formed response and don't roll into another turn.
+        if interrupt_event is not None and interrupt_event.is_set():
+            log.info("call_llm: interrupted after turn %d", turn)
+            _emit_status("interrupted", status_callback)
+            _cai_logger.pop_nest(1)
+            return content or ""
+
         if reasoning:
             _cai_logger.log(2, "REASONING")
             _cai_logger.log(3, reasoning)

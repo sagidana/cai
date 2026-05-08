@@ -1,5 +1,6 @@
 import json
 import logging
+import threading
 import warnings
 import requests
 from urllib3.exceptions import InsecureRequestWarning
@@ -7,6 +8,36 @@ from urllib3.exceptions import InsecureRequestWarning
 warnings.filterwarnings("ignore", category=InsecureRequestWarning)
 
 log = logging.getLogger("cai")
+
+
+class _AbortOnInterrupt:
+    """Context manager that closes `response` from a watchdog thread when
+    `interrupt_event` fires. Closing the response from another thread aborts
+    the in-flight body read — iter_lines() / r.text / r.json() raise, which
+    the caller treats as an interrupted request.
+    """
+    def __init__(self, response, interrupt_event):
+        self._response = response
+        self._interrupt_event = interrupt_event
+        self._done = threading.Event()
+
+    def __enter__(self):
+        if self._response is not None and self._interrupt_event is not None:
+            threading.Thread(target=self._watch, daemon=True, name='cai-http-abort').start()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self._done.set()
+        return False
+
+    def _watch(self):
+        while not self._done.is_set():
+            if self._interrupt_event.wait(timeout=0.05):
+                try:
+                    self._response.close()
+                except Exception:
+                    pass
+                return
 
 
 class OpenRouterApi:
@@ -91,7 +122,7 @@ class OpenAiApi:
             self._report(f"[!] request {url} returned invalid JSON: {e}")
             return None
 
-    def chat(self, messages, model, system_prompt=None, tools=None, tool_choice="auto", reasoning_effort=None, temperature=None):
+    def chat(self, messages, model, system_prompt=None, tools=None, tool_choice="auto", reasoning_effort=None, temperature=None, interrupt_event=None):
         url = f"{self.base_url}/chat/completions"
         headers = {}
         headers['Authorization'] = f"Bearer {self.api_key}"
@@ -123,20 +154,35 @@ class OpenAiApi:
 
         data['messages'].extend(messages)
 
+        if interrupt_event is not None and interrupt_event.is_set():
+            return
+
+        # stream=True lets the watchdog abort the body read on interrupt;
+        # without it requests.post blocks until the full body has been received.
         try:
-            r = requests.post(url, headers=headers, json=data, verify=self.ssl_verify)
+            r = requests.post(url, headers=headers, json=data, stream=True, verify=self.ssl_verify)
         except requests.RequestException as e:
             self._report(f"[!] request {url} failed: {e}")
             return
-        if r.status_code != 200:
-            self._report(f"[!] request {url} failed: {r.status_code}, {r.text}")
-            return
 
-        try:
-            result = r.json()
-        except ValueError as e:
-            self._report(f"[!] request {url} returned invalid JSON: {e}")
-            return
+        with r, _AbortOnInterrupt(r, interrupt_event):
+            try:
+                if r.status_code != 200:
+                    self._report(f"[!] request {url} failed: {r.status_code}, {r.text}")
+                    return
+                result = r.json()
+            except Exception as e:
+                # Closing the response from the watchdog can surface as
+                # AttributeError ('NoneType' has no attribute 'read'),
+                # ChunkedEncodingError, or others — collapse all of them to
+                # "interrupted" when the user asked for it.
+                if interrupt_event is not None and interrupt_event.is_set():
+                    log.info("chat: aborted by interrupt: %s", e)
+                    return
+                if not isinstance(e, (requests.RequestException, ValueError)):
+                    raise
+                self._report(f"[!] request {url} read failed: {e}")
+                return
         choices = result.get("choices", [])
         if len(choices) != 1:
             self._report(f"[!] len(choices) != 1: {choices}")
@@ -156,7 +202,7 @@ class OpenAiApi:
 
         return content, reasoning, tool_calls, usage
 
-    def chat_stream(self, messages, model, system_prompt=None, tools=None, tool_choice="auto", reasoning_effort=None, temperature=None):
+    def chat_stream(self, messages, model, system_prompt=None, tools=None, tool_choice="auto", reasoning_effort=None, temperature=None, interrupt_event=None):
         url = f"{self.base_url}/chat/completions"
         headers = {}
         headers['Authorization'] = f"Bearer {self.api_key}"
@@ -196,6 +242,10 @@ class OpenAiApi:
         tool_calls = {}
         usage = {}
 
+        if interrupt_event is not None and interrupt_event.is_set():
+            yield None, None, None, {}
+            return
+
         try:
             response_cm = requests.post(url, headers=headers, json=data, stream=True, verify=self.ssl_verify)
         except requests.RequestException as e:
@@ -203,7 +253,7 @@ class OpenAiApi:
             yield None, None, None, {}
             return
 
-        with response_cm as response:
+        with response_cm as response, _AbortOnInterrupt(response, interrupt_event):
             try:
                 response.raise_for_status()
             except requests.HTTPError as e:
@@ -223,7 +273,17 @@ class OpenAiApi:
                     line = next(line_iter)
                 except StopIteration:
                     break
-                except requests.RequestException as e:
+                except Exception as e:
+                    # Closing the response from the watchdog can surface as
+                    # AttributeError ('NoneType' has no attribute 'read'),
+                    # ChunkedEncodingError, or others — collapse all of them
+                    # to "interrupted" when the user asked for it.
+                    if interrupt_event is not None and interrupt_event.is_set():
+                        log.info("chat_stream: aborted by interrupt: %s", e)
+                        yield None, None, finished_tool_calls, usage
+                        return
+                    if not isinstance(e, requests.RequestException):
+                        raise
                     self._report(f"[!] request {url} stream interrupted: {e}")
                     yield None, None, finished_tool_calls, usage
                     return

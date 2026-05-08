@@ -447,6 +447,19 @@ def action_prompt(args, available_tools):
     tools = select_tools(available_tools, getattr(args, 'selected_tools', set()))
 
     openai_api.error_cb = lambda msg: _diag(f"[error] {msg}")
+
+    # Wire SIGINT to a threading.Event so the watchdog inside the HTTP layer
+    # can close the response on Ctrl-C — otherwise a blocked requests.post()
+    # delays KeyboardInterrupt until the LLM finishes responding.
+    interrupt_event = threading.Event()
+    original_sigint = signal.getsignal(signal.SIGINT)
+
+    def _sigint_handler(signum, frame):
+        interrupt_event.set()
+        # Re-raise so the existing KeyboardInterrupt path (exit 130) runs.
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGINT, _sigint_handler)
     try:
         _cai_logger.push_nest(1)
         content = call_llm(messages,
@@ -459,7 +472,8 @@ def action_prompt(args, available_tools):
                            temperature=args.temperature,
                            oneline=args.oneline,
                            stream_callback=_stderr_dim if streaming else None,
-                           tool_callback=_stderr_tool)
+                           tool_callback=_stderr_tool,
+                           interrupt_event=interrupt_event)
         _cai_logger.pop_nest(1)
         if streaming and _STDERR_TTY:
             sys.stderr.write('\n')
@@ -475,6 +489,7 @@ def action_prompt(args, available_tools):
         _cai_logger.pop_nest(1)
         _diag(f"[error] {e}")
     finally:
+        signal.signal(signal.SIGINT, original_sigint)
         openai_api.error_cb = None
 
 def _render_messages_to_buffer(screen, messages: list) -> None:
