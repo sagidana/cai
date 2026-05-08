@@ -376,7 +376,7 @@ def _retry_until_format(call_fn, system_prompt, check_fn, fail_msg_fn, format_la
         if tool_calls:
             return orig_content, reasoning, tool_calls, usage
 
-        ok, normalised = check_fn(orig_content)
+        ok, normalised = check_fn(orig_content.strip() if orig_content else orig_content)
         if ok:
             return normalised, reasoning, tool_calls, usage
 
