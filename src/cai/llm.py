@@ -904,7 +904,7 @@ def call_llm(messages,
             ctx_str = f"ctx {pct} ({prompt_tokens}/{profile['context']})"
             ctx_callback(ctx_str)
 
-        # Surface raw usage to SDK consumers (Result._usage, etc).
+        # Surface raw usage to SDK consumers (Agent._usage, etc).
         if usage and event_callback:
             event_callback({'type': 'usage', 'usage': dict(usage), 'turn': turn})
 

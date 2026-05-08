@@ -1,14 +1,7 @@
 """
 sdk.py — programmatic SDK surface for cai.
 
-Three public classes: Harness, Result, Event. Import via::
-
-    import cai
-    h = cai.Harness(system_prompt="...")
-    result = h.agent(prompt="...")
-    for event in result:
-        ...
-    h.enrich(result.messages)
+Public classes: Harness, Agent, Event.
 
 The SDK is additive: importing cai.sdk does not touch cli or the TUI,
 and `call_llm` in llm.py is invoked through its public callback API.
@@ -40,7 +33,7 @@ _block_seq = itertools.count(1)
 
 @dataclass
 class Event:
-    """One item yielded while streaming a Result.
+    """One item yielded while streaming an Agent run.
 
     Consumers switch on ``.type`` and read the relevant fields:
     - content / reasoning: ``.text``
@@ -56,13 +49,17 @@ class Event:
     is_error: bool = False
 
 
-# ─── Result ───────────────────────────────────────────────────────────────────
+# ─── Agent ────────────────────────────────────────────────────────────────────
 
 _DONE = object()  # sentinel pushed onto the queue to signal iterator end
 
 
-class Result:
-    """Lazy, single-consumption handle for a Harness.agent() call.
+class Agent:
+    """Lazy, single-consumption handle for an agent run.
+
+    Construct directly to drive an agent over an explicit ``messages`` array
+    (the caller controls what goes into the context), or get one back from
+    ``Harness.agent()`` which builds ``messages`` from the harness's own state.
 
     Iterating yields Event objects as the agent runs. Reading any final-state
     attribute implicitly drains the iterator first. ``wait()`` drains without
@@ -72,7 +69,7 @@ class Result:
     def __init__(self,
                  messages: list,
                  system_prompt: str,
-                 tool_dicts: list,
+                 tools: list,
                  model: str,
                  config: dict,
                  max_turns: Optional[int] = None,
@@ -82,7 +79,7 @@ class Result:
                  hooks: Optional[list] = None):
         self._input_messages = messages
         self._system_prompt = system_prompt
-        self._tool_dicts = tool_dicts     # OpenAI-format schema list for call_llm
+        self._tools = tools               # OpenAI-format schema list for call_llm
         self._model = model
         self._config = config
         self._max_turns = max_turns
@@ -125,7 +122,7 @@ class Result:
                 return
             yield item
 
-    def wait(self) -> "Result":
+    def wait(self) -> "Agent":
         """Drain the iterator to completion. Idempotent."""
         for _ in self:
             pass
@@ -252,7 +249,7 @@ class Result:
             content = llm.call_llm(
                 messages=messages,
                 model=self._model,
-                tools=self._tool_dicts,
+                tools=self._tools,
                 max_turns=self._max_turns,
                 strict_format=self._strict_format,
                 stream_callback=stream_cb,
@@ -279,7 +276,7 @@ class Result:
             self._finish_reason = "error"
             _cai_logger.log(1, f"BLOCK ERROR  name={self._block_name!r}  {e}")
         except Exception as e:
-            log.exception("sdk.Result worker thread failed")
+            log.exception("sdk.Agent worker thread failed")
             self._error = f"{type(e).__name__}: {e}"
             self._finish_reason = "error"
             _cai_logger.log(1, f"BLOCK ERROR  name={self._block_name!r}  "
@@ -409,7 +406,6 @@ class Harness:
 
     def agent(self, *,
                   prompt: Optional[str] = None,
-                  messages: Optional[list] = None,
                   system_prompt: Optional[str] = None,
                   skills: Optional[list] = None,
                   tools: Optional[list] = None,
@@ -417,15 +413,20 @@ class Harness:
                   model: Optional[str] = None,
                   strict_format: Optional[str] = None,
                   name: Optional[str] = None,
-                  hooks: Optional[list] = None) -> Result:
+                  hooks: Optional[list] = None) -> Agent:
+        """Run an agent over the harness's current context.
+
+        The run starts from a defensive copy of ``self.messages``. If
+        ``prompt`` is supplied it is appended as a user turn. To control the
+        context explicitly (without going through ``self.messages``), construct
+        ``cai.Agent`` directly.
+        """
         import cai.tools as _cai_tools
 
-        if prompt is None and messages is None:
-            raise ValueError("agent() requires prompt or messages")
-
-        # Build effective messages: defensive copy of caller's list, then
-        # append the prompt as a user turn if supplied.
-        eff_messages: list = list(messages) if messages else []
+        # Build effective messages from the harness's own state, then append
+        # the prompt as a user turn if supplied. Use enrich() to populate
+        # self.messages between calls.
+        eff_messages: list = list(self.messages)
         if prompt is not None:
             eff_messages.append({"role": "user", "content": prompt})
 
@@ -458,7 +459,7 @@ class Harness:
             eff_names = list(dict.fromkeys(list(self._tools) + [n for n in all_names if n in added]))
         else:
             eff_names = list(self._tools)
-        eff_tool_dicts = [t for t in available if t["function"]["name"] in set(eff_names)]
+        eff_tools = [t for t in available if t["function"]["name"] in set(eff_names)]
 
         eff_model = model or self._model
 
@@ -467,7 +468,7 @@ class Harness:
         # LLM-level logs fold underneath them). BLOCK RESULT is emitted
         # from the worker after call_llm returns.
         block_name = name or f"block-{next(_block_seq)}"
-        eff_tool_names = [t["function"]["name"] for t in eff_tool_dicts]
+        eff_tool_names = [t["function"]["name"] for t in eff_tools]
         _cai_logger.log(1, (
             f"BLOCK  name={block_name!r}  harness={self._name!r}  "
             f"model={eff_model}  strict_format={strict_format}  "
@@ -476,10 +477,10 @@ class Harness:
         prompt_text = prompt if prompt is not None else ""
         _cai_logger.log(2, f"BLOCK PROMPT  {prompt_text}")
 
-        return Result(
+        return Agent(
             messages=eff_messages,
             system_prompt=eff_system,
-            tool_dicts=eff_tool_dicts,
+            tools=eff_tools,
             model=eff_model,
             config=self._ctx.config,
             strict_format=strict_format,
@@ -527,14 +528,14 @@ class Harness:
     # ─── enrich ───────────────────────────────────────────────────────────────
 
     def enrich(self, data) -> None:
-        """Merge a Result's output back into harness.messages.
+        """Merge an agent run's output back into harness.messages.
 
         - ``list[dict]`` → prefix-merge: detect the fork point between ``data``
           and current ``harness.messages`` and append only the diverging tail.
           A leading system message in ``data`` is stripped — the harness owns
           its system prompt and never mutates it here, even when a per-call
           ``skills=`` / ``system_prompt=`` augmented the prompt for that run.
-          This lets multiple parallel Results be enriched without clobbering
+          This lets multiple parallel runs be enriched without clobbering
           each other.
         - ``str``        → append as ``{"role": "assistant", "content": data}``
         """

@@ -11,7 +11,7 @@
 - **Log viewer** — `cai --logger` tails the hierarchical JSONL log with folding, search, and yank.
 - **Skills** — `--skill files web adb ...` activates curated tool + prompt bundles.
 - **MCP tools** — add any external MCP server via `--mcp <command>`; tool names are namespaced as `{label}__{name}`.
-- **Programmatic SDK** — `from cai import Harness, Result, Event` for building agents in Python.
+- **Programmatic SDK** — `from cai import Harness, Agent, Event` for building agents in Python.
 - **Flow save/load** — `:save` / `:load` in the TUI, or `Harness.save()` / `Harness.load()` in code, persist conversation + settings as JSON.
 - **Strict output formats** — force JSON, regex, or regex-per-line responses with automatic retry.
 - **Model profiles** — built-in capability map (tier, context window, tool-calling) for 20+ models; user-overridable in `config.json`.
@@ -273,56 +273,11 @@ Interactive mode always uses agentic tool-calling. Tool calls and results are sh
 `cai` exposes a small programmatic surface for building agents in-process:
 
 ```python
-from cai import Harness, Result, Event
+from cai import Harness, Agent, Event
 ```
 
-### Minimal example
-
-```python
-from cai import Harness
-
-with Harness(system_prompt="", log_path="/tmp/cai/cai.log") as h:
-    r = h.agent(
-        system_prompt="return a list of items only",
-        prompt="list all functions in this project",
-        strict_format=r"regex-each-line:^(-).*$",
-        skills=["files"],
-    )
-    r.wait()
-
-    for fn in r.text.splitlines():
-        verdict = h.gate(
-            options=["yes", "no"],
-            skills=["files"],
-            prompt=f"does '{fn}' touch the file system?",
-        )
-        print(f"{fn} -> {verdict}")
-```
-
-### Streaming example
-
-```python
-from cai import Harness
-
-with Harness(name="explorer", log_path="/tmp/cai/explorer.log") as h:
-    r = h.agent(
-        skills=["files"],
-        system_prompt="You are a senior engineer exploring a codebase.",
-        prompt="what are the main classes in src/cai/?",
-        name="explore",
-    )
-    for event in r:
-        if event.type == "content":
-            print(event.text, end="", flush=True)
-        elif event.type == "reasoning":
-            print(event.text, end="", flush=True)
-        elif event.type == "tool_call":
-            print(f"\n→ {event.tool_name}({event.tool_args})")
-        elif event.type == "tool_result":
-            status = "error" if event.is_error else "ok"
-            print(f"← [{status}] {(event.tool_result or '')[:200]}")
-    print(f"\n--- {r.finish_reason} ---")
-```
+- `Harness` manages conversation context. `enrich()` populates `harness.messages`; `harness.agent(prompt=...)` runs an agent with that context plus the prompt.
+- `Agent` runs an agent over an explicit `messages` array — use it directly when you want full control over the context.
 
 ### `Harness`
 
@@ -343,7 +298,7 @@ Methods:
 
 | Method | Purpose |
 |--------|---------|
-| `agent(prompt=..., messages=..., system_prompt=..., skills=..., tools=..., functions=..., model=..., strict_format=..., name=...)` | Run a multi-turn agentic call. Returns a `Result`. Per-call `system_prompt`/`skills`/`tools`/`functions` **append** to the harness; `model` overrides. |
+| `agent(prompt=..., system_prompt=..., skills=..., tools=..., functions=..., model=..., strict_format=..., name=...)` | Run a multi-turn agentic call over `harness.messages` (with `prompt` appended as a user turn if given). Returns an `Agent`. Per-call `system_prompt`/`skills`/`tools`/`functions` **append** to the harness; `model` overrides. |
 | `gate(options, prompt, *, system_prompt=..., tools=..., skills=...)` | Single-turn strict-format gate that returns exactly one of `options`. |
 | `enrich(data)` | Append a user-visible message (text or full message list) to `self.messages`. |
 | `compact(threshold_pct=...)` | Summarise older turns in-place. Returns True if compaction happened. |
@@ -354,14 +309,14 @@ Methods:
 
 Read-only properties: `messages` (mutable list), `tools`, `system_prompt`, `model`, `functions`.
 
-### `Result`
+### `Agent`
 
-Lazy, single-consumption handle:
+Lazy, single-consumption handle for an agent run. Returned by `Harness.agent()`, or constructed directly with an explicit `messages` array when you want to bypass the harness's context.
 
 - Iterate to stream `Event` objects.
-- `r.wait()` — drain without iterating.
-- `r.stop()` — abort the run.
-- Final-state fields (read after draining): `r.text`, `r.reasoning`, `r.messages`, `r.tool_calls`, `r.finish_reason`, `r.usage`, `r.error`.
+- `a.wait()` — drain without iterating.
+- `a.stop()` — abort the run.
+- Final-state fields (read after draining): `a.text`, `a.reasoning`, `a.messages`, `a.tool_calls`, `a.finish_reason`, `a.usage`, `a.error`.
 
 ### `Event`
 
@@ -377,8 +332,6 @@ Relevant fields per type:
 | `reasoning` | `.text` |
 | `tool_call` | `.tool_name`, `.tool_args`, `.tool_call_id` |
 | `tool_result` | `.tool_name`, `.tool_result`, `.tool_call_id`, `.is_error` |
-
-More examples live in `examples/harnesses/` — streaming, bug-fix/review/refactor pipelines, web search, Smali/Android challenges, multi-task orchestration.
 
 ---
 
@@ -564,9 +517,9 @@ register-python-argcomplete --shell fish cai | source
 ```
 cai/
 ├── src/cai/
-│   ├── __init__.py        # Re-exports Harness, Result, Event
+│   ├── __init__.py        # Re-exports Harness, Agent, Event
 │   ├── cli.py             # CLI entry point, agentic loop, interactive wiring
-│   ├── sdk.py             # Programmatic SDK (Harness, Result, Event)
+│   ├── sdk.py             # Programmatic SDK (Harness, Agent, Event)
 │   ├── core.py            # Bootstrap, config, skills, system-prompt assembly
 │   ├── llm.py             # call_llm, MODEL_PROFILES, compaction, tool-result trimming
 │   ├── api.py             # OpenAI-compatible clients (OpenAiApi, OpenRouterApi)
