@@ -3,12 +3,12 @@ userconfig.py — user-facing config and hook surface.
 
 Backs three public names re-exported from the cai package:
 
-    cai.config      — attribute-style overrides merged on top of config.json
+    cai.config      — attribute-style overrides merged on top of DEFAULT_CONFIG
     cai.hook        — decorator to register a hook globally
     cai.load_init() — read (and on first run, create) ~/.config/cai/init.py
 
-bootstrap() in core.py reads from here: it merges ``config._overrides`` into
-the loaded config.json dict, and replaces ``llm.DEFAULT_HOOKS`` with whatever
+bootstrap() in core.py reads from here: it merges ``config._overrides`` onto
+``cai.core.DEFAULT_CONFIG``, and replaces ``llm.DEFAULT_HOOKS`` with whatever
 ``_user_hooks`` has collected. Importing this module has no side effects.
 """
 
@@ -21,7 +21,7 @@ log = logging.getLogger("cai.userconfig")
 class _Config:
     """Attribute-style view onto pending config overrides.
 
-    Writes go into a private dict; bootstrap() drains it on top of config.json.
+    Writes go into a private dict; bootstrap() drains it on top of DEFAULT_CONFIG.
     Reads return whatever has been set here (not the merged value) — use the
     BootstrapContext.config dict or ctx.config.get(...) to see the resolved
     config after bootstrap.
@@ -132,7 +132,7 @@ _DEFAULT_INIT_PY = '''\
 """init.py — cai user config.
 
 Like vim's init.vim: executed once at startup to shape cai the way you want.
-Values set here override ~/.config/cai/config.json. Hooks registered here
+Values set here override cai's built-in defaults. Hooks registered here
 fire for every agent turn, both CLI and SDK (when cai.load_init() is called).
 
 To reset to defaults, delete this file — cai will regenerate it on next run.
@@ -140,16 +140,23 @@ To reset to defaults, delete this file — cai will regenerate it on next run.
 import cai
 
 # ─── Options ────────────────────────────────────────────────────────────────
-# Any key from config.json is settable here. Uncomment to override.
+# Built-in defaults live in cai.core.DEFAULT_CONFIG. Uncomment to override.
 
 # cai.config.model = "anthropic/claude-opus-4"
 # cai.config.base_url = "https://openrouter.ai/api/v1"
 # cai.config.ssl_verify = True
 # cai.config.stuck_detection = False
-# cai.config.observation_mask_pct = 0.60
-# cai.config.observation_mask_keep = 3
-# cai.config.context_budget_pct = 0.75
 # cai.config.tool_result_max_chars = 40000
+
+# ─── Per-model context window ───────────────────────────────────────────────
+# Override the context window (or other capabilities) for a specific model.
+# Keys match the model id; values are merged onto the built-in profile from
+# cai.llm.MODEL_PROFILES. Prefix matches are supported (longest wins).
+#
+# cai.config.model_profiles = {
+#     "anthropic/claude-opus-4.6": {"context": 1000000},
+#     "openai/gpt-4o": {"context": 128000, "tool_calling": True},
+# }
 
 # ─── Tools ──────────────────────────────────────────────────────────────────
 # Register any Python callable as a tool. Type annotations drive the schema;

@@ -11,7 +11,6 @@ configuration, register MCP servers, or read any files. All of that happens
 inside explicit function calls (notably bootstrap()).
 """
 
-import json
 import logging
 import os
 from dataclasses import dataclass, field
@@ -30,49 +29,14 @@ CONFIG_DIR_DEFAULT = os.path.expanduser("~/.config/cai")
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
-def load_config(config_dir: Optional[str] = None) -> dict:
-    """Read (or create) the cai config.json, applying backfills for keys added
-    after the original file was written. Returns the config dict.
-    """
-    from cai.llm import MODEL_PROFILES
-
-    config_dir = config_dir or CONFIG_DIR_DEFAULT
-    if not os.path.exists(config_dir):
-        os.makedirs(config_dir)
-
-    config_path = os.path.join(config_dir, "config.json")
-    if not os.path.exists(config_path):
-        default_config = {
-            "base_url": "https://openrouter.ai/api/v1",
-            "model": "arcee-ai/trinity-mini:free",
-            "observation_mask_pct": 0.60,
-            "observation_mask_keep": 3,
-            "context_budget_pct": 0.75,
-            "tool_result_max_chars": 40000,
-            "ssl_verify": True,
-            "stuck_detection": False,
-            "model_profiles": {k: dict(v) for k, v in MODEL_PROFILES.items()}
-        }
-        with open(config_path, "w") as f:
-            json.dump(default_config, f, indent=2)
-        print(f"[*] Created default config at {config_path}")
-
-    with open(config_path) as f:
-        config = json.load(f)
-
-    # Backfill keys added in newer versions so existing configs stay up-to-date.
-    updated = False
-    if 'ssl_verify' not in config:
-        config['ssl_verify'] = True
-        updated = True
-    if 'stuck_detection' not in config:
-        config['stuck_detection'] = False
-        updated = True
-    if updated:
-        with open(config_path, "w") as f:
-            json.dump(config, f, indent=2)
-
-    return config
+# Built-in defaults; users override via ~/.config/cai/init.py (see userconfig.py).
+DEFAULT_CONFIG = {
+    "base_url": "https://openrouter.ai/api/v1",
+    "model": "arcee-ai/trinity-mini:free",
+    "tool_result_max_chars": 40000,
+    "ssl_verify": True,
+    "stuck_detection": False,
+}
 
 
 def load_api_key(config_dir: Optional[str] = None) -> str:
@@ -115,11 +79,11 @@ def bootstrap(overrides: Optional[dict] = None,
               load_user_init: bool = False) -> BootstrapContext:
     """Initialise cai's runtime dependencies.
 
-    Reads the config + api key, builds the OpenAI/OpenRouter clients, registers
+    Reads the api key, builds the OpenAI/OpenRouter clients, registers
     the internal MCP tools server, and wires up the llm module. Returns a
     BootstrapContext exposing everything the caller may need.
 
-    Config precedence, low → high: ``config.json`` → ``init.py`` (if loaded,
+    Config precedence, low → high: ``DEFAULT_CONFIG`` → ``init.py`` (if loaded,
     either now via ``load_user_init=True`` or earlier via ``cai.load_init()``)
     → ``overrides`` arg.
 
@@ -140,7 +104,7 @@ def bootstrap(overrides: Optional[dict] = None,
 
     _cai_tools.register_server(_cai_tools.INTERNAL_SERVER)
 
-    config = load_config(config_dir)
+    config = dict(DEFAULT_CONFIG)
 
     if load_user_init:
         userconfig.load_init(config_dir)

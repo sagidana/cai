@@ -77,8 +77,8 @@ def get_model_profile(model_id):
     """Return capability profile for model_id.
 
     Tries exact match first, then prefix match (longest prefix wins),
-    then applies any per-model overrides from config.json under 'model_profiles'.
-    Falls back to '_default' if nothing matches.
+    then applies any per-model overrides from cai.config.model_profiles
+    (set via init.py). Falls back to '_default' if nothing matches.
     """
     # Exact match
     profile = MODEL_PROFILES.get(model_id)
@@ -98,7 +98,7 @@ def get_model_profile(model_id):
 
     profile = dict(profile)  # shallow copy so overrides don't mutate the source
 
-    # Apply user overrides from config.json: {"model_profiles": {"anthropic/claude-opus-4.6": {"context": 32000}}}
+    # Apply user overrides from init.py: cai.config.model_profiles = {"anthropic/claude-opus-4.6": {"context": 32000}}
     user_overrides = config.get("model_profiles", {}) if config else {}
     # Exact override
     if model_id in user_overrides:
@@ -536,7 +536,7 @@ def _apply_observation_mask(messages):
     replaces the content of older ones in-place. No LLM call needed.
     Returns the number of messages masked.
     """
-    keep = config.get('observation_mask_keep', OBSERVATION_MASK_KEEP) if config else OBSERVATION_MASK_KEEP
+    keep = OBSERVATION_MASK_KEEP
 
     # Find tool messages that haven't already been masked
     tool_indices = [
@@ -615,8 +615,9 @@ def _compact_messages(messages, model):
 
 
 def mask_hook(ctx):
-    """after_turn hook. Fires at observation_mask_pct — masks old tool results
-    with a short placeholder. No LLM call.
+    """after_turn hook. Fires once context use crosses the per-tier threshold
+    in OBSERVATION_MASK_THRESHOLDS — masks old tool results with a short
+    placeholder. No LLM call.
 
     Opt-in: register via Harness(hooks=[("after_turn", mask_hook), ...])."""
     messages = ctx["messages"]
@@ -627,8 +628,7 @@ def mask_hook(ctx):
     if not prompt_tokens or not context_limit:
         return
     budget_pct = prompt_tokens / context_limit
-    default_threshold = OBSERVATION_MASK_THRESHOLDS.get(profile['tier'], 0.60)
-    threshold = config.get('observation_mask_pct', default_threshold) if config else default_threshold
+    threshold = OBSERVATION_MASK_THRESHOLDS.get(profile['tier'], 0.60)
     if budget_pct < threshold:
         return
     log.warning("context budget: %.0f%% used (%d/%d tokens), applying observation mask",
@@ -638,8 +638,9 @@ def mask_hook(ctx):
 
 
 def compact_hook(ctx):
-    """after_turn hook. Fires at context_budget_pct — LLM-summarises middle
-    turns into a memory message.
+    """after_turn hook. Fires once context use crosses the per-tier threshold
+    in CONTEXT_BUDGET_THRESHOLDS — LLM-summarises middle turns into a memory
+    message.
 
     Opt-in: register via Harness(hooks=[("after_turn", compact_hook), ...])."""
     messages = ctx["messages"]
@@ -651,8 +652,7 @@ def compact_hook(ctx):
     if not prompt_tokens or not context_limit:
         return
     budget_pct = prompt_tokens / context_limit
-    default_threshold = CONTEXT_BUDGET_THRESHOLDS.get(profile['tier'], 0.75)
-    threshold = config.get('context_budget_pct', default_threshold) if config else default_threshold
+    threshold = CONTEXT_BUDGET_THRESHOLDS.get(profile['tier'], 0.75)
     if budget_pct < threshold:
         return
     log.warning("context budget: %.0f%% used (%d/%d tokens), compacting",
