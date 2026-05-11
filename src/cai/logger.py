@@ -231,6 +231,10 @@ class LogViewer:
         self._tty_file = open("/dev/tty", "rb+", buffering=0)
         self._tty_fd   = self._tty_file.fileno()
 
+        # Cooked terminal attrs, captured in run() before tty.setraw().
+        # Needed so _open_in_nvim can hand a sane tty to the child.
+        self._cooked_attrs = None
+
     # ── Entry ingestion ───────────────────────────────────────────────────────
 
     def _ingest(self, entry: Entry) -> None:
@@ -591,7 +595,7 @@ class LogViewer:
         out.append(_CLEAR_LINE)
         help_txt = (
             " Tab:fold  zA:fold-all  zz/zt/zb:align  /:search  ?:search\u2191  "
-            "n/N:next/prev  0:depth1  1\u20138:depth2\u20139  9:all  F:follow  G:bottom  y:yank  q:quit"
+            "n/N:next/prev  0:depth1  1\u20138:depth2\u20139  9:all  F:follow  G:bottom  y:yank  \u23ce:nvim  q:quit"
         )
         out.append(_DIM + help_txt[:cols] + _RESET)
 
@@ -734,6 +738,50 @@ class LogViewer:
                 continue
         return False
 
+    # ── Open in editor ────────────────────────────────────────────────────────
+
+    def _open_in_nvim(self) -> None:
+        """Dump the selected entry's msg to a tmp file and open it in nvim.
+        Suspends the TUI while nvim runs, then restores raw mode + alt screen."""
+        n = len(self.visible)
+        if n == 0:
+            return
+        entry = self.entries[self.visible[self.cursor]]
+        tmp_path = f"/tmp/cai-entry-{entry.idx}.txt"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                f.write(entry.msg)
+        except OSError:
+            return
+
+        # Suspend TUI: restore cooked tty, leave alt screen, show cursor.
+        if self._cooked_attrs is not None:
+            try:
+                termios.tcsetattr(self._tty_fd, termios.TCSADRAIN, self._cooked_attrs)
+            except Exception:
+                pass
+        sys.stdout.write(_ALT_LEAVE + _SHOW_CUR)
+        sys.stdout.flush()
+
+        try:
+            subprocess.run(
+                ["nvim", tmp_path],
+                stdin=self._tty_file,
+                stdout=self._tty_file,
+                stderr=self._tty_file,
+            )
+        except FileNotFoundError:
+            pass
+
+        # Resume TUI: re-enter alt screen, hide cursor, restore raw mode.
+        sys.stdout.write(_ALT_ENTER + _HIDE_CUR)
+        sys.stdout.flush()
+        try:
+            tty.setraw(self._tty_fd)
+        except Exception:
+            pass
+        self._dirty.set()
+
     # ── Input dispatch ────────────────────────────────────────────────────────
 
     def _handle_key(self, key: str) -> bool:
@@ -852,6 +900,10 @@ class LogViewer:
                 self._apply_depth((digit + 1) % 10)
             self._reanchor(anchor)
 
+        # ── Open selected entry in nvim ───────────────────────────────────────
+        elif key in ("\r", "\n"):
+            self._open_in_nvim()
+
         # ── Yank current entry text to clipboard ──────────────────────────────
         elif key == "y" and n > 0:
             msg = self.entries[self.visible[self.cursor]].msg
@@ -927,6 +979,7 @@ class LogViewer:
     def run(self) -> None:
         """Enter the TUI, run the event loop, restore terminal on exit."""
         old_attrs = termios.tcgetattr(self._tty_fd)
+        self._cooked_attrs = old_attrs
 
         def _cleanup() -> None:
             try:
