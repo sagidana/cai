@@ -467,7 +467,40 @@ def _run_nonstreaming_turn(messages, included_tools, model, strict_format=None,
     if not result: return "", "", None, {}
 
     content, reasoning, tool_calls, usage = result
-    return content or "", reasoning or "", tool_calls, usage
+    return (content or "").strip(), (reasoning or "").strip(), tool_calls, usage
+
+class _StreamWSGuard:
+    """Suppress leading whitespace and buffer trailing whitespace from a
+    streaming response. Internal whitespace (blank lines, indentation,
+    multi-space runs) is preserved verbatim — only the start/end of the
+    full stream is trimmed, so the live conversation view never shows
+    redundant leading/trailing newlines.
+    """
+    __slots__ = ("started", "pending_trailing")
+
+    def __init__(self):
+        self.started = False
+        self.pending_trailing = ""
+
+    def feed(self, chunk):
+        """Return the slice safe to emit/accumulate now (may be empty).
+        Trailing whitespace is held back and dropped at end-of-stream.
+        """
+        if not chunk:
+            return ""
+        if not self.started:
+            chunk = chunk.lstrip()
+            if not chunk:
+                return ""
+            self.started = True
+        rstripped = chunk.rstrip()
+        if not rstripped:
+            self.pending_trailing += chunk
+            return ""
+        out = self.pending_trailing + rstripped
+        self.pending_trailing = chunk[len(rstripped):]
+        return out
+
 
 def _run_streaming_turn(messages, included_tools, model, strict_format=None,
                         reasoning_effort=None, temperature=None,
@@ -479,6 +512,8 @@ def _run_streaming_turn(messages, included_tools, model, strict_format=None,
     reasoning_newline_pending = False  # need a newline before content starts
     last_tool_calls = None
     usage = {}
+    content_guard = _StreamWSGuard()
+    reasoning_guard = _StreamWSGuard()
     for chunk, reasoning_chunk, tool_calls, usage in openai_api.chat_stream(messages,
                                                                              model=model,
                                                                              tools=included_tools,
@@ -489,22 +524,26 @@ def _run_streaming_turn(messages, included_tools, model, strict_format=None,
         if interrupt_event and interrupt_event.is_set():
             break
         if reasoning_chunk:
-            reasoning_chunks.append(reasoning_chunk)
-            if reasoning_callback:
-                reasoning_callback(reasoning_chunk)
-            else:
-                _diag(reasoning_chunk, end="", ensure_newline=not reasoning_newline_pending)
-            reasoning_newline_pending = True
-        if chunk:
-            if reasoning_newline_pending:
+            cleaned = reasoning_guard.feed(reasoning_chunk)
+            if cleaned:
+                reasoning_chunks.append(cleaned)
                 if reasoning_callback:
-                    reasoning_callback(None)  # signal end of reasoning
+                    reasoning_callback(cleaned)
                 else:
-                    _diag("")   # close the reasoning line before content starts
-                reasoning_newline_pending = False
-            accumulated.append(chunk)
-            if stream_callback:
-                stream_callback(chunk)
+                    _diag(cleaned, end="", ensure_newline=not reasoning_newline_pending)
+                reasoning_newline_pending = True
+        if chunk:
+            cleaned = content_guard.feed(chunk)
+            if cleaned:
+                if reasoning_newline_pending:
+                    if reasoning_callback:
+                        reasoning_callback(None)  # signal end of reasoning
+                    else:
+                        _diag("")   # close the reasoning line before content starts
+                    reasoning_newline_pending = False
+                accumulated.append(cleaned)
+                if stream_callback:
+                    stream_callback(cleaned)
         if tool_calls:
             last_tool_calls = tool_calls
     if reasoning_newline_pending:
