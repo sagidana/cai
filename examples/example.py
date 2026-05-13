@@ -23,6 +23,12 @@ from __future__ import annotations
 
 from cai import Harness, Agent
 
+# Uncomment to apply ~/.config/cai/init.py (base_url, model, hooks, tools, ...)
+# before any Harness / Agent is constructed. SDK does not auto-load init.py.
+#
+# import cai
+# cai.load_init()
+
 
 def line_count(path: str) -> str:
     """Return the line count of ``path`` as a decimal string. Errors are

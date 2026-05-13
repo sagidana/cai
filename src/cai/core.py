@@ -73,6 +73,13 @@ class BootstrapContext:
     available_tools: list = field(default_factory=list)
 
 
+# Cached result of the first successful bootstrap(). Subsequent calls return
+# the same context, so a Harness followed by a standalone Agent (or two
+# Harnesses) share one set of API clients and one llm.setup. Cleared only by
+# explicit reset; not exposed publicly because no current code path needs it.
+_cached_ctx: Optional[BootstrapContext] = None
+
+
 def bootstrap(overrides: Optional[dict] = None,
               config_dir: Optional[str] = None,
               diag_fn=None,
@@ -82,6 +89,11 @@ def bootstrap(overrides: Optional[dict] = None,
     Reads the api key, builds the OpenAI/OpenRouter clients, registers
     the internal MCP tools server, and wires up the llm module. Returns a
     BootstrapContext exposing everything the caller may need.
+
+    Idempotent: the first call does the work and caches the context; later
+    calls return the cached context unchanged. This means a Harness and any
+    number of standalone Agents in the same process share one setup, and
+    overrides supplied to later calls are ignored.
 
     Config precedence, low → high: ``DEFAULT_CONFIG`` → ``init.py`` (if loaded,
     either now via ``load_user_init=True`` or earlier via ``cai.load_init()``)
@@ -96,6 +108,10 @@ def bootstrap(overrides: Optional[dict] = None,
                             for reproducibility, but SDK users can call
                             ``cai.load_init()`` explicitly before constructing a Harness.
     """
+    global _cached_ctx
+    if _cached_ctx is not None:
+        return _cached_ctx
+
     import cai.tools as _cai_tools
     import cai.llm as _llm
     from cai import userconfig
@@ -137,13 +153,14 @@ def bootstrap(overrides: Optional[dict] = None,
              config.get('base_url'), len(available_tools),
              len(userconfig._user_hooks), len(userconfig._user_tools))
 
-    return BootstrapContext(
+    _cached_ctx = BootstrapContext(
         config=config,
         api_key=api_key,
         openai_api=openai_api,
         openrouter_api=openrouter_api,
         available_tools=available_tools,
     )
+    return _cached_ctx
 
 
 # ─── Skills ───────────────────────────────────────────────────────────────────

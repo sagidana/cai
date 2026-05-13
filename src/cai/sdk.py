@@ -190,6 +190,12 @@ class Agent:
         if self._started:
             return
         self._started = True
+        # Self-sufficient bootstrap for the Agent-only flow: llm.call_llm
+        # below requires llm.setup() to have run. Idempotent — if a Harness
+        # (or an earlier Agent) already bootstrapped, this returns the cached
+        # context and does no work. Picks up cai.config overrides set either
+        # directly or via a prior cai.load_init() call.
+        core.bootstrap()
         # Run the worker inside the caller's contextvars snapshot so the
         # log-nesting level propagates across the thread boundary.
         self._thread = threading.Thread(
