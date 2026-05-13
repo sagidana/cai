@@ -81,13 +81,28 @@ def _term_size() -> tuple[int, int]:
 # ══════════════════════════════════════════════════════════════════════════════
 
 class Logger:
-    """Thread-safe append-only JSONL log writer."""
+    """Thread-safe append-only JSONL log writer.
+
+    Each Logger owns its own nesting ContextVar, so two Loggers active in
+    different scopes (parent Harness vs. standalone Agent with its own
+    ``log_path``) keep independent indentation. Same-path Loggers are
+    deduplicated via ``get_logger(path)`` so two consumers writing to the
+    same file share one instance (and therefore one nesting state).
+    """
 
     def __init__(self, path: str = LOG_PATH) -> None:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         self._path = path
         self._lock = threading.Lock()
         self._fh = open(path, "a", encoding="utf-8")
+        # Per-logger nesting depth. Keyed by id(self) in the name purely for
+        # debuggability — ContextVars resolve by identity, not name.
+        self._base: ContextVar[int] = ContextVar(
+            f"cai_log_base_{id(self)}", default=0)
+
+    @property
+    def path(self) -> str:
+        return self._path
 
     def log(self, level: int, msg: str) -> None:
         record = {
@@ -105,53 +120,101 @@ class Logger:
             self._fh.close()
 
 
-# Module-level singleton
+# Module-level "default" logger — set by init(). Used when no scoped logger
+# is bound via ``_current``. The CLI always init()s on startup; SDK callers
+# either rely on the default or pass ``log_path=`` to scope their own.
 _instance: Logger | None = None
 
-# Nesting level context variable — incremented by nest() context manager.
-# log() adds this to the caller-supplied level so the same code produces
-# deeper indentation when called from inside a harness block.
-_base: ContextVar[int] = ContextVar('cai_log_base', default=0)
+# Cache of Logger instances keyed by path. Two consumers (e.g. Harness +
+# Agent) that pass the same ``log_path`` share one Logger, so the file's
+# nesting state stays consistent instead of two independent indenters
+# interleaving records at conflicting depths.
+_loggers_by_path: dict[str, Logger] = {}
+_loggers_lock = threading.Lock()
+
+# Currently-active scoped logger (None = fall back to ``_instance``).
+# Harness / Agent bind this in their scope so all log() calls made from
+# within — including from the llm module's deep code path — land in the
+# right file. ContextVar means worker threads inherit the binding via
+# ``contextvars.copy_context()``.
+_current: ContextVar["Logger | None"] = ContextVar('cai_current_logger', default=None)
+
+
+def _active() -> "Logger | None":
+    """Return the currently-active logger: the scoped one if bound, else the
+    module-level default. None if neither has been initialised."""
+    return _current.get() or _instance
+
+
+def get_logger(path: str) -> Logger:
+    """Return a Logger writing to ``path``, creating one if needed.
+
+    Same path → same instance. Thread-safe.
+    """
+    with _loggers_lock:
+        lg = _loggers_by_path.get(path)
+        if lg is None:
+            lg = Logger(path)
+            _loggers_by_path[path] = lg
+        return lg
 
 
 @contextmanager
 def nest(delta: int = 1):
-    """Context manager: increase the log nesting level by *delta* for all
-    log() calls made within this block (including transitively called code).
+    """Context manager: increase the active logger's nesting level by *delta*
+    for all log() calls made within this block (including transitively called
+    code).
 
     Usage::
 
         with nest(1):
             log(1, "this appears one level deeper than the caller's base")
     """
-    tok = _base.set(_base.get() + delta)
+    lg = _active()
+    if lg is None:
+        yield
+        return
+    tok = lg._base.set(lg._base.get() + delta)
     try:
         yield
     finally:
-        _base.reset(tok)
+        lg._base.reset(tok)
 
 
 def push_nest(delta: int = 1) -> None:
-    """Increment the log nesting level by *delta*.
+    """Increment the active logger's nesting level by *delta*.
     Pair with pop_nest(delta) at every exit path (return, break, except)."""
-    _base.set(_base.get() + delta)
+    lg = _active()
+    if lg is None:
+        return
+    lg._base.set(lg._base.get() + delta)
 
 
 def pop_nest(delta: int = 1) -> None:
-    """Decrement the log nesting level by *delta*."""
-    _base.set(_base.get() - delta)
+    """Decrement the active logger's nesting level by *delta*."""
+    lg = _active()
+    if lg is None:
+        return
+    lg._base.set(lg._base.get() - delta)
 
 
 def init(path: str = LOG_PATH) -> None:
-    """Initialise the module-level logger (call once at program start)."""
+    """Initialise the module-level default logger (call once at program start).
+
+    Idempotent for the same path (cached via ``get_logger``); calls with a
+    new path swap the default. Scoped loggers bound via ``_current`` always
+    take precedence over the default.
+    """
     global _instance
-    _instance = Logger(path)
+    _instance = get_logger(path)
 
 
 def log(level: int, msg: str) -> None:
-    """Write one log entry at *base_level + level*.  No-op if init() has not been called."""
-    if _instance is not None:
-        _instance.log(_base.get() + level, msg)
+    """Write one log entry to the active logger at *base_level + level*.
+    No-op if no logger has been initialised."""
+    lg = _active()
+    if lg is not None:
+        lg.log(lg._base.get() + level, msg)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

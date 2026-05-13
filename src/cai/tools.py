@@ -146,11 +146,20 @@ def _derive_function_schema(fn):
     the docstring (empty if absent). Unannotated params default to string.
     Unsupported annotation types raise TypeError.
     """
+    import typing
     sig = inspect.signature(fn)
+    # Resolve string-form annotations (PEP 563 / ``from __future__ import
+    # annotations``) back to real types. Falls back to inspect's raw
+    # annotations if name resolution fails (e.g. a forward ref to something
+    # not in the function's globals).
+    try:
+        hints = typing.get_type_hints(fn)
+    except Exception:
+        hints = {}
     properties = {}
     required = []
     for pname, param in sig.parameters.items():
-        ann = param.annotation
+        ann = hints.get(pname, param.annotation)
         if ann is inspect.Parameter.empty:
             json_type = "string"
         elif ann in _PY_TO_JSON_TYPE:

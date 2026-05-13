@@ -89,9 +89,7 @@ with Harness(
                 ),
             }],
             system_prompt="You are a precise code summariser. One sentence only.",
-            tools=[],               # text-only sub-task; no tools needed
             model=h.model,
-            config={},              # vestigial; Agent doesn't read it
             block_name=f"sub-{path}",
         ).wait()
 

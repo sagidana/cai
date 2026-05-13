@@ -68,27 +68,55 @@ class Agent:
 
     def __init__(self,
                  messages: list,
-                 system_prompt: str,
-                 tools: list,
                  model: str,
-                 config: dict,
+                 system_prompt: str = "",
+                 tools: Optional[list] = None,
                  max_turns: Optional[int] = None,
                  strict_format: Optional[str] = None,
                  block_name: str = "",
                  log_ctx: Optional[contextvars.Context] = None,
-                 hooks: Optional[list] = None):
+                 hooks: Optional[list] = None,
+                 log_path: Optional[str] = None,
+                 harness_name: Optional[str] = None):
         self._input_messages = messages
         self._system_prompt = system_prompt
-        self._tools = tools               # OpenAI-format schema list for call_llm
+        # OpenAI-format tool schema list for call_llm. Default-None pattern
+        # avoids the mutable-default footgun.
+        self._tools = tools if tools is not None else []
         self._model = model
-        self._config = config
         self._max_turns = max_turns
         self._strict_format = strict_format
         self._hooks = hooks
-        # Log plumbing: name used in BLOCK RESULT records, and a contextvars
-        # snapshot so the worker thread inherits the caller's nesting level.
-        self._block_name = block_name
+        # Log plumbing: name used in BLOCK records, and a contextvars
+        # snapshot so the worker thread inherits the caller's nesting level
+        # (and the caller's active logger, unless log_path overrides below).
+        self._block_name = block_name or f"block-{next(_block_seq)}"
+        self._harness_name = harness_name
         self._log_ctx = log_ctx if log_ctx is not None else contextvars.copy_context()
+
+        # Per-Agent log scoping. When log_path is supplied, the worker thread
+        # writes to that file instead of the surrounding scope's logger. The
+        # rebind happens *inside* self._log_ctx so it does not leak to the
+        # caller. If a parent logger is active in the caller's scope, we drop
+        # a one-line breadcrumb there so the parent file isn't silently empty.
+        # If no parent and no log_path either, fall back to the default
+        # LOG_PATH so standalone Agent runs always land somewhere.
+        self._log_path = log_path
+        if log_path is not None:
+            agent_logger = _cai_logger.get_logger(log_path)
+            parent_logger = _cai_logger._active()
+            if parent_logger is not None and parent_logger is not agent_logger:
+                _cai_logger.log(1, (
+                    f"AGENT REDIRECT  name={self._block_name!r}  "
+                    f"path={log_path!r}"
+                ))
+            # Rebind _current inside the captured context only — the outer
+            # scope keeps whatever logger it had.
+            self._log_ctx.run(_cai_logger._current.set, agent_logger)
+        elif _cai_logger._active() is None:
+            # No log_path, no parent, no module default — bring up the
+            # default so the run's records are not silently dropped.
+            _cai_logger.init(_cai_logger.LOG_PATH)
 
         # Thread + queue for streaming events out of llm.call_llm
         self._queue: "queue.Queue" = queue.Queue()
@@ -207,6 +235,35 @@ class Agent:
         into Event objects pushed onto the queue, populate final fields."""
         from cai import llm
 
+        # Emit the BLOCK header from inside the worker thread so it lands in
+        # whichever logger is active in this context (Harness's, Agent's own,
+        # or the default). For Harness-built Agents, ``harness_name`` was
+        # passed in; for standalone Agents it is None and that field is
+        # omitted from the record.
+        tool_names = [t["function"]["name"] for t in (self._tools or [])]
+        header = (
+            f"BLOCK  name={self._block_name!r}  "
+            f"model={self._model}  strict_format={self._strict_format}  "
+            f"tools={tool_names}"
+        )
+        if self._harness_name is not None:
+            header = (
+                f"BLOCK  name={self._block_name!r}  "
+                f"harness={self._harness_name!r}  "
+                f"model={self._model}  strict_format={self._strict_format}  "
+                f"tools={tool_names}"
+            )
+        _cai_logger.log(1, header)
+        # Find the last user turn to record as the prompt — works for both
+        # Harness-built Agents (prompt appended by Harness.agent) and
+        # standalone Agents constructed with caller-owned messages.
+        prompt_text = ""
+        for m in reversed(self._input_messages):
+            if m.get("role") == "user":
+                prompt_text = m.get("content") or ""
+                break
+        _cai_logger.log(2, f"BLOCK PROMPT  {prompt_text}")
+
         # Prepend system prompt (call_llm expects it as a message, not a param).
         messages = list(self._input_messages)
         if self._system_prompt:
@@ -314,11 +371,20 @@ class Harness:
                  hooks: Optional[list] = None):
         import cai.tools as _cai_tools
 
-        # 0. Lazy-init the structured logger so SDK-only users get the same
-        #    hierarchical log file that cli.py produces. Idempotent: if
-        #    cli.py (or a previous Harness) already initialised it, skip.
-        if _cai_logger._instance is None:
-            _cai_logger.init(log_path or _cai_logger.LOG_PATH)
+        # 0. Logger setup.
+        # - If log_path was provided, this Harness gets its own scoped logger:
+        #   every log() call made from within its scope (including from any
+        #   Agent that doesn't override) lands in that file. Same path used
+        #   twice → same Logger instance (so nesting stays consistent).
+        # - If log_path is None and no module-level default exists yet, fall
+        #   back to the default path. Pre-existing default is left alone so
+        #   the CLI's --log-path keeps winning when SDK is used inside it.
+        self._logger_token = None
+        if log_path is not None:
+            scoped = _cai_logger.get_logger(log_path)
+            self._logger_token = _cai_logger._current.set(scoped)
+        elif _cai_logger._instance is None:
+            _cai_logger.init(_cai_logger.LOG_PATH)
 
         # 1. Bootstrap — loads config, registers internal MCP, builds APIs,
         #    wires up llm module state.
@@ -469,30 +535,22 @@ class Harness:
 
         eff_model = model or self._model
 
-        # Structured log: emit the BLOCK header + prompt synchronously so
-        # they appear immediately in the log (and the worker thread's
-        # LLM-level logs fold underneath them). BLOCK RESULT is emitted
-        # from the worker after call_llm returns.
+        # BLOCK header + BLOCK PROMPT are now emitted by Agent itself from
+        # inside its worker thread, so they always land in the same logger
+        # that the agent's subsequent records use (Harness's scoped logger
+        # via copy_context, or an Agent-level override if log_path is set).
         block_name = name or f"block-{next(_block_seq)}"
-        eff_tool_names = [t["function"]["name"] for t in eff_tools]
-        _cai_logger.log(1, (
-            f"BLOCK  name={block_name!r}  harness={self._name!r}  "
-            f"model={eff_model}  strict_format={strict_format}  "
-            f"tools={eff_tool_names}"
-        ))
-        prompt_text = prompt if prompt is not None else ""
-        _cai_logger.log(2, f"BLOCK PROMPT  {prompt_text}")
 
         return Agent(
             messages=eff_messages,
             system_prompt=eff_system,
             tools=eff_tools,
             model=eff_model,
-            config=self._ctx.config,
             strict_format=strict_format,
             block_name=block_name,
             log_ctx=contextvars.copy_context(),
             hooks=hooks if hooks is not None else self._hooks,
+            harness_name=self._name,
         )
 
     # ─── gate ─────────────────────────────────────────────────────────────────
@@ -747,7 +805,11 @@ class Harness:
         new._system_prompt = self._system_prompt
         new._tools = list(self._tools)
         new._model = self._model
+        new._hooks = self._hooks
         new.messages = list(self.messages)
+        # Clone inherits the parent's logger via the active contextvar (does
+        # not bind its own). No token to reset on close().
+        new._logger_token = None
 
         _cai_logger.log(1, f"HARNESS {new._name}  (clone of {self._name!r})  "
                         f"model={new._model}  tools={len(new._tools)}  "
@@ -770,6 +832,11 @@ class Harness:
             return
         _cai_logger.pop_nest(1)
         self._nest_active = False
+        # Restore the scoped-logger contextvar to whatever it was before
+        # this Harness bound itself. No-op if no log_path was provided.
+        if getattr(self, "_logger_token", None) is not None:
+            _cai_logger._current.reset(self._logger_token)
+            self._logger_token = None
 
     def __enter__(self) -> "Harness":
         return self
