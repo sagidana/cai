@@ -1,24 +1,65 @@
 """config: where cai reads its bootstrap settings.
 
-Minimal for now: the OpenRouter endpoint (hard-wired) and the API key, read
-from ~/.config/cai/api_key. The model and prompt come from the command line.
-A richer config.json layer (base_url, default model, ssl, ...) can come later."""
+Two files under ~/.config/cai/:
+  config.json - required; must define at least `base_url` and `model`.
+  api_key     - required; the bearer token for `base_url`.
+
+config.json is parsed into a Config dataclass so its fields are typed and
+discoverable (cfg.base_url, cfg.model) rather than string dict keys. Nothing is
+defaulted: a missing or incomplete config stops cai with a clear message."""
 import os
+import json
 import logging
+import dataclasses
+from dataclasses import dataclass
 
 
 log = logging.getLogger("cai")
 
-OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-DEFAULT_MODEL = "qwen/qwen3.6-plus"
+
+@dataclass
+class Config:
+    base_url: str
+    model: str
+
+
+# the config.json keys cai requires - sourced from Config so the dataclass is
+# the single place fields are declared.
+REQUIRED_FIELDS = tuple(f.name for f in dataclasses.fields(Config))
 
 
 def config_dir():
     return os.path.expanduser("~/.config/cai")
 
 
+def config_path():
+    return os.path.join(config_dir(), "config.json")
+
+
 def api_key_path():
     return os.path.join(config_dir(), "api_key")
+
+
+def load_config():
+    """read ~/.config/cai/config.json into a Config. it must exist and must
+    define every required field."""
+    path = config_path()
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"no config found at {path}\n"
+            f'create it with at least:  {{"base_url": "https://openrouter.ai/api/v1", "model": "..."}}')
+    with open(path) as f:
+        try:
+            data = json.load(f)
+        except ValueError as e:
+            raise ValueError(f"config {path} is not valid JSON: {e}")
+
+    values = {}
+    for field in REQUIRED_FIELDS:
+        if not data.get(field):
+            raise ValueError(f"config {path} is missing required field '{field}'")
+        values[field] = data[field]
+    return Config(**values)
 
 
 def load_api_key():

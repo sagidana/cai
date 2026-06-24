@@ -4,7 +4,7 @@ Layer 0: cai.api    - the OpenAI-compatible HTTP client (the LLM call).
 Layer 1: cai.llm    - the core agentic loop (call_llm).
          cai.events - the Event value the loop yields, and EventType.
          cai.hooks  - the hook registry the loop fires.
-Layer 2: cai.agent  - Agent, a persistent conversation you run prompts against.
+Layer 2: cai.agent  - Agent (persistent conversation) + Run (one-shot execution).
 Entry:   cai.config - bootstrap settings (API key, OpenRouter endpoint).
          cai.cli    - the `cai` command: prompt in, streamed answer out.
 """
@@ -23,6 +23,7 @@ __all__ = [
     "MaxStepsReached",
     "call_llm",
     "Agent",
+    "Run",
 ]
 
 
@@ -31,4 +32,7 @@ def __getattr__(name):
     if name == "Agent":
         from cai.agent import Agent
         return Agent
+    if name == "Run":
+        from cai.agent import Run
+        return Run
     raise AttributeError(f"module 'cai' has no attribute {name!r}")
