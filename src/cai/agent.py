@@ -38,6 +38,14 @@ def _combine_prompts(base, skills_prompt):
     return "\n\n".join(parts)
 
 
+def _tool_name(tool):
+    """the exposed name of a tools= item: a callable's __name__, else the string
+    (an MCP tool ref) itself."""
+    if callable(tool):
+        return tool.__name__
+    return tool
+
+
 class Run:
     def __init__(self,
                  messages,
@@ -48,14 +56,16 @@ class Run:
                  tools=None,
                  skills=None,
                  tools_registry=None,
+                 skills_registry=None,
                  stream=True):
         self.messages = messages
         self.model = model
         self.api = api
-        self.system_prompt = system_prompt
-        self.tools = tools                    # callables and/or '<mcp>__<tool>' strings, or None
-        self.skills = skills                  # skill names to activate (standalone Run only)
-        self.tools_registry = tools_registry  # a prebuilt ToolRegistry (an Agent passes its own)
+        self.system_prompt = system_prompt        # base prompt; skills folded in at run time
+        self.tools = tools                        # callables/'<mcp>__<tool>' strings (standalone)
+        self.skills = skills                      # skill names to activate (standalone)
+        self.tools_registry = tools_registry      # a prebuilt ToolRegistry (an Agent passes its own)
+        self.skills_registry = skills_registry    # the Agent's SkillsRegistry (for the live prompt)
         # we own (and must close) a registry only if we build it ourselves; one
         # passed in belongs to its creator (an Agent), so we leave it alone.
         self._private_registry = tools_registry is None
@@ -68,17 +78,22 @@ class Run:
             raise RuntimeError("Run already consumed")
         self._consumed = True
 
-        # reuse the registry an Agent built once at bootstrap (skills already
-        # activated, system prompt already combined); otherwise build our own
-        # from the tools handed in, activate our skills into it, and fold the
-        # skills' prompt onto ours.
+        # reuse the Agent's registries when passed; otherwise build our own from
+        # the tools/skills handed in. either way, recombine the system prompt now
+        # (not at construction) so skills added/removed since are reflected.
         registry = self.tools_registry
-        system_prompt = self.system_prompt
+        skills_registry = self.skills_registry
         if registry is None:
             registry = ToolRegistry.for_tools(self.tools)
             self.tools_registry = registry
-            skills = SkillsRegistry.for_skills(self.skills, tools_registry=registry)
-            system_prompt = _combine_prompts(self.system_prompt, skills.system_prompt)
+            skills_registry = SkillsRegistry.for_skills(self.skills, tools_registry=registry)
+            self.skills_registry = skills_registry
+
+        skills_prompt = None
+        if skills_registry is not None:
+            skills_prompt = skills_registry.system_prompt
+        system_prompt = _combine_prompts(self.system_prompt, skills_prompt)
+
         schemas = registry.tools
         dispatch = registry.dispatch
 
@@ -132,14 +147,50 @@ class Agent:
 
         self.model = model
         self.api = OpenAiApi(cfg.base_url, config.load_api_key())
-        # build the tool registry once, here, so every run() reuses it (and the
-        # MCP servers it spawned) instead of rebuilding it per run.
-        self.tools_registry = ToolRegistry.for_tools(tools)
-        # activate skills once too: they extend the tool registry above and
-        # contribute prompt fragments folded into the system prompt.
-        self.skills_registry = SkillsRegistry.for_skills(skills, tools_registry=self.tools_registry)
-        self.system_prompt = _combine_prompts(system_prompt, self.skills_registry.system_prompt)
+        self._system_prompt = system_prompt   # base; combined with skills on demand
+        self._tools = tools or []
+        self._skills = skills or []
+        # build the registries once at bootstrap so every run() reuses them (and
+        # the MCP servers they spawned); set_tools/set_skills mutate them in place.
+        self.tools_registry = ToolRegistry.for_tools(self._tools)
+        self.skills_registry = SkillsRegistry.for_skills(self._skills, tools_registry=self.tools_registry)
         self.messages = []
+
+    @property
+    def system_prompt(self):
+        """the base prompt plus the currently-active skills' prompt, rebuilt on
+        each read so it reflects skills added or removed since bootstrap."""
+        return _combine_prompts(self._system_prompt, self.skills_registry.system_prompt)
+
+    def get_tools(self):
+        return self._tools
+
+    def set_tools(self, tools):
+        """replace the agent's tools, updating the live registry in place."""
+        if tools is None: tools = []
+        new_names = set()
+        for tool in tools:
+            new_names.add(_tool_name(tool))
+        for tool in self._tools:
+            name = _tool_name(tool)
+            if name in new_names: continue
+            self.tools_registry.remove(name)
+        for tool in tools:
+            self.tools_registry.add(tool)
+        self._tools = tools
+
+    def get_skills(self):
+        return self._skills
+
+    def set_skills(self, skills):
+        """replace the agent's skills. the skill layer is torn down and rebuilt
+        so dependencies and shared tools resolve correctly; base tools and the
+        cached MCP servers are left in place. tools and system prompt follow."""
+        if skills is None: skills = []
+        self.skills_registry.clear()
+        for name in skills:
+            self.skills_registry.add(name)
+        self._skills = skills
 
     def run(self, prompt=None):
         """append `prompt` as a user turn (if given) and return a Run over the
@@ -150,8 +201,9 @@ class Agent:
         return Run(self.messages,
                    self.model,
                    self.api,
-                   system_prompt=self.system_prompt,
-                   tools_registry=self.tools_registry)
+                   system_prompt=self._system_prompt,
+                   tools_registry=self.tools_registry,
+                   skills_registry=self.skills_registry)
 
     def close(self):
         """close the tool registry, terminating any live MCP server connections

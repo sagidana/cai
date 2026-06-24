@@ -91,6 +91,9 @@ class SkillsRegistry:
         # names visited, marked before recursing so foundation-first ordering
         # (append after recursion) stays cycle-safe.
         self._loaded = set()
+        # tool names this layer registered, so remove() never drops a base tool
+        # the agent itself added (those were already present, so skipped here).
+        self._added_tools = set()
 
     @classmethod
     def for_skills(cls, skills=None, *, tools_registry):
@@ -101,10 +104,12 @@ class SkillsRegistry:
         if not skills:
             return registry
         for name in skills:
-            registry._activate(name)
+            registry.add(name)
         return registry
 
-    def _activate(self, name):
+    def add(self, name):
+        """activate a skill (and, first, the skills it builds on), unioning its
+        tools into the tool registry. already-active skills are a no-op."""
         if name in self._loaded:
             return
         self._loaded.add(name)
@@ -114,14 +119,48 @@ class SkillsRegistry:
             return
         # foundation first: activate everything this skill builds on, then it.
         for used in skill.skills:
-            self._activate(used)
+            self.add(used)
         for tool_name in skill.tools:
             if self.tools_registry.has(tool_name): continue
             try:
                 self.tools_registry.register_mcp_tool(tool_name)
+                self._added_tools.add(tool_name)
             except ValueError as e:
                 log.error("skill %r: bad tool %r: %s", name, tool_name, e)
         self.skills.append(skill)
+
+    def remove(self, name):
+        """deactivate a skill: drop it, and remove the tools it contributed that
+        no other active skill still declares (base tools are never touched)."""
+        target = None
+        for skill in self.skills:
+            if skill.name != name: continue
+            target = skill
+            break
+        if target is None:
+            return
+        self.skills.remove(target)
+        self._loaded.discard(name)
+        for tool_name in target.tools:
+            if tool_name not in self._added_tools: continue
+            if self._needed_by_active(tool_name): continue
+            self.tools_registry.remove(tool_name)
+            self._added_tools.discard(tool_name)
+
+    def _needed_by_active(self, tool_name):
+        for skill in self.skills:
+            if tool_name in skill.tools: return True
+        return False
+
+    def clear(self):
+        """deactivate every skill, removing the tools this layer added (base
+        tools the agent registered are left untouched). used to rebuild the
+        skill layer cleanly when the whole skill set is replaced."""
+        for tool_name in list(self._added_tools):
+            self.tools_registry.remove(tool_name)
+        self._added_tools.clear()
+        self.skills.clear()
+        self._loaded.clear()
 
     @property
     def system_prompt(self):

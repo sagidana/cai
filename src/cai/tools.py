@@ -213,8 +213,9 @@ class ToolRegistry:
         self._dispatch = {}      # exposed_name -> tagged entry
         self._schemas = {}       # exposed_name -> schema (eager, or resolved lazily)
         self._order = []         # exposed names, registration order
-        self._mcp_cache = {}     # mcp_name -> LocalMCPServer (spawned lazily, once)
-        self._owned = []         # spawned servers, to close
+        # mcp_name -> LocalMCPServer: both the spawned-once cache and the set of
+        # servers to close.
+        self._local_mcp_servers = {}
 
     @classmethod
     def for_tools(cls, tools):
@@ -224,10 +225,7 @@ class ToolRegistry:
         if not tools:
             return registry
         for item in tools:
-            if callable(item):
-                registry.register_function(item)
-            else:
-                registry.register_mcp_tool(item)
+            registry.add(item)
         return registry
 
     @classmethod
@@ -263,7 +261,7 @@ class ToolRegistry:
         signature + docstring, and a call runs it in-process. the tool name is
         the function's __name__; a duplicate name raises ValueError."""
         name = fn.__name__
-        self._check_name_free(name)
+        self._is_name_free(name)
         self._functions[name] = fn
         self._dispatch[name] = ("function", name)
         self._schemas[name] = schema_from_function(fn)
@@ -277,7 +275,7 @@ class ToolRegistry:
         tool is logged and the tool is skipped."""
         if "__" not in name:
             raise ValueError(f"MCP tool {name!r} must be '<mcp_name>__<tool_name>'")
-        self._check_name_free(name)
+        self._is_name_free(name)
         mcp_name, tool_name = name.split("__", 1)
         try:
             server = self._load_server(mcp_name)
@@ -298,11 +296,32 @@ class ToolRegistry:
             return _mcp_tool_schema(exposed, tool)
         return None
 
+    def add(self, tool):
+        """add one tool on the fly: a callable becomes a function tool, a string
+        is an MCP tool reference '<mcp>__<tool>'. a tool already registered is
+        left as-is."""
+        if callable(tool):
+            if self.has(tool.__name__): return
+            self.register_function(tool)
+            return
+        if self.has(tool): return
+        self.register_mcp_tool(tool)
+
+    def remove(self, name):
+        """remove a registered tool by its exposed name; unknown names are
+        ignored. an MCP server connection stays cached (closed with the
+        registry), since other tools may still use it."""
+        if name not in self._dispatch: return
+        del self._dispatch[name]
+        self._schemas.pop(name, None)
+        self._functions.pop(name, None)
+        self._order.remove(name)
+
     def has(self, name):
         """True if a tool with this exposed name is already registered."""
         return name in self._dispatch
 
-    def _check_name_free(self, name):
+    def _is_name_free(self, name):
         if name in self._dispatch:
             raise ValueError(f"tool name collision: {name!r}")
 
@@ -336,15 +355,14 @@ class ToolRegistry:
     def _load_server(self, mcp_name):
         """the LocalMCPServer for mcp_name, spawned (once) from
         ~/.config/cai/mcps/<mcp_name>.py and cached in this registry."""
-        server = self._mcp_cache.get(mcp_name)
+        server = self._local_mcp_servers.get(mcp_name)
         if server is not None:
             return server
         path = os.path.join(mcps_dir(), mcp_name + ".py")
         if not os.path.exists(path):
             raise FileNotFoundError(f"no MCP server {mcp_name!r} at {path}")
         server = LocalMCPServer([sys.executable, path], mcp_name)
-        self._mcp_cache[mcp_name] = server
-        self._owned.append(server)
+        self._local_mcp_servers[mcp_name] = server
         return server
 
     def _call_function(self, name, arguments):
@@ -362,7 +380,7 @@ class ToolRegistry:
         return str(result)
 
     def close(self):
-        for server in self._owned:
+        for server in self._local_mcp_servers.values():
             try:
                 server.close()
             except Exception:
