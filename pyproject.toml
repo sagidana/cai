@@ -1,0 +1,19 @@
+[project]
+name = "cai"
+version = "0.1.0"
+description = "A small LLM agent, built from scratch layer by layer."
+requires-python = ">=3.10"
+dependencies = [
+    "requests",
+    "urllib3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
