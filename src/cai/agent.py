@@ -11,15 +11,31 @@ folds the prompt in as a user turn and hands back a Run over the agent's live
 place - the next `run` continues where this one left off.
 
 Tools are explicit: `tools=` is a list whose items are Python callables or MCP
-tool-name strings ('<mcp>__<tool>'). Only the tools you pass are sent to the
-model; pass none and the model gets no tools. MCP servers are spawned lazily on
-first use. Hooks, skills, serving/attach, saving, and cloning are later layers."""
+tool-name strings ('<mcp>__<tool>'). `skills=` is a list of skill names; each
+unions its tools into the registry and folds its prompt into the system prompt.
+Only the tools you pass (plus those skills pull in) are sent to the model. MCP
+servers are spawned lazily on first use. Serving/attach, saving, and cloning are
+later layers."""
 from __future__ import annotations
 
 from cai import config
 from cai.api import OpenAiApi
 from cai.llm import call_llm
 from cai.tools import ToolRegistry
+from cai.skills import SkillsRegistry
+
+
+def _combine_prompts(base, skills_prompt):
+    """join the base system prompt with the activated skills' prompt (base
+    first, skills after), or None when both are empty."""
+    parts = []
+    if base:
+        parts.append(base)
+    if skills_prompt:
+        parts.append(skills_prompt)
+    if not parts:
+        return None
+    return "\n\n".join(parts)
 
 
 class Run:
@@ -30,6 +46,7 @@ class Run:
                  *,
                  system_prompt=None,
                  tools=None,
+                 skills=None,
                  tools_registry=None,
                  stream=True):
         self.messages = messages
@@ -37,6 +54,7 @@ class Run:
         self.api = api
         self.system_prompt = system_prompt
         self.tools = tools                    # callables and/or '<mcp>__<tool>' strings, or None
+        self.skills = skills                  # skill names to activate (standalone Run only)
         self.tools_registry = tools_registry  # a prebuilt ToolRegistry (an Agent passes its own)
         # we own (and must close) a registry only if we build it ourselves; one
         # passed in belongs to its creator (an Agent), so we leave it alone.
@@ -50,19 +68,24 @@ class Run:
             raise RuntimeError("Run already consumed")
         self._consumed = True
 
-        # reuse the registry an Agent built once at bootstrap; otherwise build
-        # one from the tools handed in (an empty list -> no tools to the model).
+        # reuse the registry an Agent built once at bootstrap (skills already
+        # activated, system prompt already combined); otherwise build our own
+        # from the tools handed in, activate our skills into it, and fold the
+        # skills' prompt onto ours.
         registry = self.tools_registry
+        system_prompt = self.system_prompt
         if registry is None:
             registry = ToolRegistry.for_tools(self.tools)
             self.tools_registry = registry
+            skills = SkillsRegistry.for_skills(self.skills, tools_registry=registry)
+            system_prompt = _combine_prompts(self.system_prompt, skills.system_prompt)
         schemas = registry.tools
         dispatch = registry.dispatch
 
         gen = call_llm(self.messages,
                        self.model,
                        self.api,
-                       system_prompt=self.system_prompt,
+                       system_prompt=system_prompt,
                        tools=schemas,
                        tools_dispatch=dispatch,
                        stream=self.stream)
@@ -102,16 +125,20 @@ class Run:
 
 
 class Agent:
-    def __init__(self, *, model=None, system_prompt=None, tools=None):
+    def __init__(self, *, model=None, system_prompt=None, tools=None, skills=None):
         cfg = config.load_config()
-        if model is None:
-            model = cfg.model
+
+        if model is None: model = cfg.model
+
         self.model = model
-        self.system_prompt = system_prompt
         self.api = OpenAiApi(cfg.base_url, config.load_api_key())
         # build the tool registry once, here, so every run() reuses it (and the
         # MCP servers it spawned) instead of rebuilding it per run.
         self.tools_registry = ToolRegistry.for_tools(tools)
+        # activate skills once too: they extend the tool registry above and
+        # contribute prompt fragments folded into the system prompt.
+        self.skills_registry = SkillsRegistry.for_skills(skills, tools_registry=self.tools_registry)
+        self.system_prompt = _combine_prompts(system_prompt, self.skills_registry.system_prompt)
         self.messages = []
 
     def run(self, prompt=None):

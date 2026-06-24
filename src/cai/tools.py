@@ -298,6 +298,10 @@ class ToolRegistry:
             return _mcp_tool_schema(exposed, tool)
         return None
 
+    def has(self, name):
+        """True if a tool with this exposed name is already registered."""
+        return name in self._dispatch
+
     def _check_name_free(self, name):
         if name in self._dispatch:
             raise ValueError(f"tool name collision: {name!r}")
