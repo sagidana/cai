@@ -14,8 +14,9 @@ Tools are explicit: `tools=` is a list whose items are Python callables or MCP
 tool-name strings ('<mcp>__<tool>'). `skills=` is a list of skill names; each
 unions its tools into the registry and folds its prompt into the system prompt.
 Only the tools you pass (plus those skills pull in) are sent to the model. MCP
-servers are spawned lazily on first use. Serving/attach, saving, and cloning are
-later layers."""
+servers are spawned lazily on first use. `hooks=` is a list of (event, fn) pairs
+fired through the run (Run turns it into the internal HooksRegistry that call_llm
+wants). Serving/attach, saving, and cloning are later layers."""
 from __future__ import annotations
 
 from cai import config
@@ -23,6 +24,7 @@ from cai.api import OpenAiApi
 from cai.llm import call_llm
 from cai.tools import ToolRegistry
 from cai.skills import SkillsRegistry
+from cai.hooks import HooksRegistry
 
 
 def _combine_prompts(base, skills_prompt):
@@ -55,6 +57,7 @@ class Run:
                  system_prompt=None,
                  tools=None,
                  skills=None,
+                 hooks=None,
                  tools_registry=None,
                  skills_registry=None,
                  stream=True):
@@ -64,6 +67,7 @@ class Run:
         self.system_prompt = system_prompt        # base prompt; skills folded in at run time
         self.tools = tools                        # callables/'<mcp>__<tool>' strings (standalone)
         self.skills = skills                      # skill names to activate (standalone)
+        self.hooks = hooks                        # [(event, fn), ...] or None; translated at run time
         self.tools_registry = tools_registry      # a prebuilt ToolRegistry (an Agent passes its own)
         self.skills_registry = skills_registry    # the Agent's SkillsRegistry (for the live prompt)
         # we own (and must close) a registry only if we build it ourselves; one
@@ -97,12 +101,17 @@ class Run:
         schemas = registry.tools
         dispatch = registry.dispatch
 
+        # Run is the one place the public [(event, fn), ...] list becomes the
+        # internal HooksRegistry that call_llm wants.
+        hooks_registry = HooksRegistry.from_list(self.hooks)
+
         gen = call_llm(self.messages,
                        self.model,
                        self.api,
                        system_prompt=system_prompt,
                        tools=schemas,
                        tools_dispatch=dispatch,
+                       hooks=hooks_registry,
                        stream=self.stream)
         try:
             while True:
@@ -140,7 +149,13 @@ class Run:
 
 
 class Agent:
-    def __init__(self, *, model=None, system_prompt=None, tools=None, skills=None):
+    def __init__(self,
+                 *,
+                 model=None,
+                 system_prompt=None,
+                 tools=None,
+                 skills=None,
+                 hooks=None):
         cfg = config.load_config()
 
         if model is None: model = cfg.model
@@ -154,6 +169,7 @@ class Agent:
         # the MCP servers they spawned); set_tools/set_skills mutate them in place.
         self.tools_registry = ToolRegistry.for_tools(self._tools)
         self.skills_registry = SkillsRegistry.for_skills(self._skills, tools_registry=self.tools_registry)
+        self._hooks = hooks   # [(event, fn), ...] or None; forwarded to each Run as-is
         self.messages = []
 
     @property
@@ -202,6 +218,7 @@ class Agent:
                    self.model,
                    self.api,
                    system_prompt=self._system_prompt,
+                   hooks=self._hooks,
                    tools_registry=self.tools_registry,
                    skills_registry=self.skills_registry)
 

@@ -1,6 +1,6 @@
 """hooks: the per-run registry plus the shapes passed to every hook.
 
-A hook is an (event, fn) pair. HookRegistry.fire(event, ctx) calls every fn
+A hook is an (event, fn) pair. HooksRegistry.fire(event, ctx) calls every fn
 registered for that event, synchronously, in registration order, and returns
 their responses. The caller decides whether to read the responses (a
 before_tool_call hook returning False vetoes that tool; an on_final_response
@@ -64,13 +64,19 @@ class HookContext:
                                   # every context of one run - opaque to core.
 
 
-class HookRegistry:
-    def __init__(self, inherit=None):
+class HooksRegistry:
+    def __init__(self):
         self._entries = []
-        if inherit is None:
-            return
-        for event, fn in inherit:
-            self.register(event, fn)
+
+    @classmethod
+    def from_list(cls, hooks):
+        """build a registry from a list of (event, fn) pairs (None -> empty)."""
+        registry = cls()
+        if hooks is None:
+            return registry
+        for event, fn in hooks:
+            registry.register(event, fn)
+        return registry
 
     def register(self, event, fn):
         if event not in VALID_HOOK_EVENTS:

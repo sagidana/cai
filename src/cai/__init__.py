@@ -9,7 +9,7 @@ Entry:   cai.config - bootstrap settings (API key, OpenRouter endpoint).
          cai.cli    - the `cai` command: prompt in, streamed answer out.
 """
 from cai.events import Event, EventType
-from cai.hooks import HookContext, HookEvent, HookRegistry, ToolCall
+from cai.hooks import HookContext, HookEvent, HooksRegistry, ToolCall
 from cai.llm import LLMError, MaxStepsReached, call_llm
 
 __all__ = [
@@ -17,7 +17,7 @@ __all__ = [
     "EventType",
     "HookContext",
     "HookEvent",
-    "HookRegistry",
+    "HooksRegistry",
     "ToolCall",
     "LLMError",
     "MaxStepsReached",

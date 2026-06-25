@@ -27,7 +27,7 @@ import json
 import logging
 
 from cai.events import Event, EventType
-from cai.hooks import HookContext, HookEvent, HookRegistry, ToolCall
+from cai.hooks import HookContext, HookEvent, HooksRegistry, ToolCall
 
 
 log = logging.getLogger("cai")
@@ -44,13 +44,11 @@ class MaxStepsReached(LLMError):
 
 
 def _as_registry(hooks):
-    """coerce call_llm's hooks argument to a HookRegistry: a registry is used
-    as-is; None is an empty one; a list of (event, fn) pairs is wrapped."""
-    if isinstance(hooks, HookRegistry):
-        return hooks
+    """call_llm takes a HooksRegistry, or None for no hooks. (the list ->
+    registry translation lives in Run, not here.)"""
     if hooks is None:
-        return HookRegistry()
-    return HookRegistry(inherit=hooks)
+        return HooksRegistry()
+    return hooks
 
 
 def _parse_args(arguments):
@@ -257,7 +255,7 @@ def call_llm(messages,
     api        - a cai.api.OpenAiApi (or anything with the same .chat).
     tools      - JSON tool schemas sent to the model (None disables tools).
     tools_dispatch - callable(name, args_dict) -> result, runs one tool.
-    hooks      - a HookRegistry or a list of (event, fn) pairs.
+    hooks      - a HooksRegistry, or None for no hooks.
     Returns the final assistant text (as the generator's return value)."""
     hooks = _as_registry(hooks)
     if not tools:
