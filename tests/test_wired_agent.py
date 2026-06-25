@@ -91,6 +91,10 @@ def make_agent(tools=None, skills=None, hooks=None, api=None):
     agent.skills_registry = SkillsRegistry.for_skills([], tools_registry=agent.tools_registry)
     agent._hooks = hooks
     agent._ui = None
+    agent.reasoning_effort = None
+    agent.temperature = None
+    agent.max_steps = None
+    agent.stream = True
     agent.interrupt = threading.Event()
     agent._killed = threading.Event()
     agent._steer = SteerQueue()

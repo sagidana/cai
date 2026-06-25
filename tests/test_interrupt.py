@@ -77,6 +77,10 @@ def bare_agent(tools_registry, api):
     agent.skills_registry = SkillsRegistry.for_skills([], tools_registry=tools_registry)
     agent._hooks = None
     agent._ui = None
+    agent.reasoning_effort = None
+    agent.temperature = None
+    agent.max_steps = None
+    agent.stream = True
     agent.interrupt = threading.Event()
     agent._killed = threading.Event()
     agent._steer = SteerQueue()

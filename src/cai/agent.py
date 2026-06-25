@@ -1,21 +1,23 @@
 """agent: a persistent conversation (Agent) and a one-shot execution (Run).
 
-Run wraps a single call_llm invocation and makes it iterable: you loop over it
-to stream Event objects, and once it drains, `text` holds the final answer and
-`messages` holds the full transcript. It is lazy and single-consumption - the
-loop doesn't start until you iterate (or call `wait()`), and only once.
+Agent owns everything: a growing conversation, a model, an api client, the tool
+and skill registries, the hooks and ui, and the call_llm orchestration itself.
+`run(prompt)` folds the prompt in as a user turn and hands back a handle over the
+agent's live `messages` - iterating it streams the answer and evolves the
+conversation in place, so the next `run` continues where this one left off. Once
+the handle drains, `text` holds the final answer.
 
-Agent owns a growing conversation, a model, and an api client. `run(prompt)`
-folds the prompt in as a user turn and hands back a Run over the agent's live
-`messages`, so iterating it streams the answer and evolves the conversation in
-place - the next `run` continues where this one left off.
+Run is syntactic sugar for a one-shot execution: it builds a throwaway Agent from
+the params you pass and streams a single turn over the messages you give it. It
+has the same surface as the run handle (iterate for Events, then read `text`),
+and closing it closes the Agent it owns.
 
 Tools are explicit: `tools=` is a list whose items are Python callables or MCP
 tool-name strings ('<mcp>__<tool>'). `skills=` is a list of skill names; each
 unions its tools into the registry and folds its prompt into the system prompt.
 Only the tools you pass (plus those skills pull in) are sent to the model. MCP
 servers are spawned lazily on first use. `hooks=` is a list of (event, fn) pairs
-fired through the run (Run turns it into the internal HooksRegistry that call_llm
+fired through the run (turned into the internal HooksRegistry that call_llm
 wants). `ui=` is the human-interaction surface (cai.ui.UI) those hooks prompt
 through via HookContext.ui; None means no human is reachable (NULL_UI). Serving/
 attach, saving, and cloning are later layers."""
@@ -67,43 +69,17 @@ def _tool_name(tool):
     return tool
 
 
-class Run:
-    def __init__(self,
-                 messages,
-                 model,
-                 api,
-                 *,
-                 system_prompt=None,
-                 tools=None,
-                 skills=None,
-                 hooks=None,
-                 ui=None,
-                 interrupt=None,
-                 steer=None,
-                 reasoning_effort=None,
-                 temperature=None,
-                 max_steps=None,
-                 tools_registry=None,
-                 skills_registry=None,
-                 stream=True):
-        self.messages = messages
-        self.model = model
-        self.api = api
-        self.system_prompt = system_prompt        # base prompt; skills folded in at run time
-        self.tools = tools                        # callables/'<mcp>__<tool>' strings (standalone)
-        self.skills = skills                      # skill names to activate (standalone)
-        self.hooks = hooks                        # [(event, fn), ...] or None; translated at run time
-        self.ui = ui                              # UI hooks prompt through; None -> NULL_UI in call_llm
-        self.interrupt = interrupt                # threading.Event to abort the run; None -> uninterruptible
-        self.steer = steer                        # callable() -> pending steer texts; None -> no steering
-        self.reasoning_effort = reasoning_effort  # forwarded to call_llm; None -> model default
-        self.temperature = temperature            # forwarded to call_llm; None -> model default
-        self.max_steps = max_steps                # forwarded to call_llm; None -> uncapped
-        self.tools_registry = tools_registry      # a prebuilt ToolRegistry (an Agent passes its own)
-        self.skills_registry = skills_registry    # the Agent's SkillsRegistry (for the live prompt)
-        # we own (and must close) a registry only if we build it ourselves; one
-        # passed in belongs to its creator (an Agent), so we leave it alone.
-        self._private_registry = tools_registry is None
+class _Run:
+    """the handle Agent.run() returns: a lazy, single-consumption stream over one
+    turn on the agent's live conversation. iterate it for Event objects; once it
+    drains, `text` holds the final answer and the agent's `messages` have grown,
+    so the next run() continues from there. it doesn't start until you iterate
+    (or call `wait()`), and only once."""
+
+    def __init__(self, agent, stream):
+        self.agent = agent
+        self.messages = agent.messages   # the agent's live conversation
+        self.interrupt = agent.interrupt  # the agent's interrupt Event
         self.stream = stream
         self.text = ""
         self._consumed = False
@@ -112,57 +88,9 @@ class Run:
         if self._consumed:
             raise RuntimeError("Run already consumed")
         self._consumed = True
-
-        # reuse the Agent's registries when passed; otherwise build our own from
-        # the tools/skills handed in. either way, recombine the system prompt now
-        # (not at construction) so skills added/removed since are reflected.
-        registry = self.tools_registry
-        skills_registry = self.skills_registry
-        if registry is None:
-            registry = ToolRegistry.for_tools(self.tools)
-            self.tools_registry = registry
-            skills_registry = SkillsRegistry.for_skills(self.skills, tools_registry=registry)
-            self.skills_registry = skills_registry
-
-        skills_prompt = None
-        if skills_registry is not None:
-            skills_prompt = skills_registry.system_prompt
-        system_prompt = _combine_prompts(self.system_prompt, skills_prompt)
-
-        schemas = registry.tools
-        dispatch = registry.dispatch
-
-        # Run is the one place the public [(event, fn), ...] list becomes the
-        # internal HooksRegistry that call_llm wants.
-        hooks_registry = HooksRegistry.from_list(self.hooks)
-
-        gen = call_llm(self.messages,
-                       self.model,
-                       self.api,
-                       system_prompt=system_prompt,
-                       tools=schemas,
-                       tools_dispatch=dispatch,
-                       hooks=hooks_registry,
-                       ui=self.ui,
-                       interrupt=self.interrupt,
-                       steer=self.steer,
-                       reasoning_effort=self.reasoning_effort,
-                       temperature=self.temperature,
-                       max_steps=self.max_steps,
-                       stream=self.stream)
-        try:
-            while True:
-                try:
-                    event = next(gen)
-                except StopIteration as stop:
-                    self.text = stop.value
-                    return
-                yield event
-        finally:
-            # close our own registry whether we drained or the caller broke out
-            # early (a borrowed registry stays open for its owner).
-            if self._private_registry:
-                registry.close()
+        # delegate to the agent's generator; `yield from` forwards every Event
+        # and captures the generator's return value (the final text) for us.
+        self.text = yield from self.agent._stream(self.stream)
 
     def wait(self):
         """drain the run without consuming the events yourself; returns self,
@@ -172,10 +100,9 @@ class Run:
         return self
 
     def close(self):
-        """close the registry this Run built itself; a registry passed in (an
-        Agent's) is owned by the caller and left untouched."""
-        if self._private_registry and self.tools_registry is not None:
-            self.tools_registry.close()
+        """nothing to close: the agent owns its tool registry for its whole life
+        and tears it down in Agent.close()."""
+        pass
 
     def __enter__(self):
         return self
@@ -190,19 +117,26 @@ class Agent:
                  *,
                  name=None,
                  model=None,
+                 api=None,
                  system_prompt=None,
                  tools=None,
                  skills=None,
                  hooks=None,
-                 ui=None):
+                 ui=None,
+                 interrupt=None,
+                 reasoning_effort=None,
+                 temperature=None,
+                 max_steps=None,
+                 stream=True):
         cfg = config.load_config()
 
         if model is None: model = cfg.model
         if name is None: name = _new_name()
+        if api is None: api = OpenAiApi(cfg.base_url, config.load_api_key())
 
         self.name = name
         self.model = model
-        self.api = OpenAiApi(cfg.base_url, config.load_api_key())
+        self.api = api
         self._system_prompt = system_prompt   # base; combined with skills on demand
         self._tools = tools or []
         self._skills = skills or []
@@ -210,11 +144,17 @@ class Agent:
         # the MCP servers they spawned); set_tools/set_skills mutate them in place.
         self.tools_registry = ToolRegistry.for_tools(self._tools)
         self.skills_registry = SkillsRegistry.for_skills(self._skills, tools_registry=self.tools_registry)
-        self._hooks = hooks   # [(event, fn), ...] or None; forwarded to each Run as-is
-        self._ui = ui         # UI hooks prompt through; forwarded to each Run as-is
+        self._hooks = hooks   # [(event, fn), ...] or None; turned into a HooksRegistry per run
+        self._ui = ui         # UI hooks prompt through; None -> NULL_UI in call_llm
+        # per-run defaults forwarded to call_llm; None -> model/library default.
+        self.reasoning_effort = reasoning_effort
+        self.temperature = temperature
+        self.max_steps = max_steps
+        self.stream = stream
         # set from another thread (stop()) to abort the in-flight run; each run()
         # clears it so a fresh run starts un-interrupted.
-        self.interrupt = threading.Event()
+        if interrupt is None: interrupt = threading.Event()
+        self.interrupt = interrupt
         # set by kill(): a harder stop that also retires the agent - it aborts
         # the in-flight run and refuses further ones. never cleared.
         self._killed = threading.Event()
@@ -288,8 +228,36 @@ class Agent:
         user turn at its next turn boundary. safe to call from another thread."""
         self._steer.push(text)
 
+    def _stream(self, stream):
+        """the orchestration: stream one call_llm turn over the live conversation.
+        yields Event objects and returns the final answer text. combines the
+        system prompt and translates the hooks list here (not at construction) so
+        skills and hooks added since are reflected."""
+        skills_prompt = self.skills_registry.system_prompt
+        system_prompt = _combine_prompts(self._system_prompt, skills_prompt)
+        schemas = self.tools_registry.tools
+        dispatch = self.tools_registry.dispatch
+        # the one place the public [(event, fn), ...] list becomes the internal
+        # HooksRegistry that call_llm wants.
+        hooks_registry = HooksRegistry.from_list(self._hooks)
+        text = yield from call_llm(self.messages,
+                                   self.model,
+                                   self.api,
+                                   system_prompt=system_prompt,
+                                   tools=schemas,
+                                   tools_dispatch=dispatch,
+                                   hooks=hooks_registry,
+                                   ui=self._ui,
+                                   interrupt=self.interrupt,
+                                   steer=self._steer.drain,
+                                   reasoning_effort=self.reasoning_effort,
+                                   temperature=self.temperature,
+                                   max_steps=self.max_steps,
+                                   stream=stream)
+        return text
+
     def run(self, prompt=None):
-        """append `prompt` as a user turn (if given) and return a Run over the
+        """append `prompt` as a user turn (if given) and return a handle over the
         agent's live conversation. Iterate it to stream events; `messages`
         keeps growing, so the next run continues this conversation."""
         self.interrupt.clear()
@@ -299,16 +267,7 @@ class Agent:
             self.interrupt.set()
         if prompt is not None:
             self.messages.append({"role": "user", "content": prompt})
-        return Run(self.messages,
-                   self.model,
-                   self.api,
-                   system_prompt=self._system_prompt,
-                   hooks=self._hooks,
-                   ui=self._ui,
-                   interrupt=self.interrupt,
-                   steer=self._steer.drain,
-                   tools_registry=self.tools_registry,
-                   skills_registry=self.skills_registry)
+        return _Run(self, self.stream)
 
     def close(self):
         """close the tool registry, terminating any live MCP server connections
@@ -321,3 +280,48 @@ class Agent:
     def __exit__(self, *exc):
         self.close()
         return False
+
+
+class Run(_Run):
+    """one-shot sugar: build a throwaway Agent from these params and stream a
+    single turn over `messages` (which must already include the prompt turn). the
+    surface is the run handle's - iterate for Events, then read `text` - and
+    closing it closes the Agent it owns (and the MCP servers that agent spawned)."""
+
+    def __init__(self,
+                 messages,
+                 model,
+                 api,
+                 *,
+                 system_prompt=None,
+                 tools=None,
+                 skills=None,
+                 hooks=None,
+                 ui=None,
+                 interrupt=None,
+                 reasoning_effort=None,
+                 temperature=None,
+                 max_steps=None,
+                 stream=True):
+        agent = Agent(model=model,
+                      api=api,
+                      system_prompt=system_prompt,
+                      tools=tools,
+                      skills=skills,
+                      hooks=hooks,
+                      ui=ui,
+                      interrupt=interrupt,
+                      reasoning_effort=reasoning_effort,
+                      temperature=temperature,
+                      max_steps=max_steps,
+                      stream=stream)
+        agent.set_messages(messages)
+        # no prompt to fold in: `messages` is already the complete conversation,
+        # so stream straight over it (Agent.run's prompt-append is for the
+        # persistent path).
+        super().__init__(agent, stream)
+
+    def close(self):
+        """close the Agent this Run built (and owns), tearing down its tool
+        registry and any MCP servers it spawned."""
+        self.agent.close()
