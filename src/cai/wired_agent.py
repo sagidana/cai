@@ -10,6 +10,10 @@ A served run's UI prompts travel the wire too: the agent is given a WireUI, so a
 hook calling ctx.ui.confirm/select/text/notify mid-run reaches the client as a
 PROMPT and blocks for its REPLY.
 
+UnixWiredAgent bakes the transport in: it owns a UnixSocketServer and serves the
+agent over it, so a caller hands it an Agent and a path instead of wiring up the
+listener, accept, and channel themselves.
+
 Minimal by design: one message at a time, synchronous, on the caller's thread.
 Steering, interrupts, and attach/snapshot are later layers."""
 from __future__ import annotations
@@ -18,6 +22,7 @@ import itertools
 import logging
 
 from cai.agent import _tool_name
+from cai.channel import UnixSocketServer
 from cai.ui import BaseUI
 from cai.wire import Wire
 
@@ -197,3 +202,50 @@ class WiredAgent:
             agent.set_tools(value)
             return True, None, None
         return False, None, f"unknown control op: {op!r}"
+
+
+class UnixWiredAgent:
+    """serve an Agent over a unix-domain socket, with the listener baked in.
+
+    binds a UnixSocketServer at `path`; serve() accepts one client at a time and
+    runs it as a WiredAgent until the client disconnects, then loops to accept
+    the next - the agent (and its conversation) persists across reconnects.
+    close() shuts the listener and unlinks the socket file, which ends serve().
+
+    one client at a time, synchronous: a second client waits in the accept
+    backlog until the first disconnects. concurrent multi-client serving is a
+    later layer."""
+
+    def __init__(self, agent, path, *, backlog=8):
+        self.agent = agent
+        self.server = UnixSocketServer(path, backlog=backlog)
+
+    @property
+    def path(self):
+        return self.server.path
+
+    def serve(self):
+        """accept and serve clients one at a time until the listener is closed.
+        blocking; runs on the caller's thread (or one the caller spawns)."""
+        while True:
+            try:
+                conn = self.server.accept()
+            except OSError:
+                return                       # listener closed -> stop serving
+            try:
+                WiredAgent(self.agent, conn).serve()
+            finally:
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+
+    def close(self):
+        self.server.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False

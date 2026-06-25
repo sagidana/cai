@@ -5,17 +5,19 @@ background thread runs WiredAgent.serve, and the client side drives it with a
 Wire. The model is a FakeApi that streams canned content - no network, no
 config, no API key.
 """
+import os
 import socket
 import threading
 
 import pytest
 
+from cai import channel
 from cai.agent import Agent
 from cai.hooks import HookEvent
 from cai.skills import SkillsRegistry
 from cai.tools import ToolRegistry
 from cai.wire import Wire
-from cai.wired_agent import WiredAgent, WireUI, _tool_names
+from cai.wired_agent import UnixWiredAgent, WiredAgent, WireUI, _tool_names
 
 
 # --------------------------------------------------------------------------
@@ -272,6 +274,66 @@ def test_hook_ui_prompts_travel_to_the_client(serve):
     for call in ui.calls:
         kinds.append(call[0])
     assert kinds == ["confirm", "select", "text", "notify"]
+
+
+# --------------------------------------------------------------------------
+# UnixWiredAgent: the unix-socket listener baked in
+# --------------------------------------------------------------------------
+
+def run_turn_over(client_wire, text):
+    """drain one turn on an already-connected client Wire."""
+    client_wire.send_submit(text)
+    result = None
+    while result is None:
+        messages = client_wire.recv()
+        for msg in messages:
+            if msg["type"] == Wire.RESULT:
+                result = msg["text"]
+    return result
+
+
+def test_unix_wired_agent_serves_over_a_socket(tmp_path):
+    path = str(tmp_path / "a.sock")
+    agent = make_agent(api=FakeApi(chunks=["hello"]))
+    served = UnixWiredAgent(agent, path)
+    assert os.path.exists(path)
+    thread = threading.Thread(target=served.serve, daemon=True)
+    thread.start()
+
+    client = channel.connect(path)
+    wire = Wire(client)
+    assert run_turn_over(wire, "hi") == "hello"
+    client.close()
+
+    served.close()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert not os.path.exists(path)        # socket file unlinked on close
+
+
+def test_unix_wired_agent_persists_across_reconnects(tmp_path):
+    path = str(tmp_path / "a.sock")
+    agent = make_agent(api=FakeApi(chunks=["answer"]))
+    served = UnixWiredAgent(agent, path)
+    thread = threading.Thread(target=served.serve, daemon=True)
+    thread.start()
+
+    # first client: one turn, then disconnect
+    first = channel.connect(path)
+    run_turn_over(Wire(first), "one")
+    first.close()
+
+    # second client: the same agent, conversation carried over
+    second = channel.connect(path)
+    ok, messages, error = Wire(second).control("get_messages")
+    second.close()
+    assert ok is True
+    assert messages[0]["content"] == "one"
+    assert messages[-1]["content"] == "answer"
+
+    served.close()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
 
 
 def test_wire_ui_falls_back_to_default_when_client_gone():
