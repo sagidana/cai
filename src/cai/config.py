@@ -62,6 +62,25 @@ def load_config():
     return Config(**values)
 
 
+def load_optional(key, default=None):
+    """read an optional key from config.json - one that is not part of the
+    required Config set - returning default when the file or key is absent or
+    unreadable. for opt-in settings (e.g. default_context_size) that must never
+    make an existing config invalid."""
+    path = config_path()
+    if not os.path.exists(path):
+        return default
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return default
+    value = data.get(key)
+    if value is None:
+        return default
+    return value
+
+
 def load_api_key():
     """read the API key from ~/.config/cai/api_key, or raise with a message
     telling the user how to create it."""

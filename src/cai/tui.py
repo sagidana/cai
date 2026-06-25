@@ -21,12 +21,14 @@ import queue
 import threading
 import time
 
+from cai import usage
 from cai.events import EventType
 from cai.screen import Screen
 
 
 # command palette (Ctrl-P) and command-mode (:) completion entries.
 _PALETTE_COMMANDS = [
+    ("messages", "view / edit / delete the conversation"),
     ("clear", "clear the conversation view"),
     ("quit", "exit the interactive session"),
 ]
@@ -36,6 +38,9 @@ _REFRESH_INTERVAL = 0.1
 # a stream is "stalled" once this many seconds pass with no new token; the status
 # then falls back from responding/reasoning to waiting.
 _STALL_SECONDS = 3.0
+# context-window size used for the ctx % readout when config.json sets no
+# 'default_context_size'. matches the reference's fallback.
+_DEFAULT_CONTEXT_SIZE = 1_000_000
 
 
 def _short_args(tool_args):
@@ -91,15 +96,22 @@ class _Status:
     painting on each event - is what lets a quiet stream fall back to 'waiting'
     on the clock alone."""
 
-    def __init__(self, screen, model):
+    def __init__(self, screen, model, context_limit):
         self._screen = screen
         self._model = model
+        self._context_limit = context_limit
         self._lock = threading.Lock()
         self._busy = False
         self._phase = None         # None | "tool" | "waiting"
         self._stream_kind = None   # None | "responding" | "reasoning"
         self._last_char = 0.0      # time.monotonic() of the last streamed token
-        self._last_text = None     # last line painted, so unchanged state is a no-op
+        self._tokens = 0           # estimated tokens in the conversation so far
+        # the latest real usage sample (tokens measured when the conversation
+        # held sample_chars chars), surfaced to the :messages overlay so its
+        # per-message token math matches the status line.
+        self._sample_tokens = 0
+        self._sample_chars = 0
+        self._last = None          # last (text, right) painted; unchanged is a no-op
 
     # --- signal updates, called by the worker thread as it streams a run ---
 
@@ -130,6 +142,22 @@ class _Status:
             self._phase = "waiting"
             self._stream_kind = None
 
+    def set_tokens(self, tokens):
+        # the conversation's estimated token count, computed by the worker (it
+        # owns the agent's messages); we only format it into the ctx readout.
+        with self._lock:
+            self._tokens = tokens
+
+    def set_sample(self, sample_tokens, sample_chars):
+        with self._lock:
+            self._sample_tokens = sample_tokens
+            self._sample_chars = sample_chars
+
+    def ctx_snapshot(self):
+        # (context_limit, sample_tokens, sample_chars) for the :messages overlay.
+        with self._lock:
+            return self._context_limit, self._sample_tokens, self._sample_chars
+
     # --- render, called by the status thread on a timer ---
 
     def _state(self, now):
@@ -146,11 +174,13 @@ class _Status:
     def refresh(self):
         with self._lock:
             text = _status_text(self._model, self._state(time.monotonic()))
-            if text == self._last_text:
+            right = usage.format_ctx(self._tokens, self._context_limit)
+            key = (text, right)
+            if key == self._last:
                 return
-            self._last_text = text
+            self._last = key
         # paint outside the lock: set_status takes the screen's own render lock.
-        self._screen.set_status(text)
+        self._screen.set_status(text, right)
 
 
 class _StatusLoop(threading.Thread):
@@ -187,6 +217,10 @@ class _Worker(threading.Thread):
         # calls internally (it would then try to call this Event and crash).
         self._stop_event = stop
         self._status = status
+        # the latest real usage measurement, paired with the message size at
+        # which it was taken, so between-turn estimates scale from a true count.
+        self._sample_tokens = 0
+        self._sample_chars = 0
 
     def run(self):
         while not self._stop_event.is_set():
@@ -207,6 +241,26 @@ class _Worker(threading.Thread):
             self._status.tool()
         elif event.type == EventType.TOOL_RESULT:
             self._status.tool_done()
+        elif event.type == EventType.USAGE:
+            self._on_usage(event)
+
+    def _on_usage(self, event):
+        # pair the turn's real token count with the conversation's current char
+        # size, so the between-turn estimate scales from a true measurement.
+        report = event.usage or {}
+        tokens = report.get("total_tokens")
+        if not tokens:
+            tokens = report.get("prompt_tokens", 0) + report.get("completion_tokens", 0)
+        if tokens:
+            self._sample_tokens = tokens
+            self._sample_chars = usage.message_chars(self._agent.messages)
+            self._status.set_sample(self._sample_tokens, self._sample_chars)
+
+    def _push_tokens(self):
+        tokens = usage.estimate_tokens(self._agent.messages,
+                                       self._sample_tokens,
+                                       self._sample_chars)
+        self._status.set_tokens(tokens)
 
     def _run_one(self, text):
         # echo the submitted prompt only now, as the run starts, so the user
@@ -214,6 +268,7 @@ class _Worker(threading.Thread):
         self._screen.write(f"> {text}\n\n", kind=Screen.USER)
         self._screen.set_busy(True)
         self._status.busy()
+        self._push_tokens()   # reflect the just-added user turn immediately
         try:
             run = self._agent.run(text)
             for event in run:
@@ -225,9 +280,28 @@ class _Worker(threading.Thread):
         finally:
             self._screen.set_busy(False)
             self._status.idle()
+            self._push_tokens()   # fold in the assistant turn + the fresh sample
 
 
-def _handle_command(screen, agent, cmd):
+def _open_messages(screen, agent, status):
+    """open the :messages overlay over a snapshot of the conversation and write
+    back any edits. idle-gated by the caller: it reads and replaces
+    agent.messages directly, which would race a streaming run."""
+    msgs = list(agent.get_messages())
+    if not msgs:
+        screen.write("[no messages yet]\n", kind=Screen.META)
+        return
+    context_size, prompt_tokens, sample_chars = status.ctx_snapshot()
+    edited, _estimate, modified = screen.prompt_messages_overlay(
+        msgs,
+        context_size=context_size,
+        prompt_tokens=prompt_tokens,
+        sample_chars=sample_chars)
+    if modified:
+        agent.set_messages(edited)
+
+
+def _handle_command(screen, agent, status, cmd):
     """dispatch a `:`-command. returns True to quit the loop, else False.
 
     cmd is the raw command string (the text after ':'); the first token is the
@@ -237,6 +311,14 @@ def _handle_command(screen, agent, cmd):
     head = cmd.split(" ", 1)[0]
     if head == "clear":
         screen.clear_buffer()
+        return False
+    if head == "messages":
+        # editing the live conversation mid-run would race the worker, so only
+        # while idle. opening it under a busy run is refused, not queued.
+        if screen._busy:
+            screen.write("[busy — open :messages when idle]\n", kind=Screen.META)
+            return False
+        _open_messages(screen, agent, status)
         return False
     screen.write(f"[unknown command: :{head}]\n", kind=Screen.META)
     return False
@@ -252,6 +334,7 @@ def run(*,
         max_steps=None):
     """launch the interactive TUI around a fresh in-process Agent. blocks until
     the user quits (:q, Ctrl-C, or EOF). returns the process exit code."""
+    from cai import config
     from cai.agent import Agent
 
     agent = Agent(model=model,
@@ -272,7 +355,8 @@ def run(*,
     screen.set_palette_commands(_PALETTE_COMMANDS)
     screen.set_cmd_completions(completions)
 
-    status = _Status(screen, agent.model)
+    context_limit = int(config.load_optional("default_context_size", _DEFAULT_CONTEXT_SIZE))
+    status = _Status(screen, agent.model, context_limit)
     status.refresh()   # initial idle paint, before the status thread takes over
 
     def _on_interrupt():
@@ -302,7 +386,7 @@ def run(*,
             if screen._command_result is not None:
                 cmd = screen._command_result
                 screen._command_result = None
-                if _handle_command(screen, agent, cmd):
+                if _handle_command(screen, agent, status, cmd):
                     break
                 continue
             # '!text' steers the in-flight run; with nothing running it is just

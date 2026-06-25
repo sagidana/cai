@@ -301,12 +301,15 @@ class Run(RunHandle):
     """one-shot sugar: build a throwaway Agent from these params and stream a
     single turn over `messages` (which must already include the prompt turn). the
     surface is the run handle's - iterate for Events, then read `text` - and
-    closing it closes the Agent it owns (and the MCP servers that agent spawned)."""
+    closing it closes the Agent it owns (and the MCP servers that agent spawned).
+
+    model and api default from config when omitted, so `Run(messages=[...])` is a
+    valid one-liner (used by the messages-overlay rewrite)."""
 
     def __init__(self,
                  messages,
-                 model,
-                 api,
+                 model=None,
+                 api=None,
                  *,
                  system_prompt=None,
                  tools=None,
