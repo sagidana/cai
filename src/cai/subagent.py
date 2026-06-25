@@ -224,7 +224,7 @@ _WAIT_DOC = """Block until the given sub-agent finishes and return its final ans
     """
 
 
-def _wait_agent(parent, agent_id, timeout=300, kill=False):
+def _wait_agent(parent, agent_id, timeout=30, kill=False):
     """poll a child handle for its final answer; on timeout report it is still
     running, or (kill=True) kill it and collect whatever partial output it had."""
     handle = _find(parent, agent_id)
@@ -244,7 +244,7 @@ def _wait_agent(parent, agent_id, timeout=300, kill=False):
 
 def make_wait_agent(parent):
     """build a wait_agent tool bound to its launching agent."""
-    def wait_agent(agent_id: str, timeout: int = 300, kill: bool = False) -> str:
+    def wait_agent(agent_id: str, timeout: int = 30, kill: bool = False) -> str:
         return _wait_agent(parent, agent_id, timeout, kill)
     wait_agent.__doc__ = _WAIT_DOC
     return wait_agent

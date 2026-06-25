@@ -8,6 +8,17 @@ Layer 2: cai.agent  - Agent (persistent conversation) + Run (one-shot execution)
 Entry:   cai.config - bootstrap settings (API key, OpenRouter endpoint).
          cai.cli    - the `cai` command: prompt in, streamed answer out.
 """
+import logging
+
+# every module logs through getLogger("cai"); point that at a file so the
+# diagnostics (MCP spawns, tool failures, wired turns) land somewhere readable
+# instead of the default stderr-only / dropped-below-WARNING behaviour.
+logging.basicConfig(
+    filename="/tmp/cai.log",
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+)
+
 from cai.events import Event, EventType
 from cai.hooks import HookContext, HookEvent, HooksRegistry, ToolCall
 from cai.llm import LLMError, MaxStepsReached, call_llm
