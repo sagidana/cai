@@ -45,8 +45,37 @@ class FakeApi:
         return gen()
 
 
+class ToolThenTextApi:
+    """turn 1 asks for `tool_name`, turn 2 answers with text. records what it was
+    handed on turn 2 so an injected steer turn can be asserted."""
+
+    def __init__(self, tool_name, answer="final"):
+        self.tool_name = tool_name
+        self.answer = answer
+        self.calls = 0
+        self.turn2_messages = None
+
+    def chat(self, messages, model, **kwargs):
+        self.calls += 1
+        n = self.calls
+        if n == 2:
+            self.turn2_messages = list(messages)
+        name = self.tool_name
+        answer = self.answer
+        def gen():
+            if n == 1:
+                call = {"id": "c1", "type": "function",
+                        "function": {"name": name, "arguments": "{}"}}
+                yield (None, None, [call], {})
+            else:
+                yield (answer, None, None, {})
+        return gen()
+
+
 def make_agent(tools=None, skills=None, hooks=None, api=None):
-    """build an Agent without touching config/network (bypass __init__)."""
+    """build an Agent without touching config/network (bypass __init__). callable
+    tools are registered for dispatch; MCP-name strings are kept in _tools (so
+    get_tools sees them) but not loaded."""
     agent = Agent.__new__(Agent)
     agent.name = "test"
     agent.model = "m"
@@ -54,7 +83,11 @@ def make_agent(tools=None, skills=None, hooks=None, api=None):
     agent._system_prompt = None
     agent._tools = tools or []
     agent._skills = skills or []
-    agent.tools_registry = ToolRegistry.for_tools([])
+    callables = []
+    for tool in (tools or []):
+        if callable(tool):
+            callables.append(tool)
+    agent.tools_registry = ToolRegistry.for_tools(callables)
     agent.skills_registry = SkillsRegistry.for_skills([], tools_registry=agent.tools_registry)
     agent._hooks = hooks
     agent._ui = None
@@ -358,3 +391,117 @@ def test_wire_ui_falls_back_to_default_when_client_gone():
     assert not thread.is_alive()
     assert box == {"confirm": True, "text": None, "select": "b"}
     server_sock.close()
+
+
+def test_wire_ui_close_wakes_a_pending_prompt():
+    # a prompt is in flight (registered and blocking); close() must wake it with
+    # no answer so the caller falls back to the default.
+    server_sock, client_sock = socket.socketpair()
+    ui = WireUI(Wire(server_sock))
+    result = {}
+    def ask():
+        result["confirm"] = ui.confirm("ok?", default=True)
+    thread = threading.Thread(target=ask)
+    thread.start()
+    while True:                              # wait until the prompt is registered
+        with ui._lock:
+            if ui._pending: break
+    ui.close()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert result["confirm"] is True
+    server_sock.close()
+    client_sock.close()
+
+
+# --------------------------------------------------------------------------
+# control plane while a turn is in flight: STEER / INTERRUPT / mid-run PROMPT
+# --------------------------------------------------------------------------
+
+def read_until_tool_call(wire):
+    """drain events until turn 1 dispatches its tool (a TOOL_CALL event)."""
+    while True:
+        for msg in wire.recv():
+            if msg["type"] != Wire.EVENT: continue
+            if Wire.event_from_dict(msg["event"]).type == "tool_call":
+                return
+
+
+def read_to_result(wire):
+    while True:
+        for msg in wire.recv():
+            if msg["type"] == Wire.RESULT:
+                return msg["text"]
+
+
+def test_steer_over_wire_folds_in_mid_run(serve):
+    applied = threading.Event()
+    def slow_tool() -> str:
+        applied.wait(timeout=2)              # hold turn 1 until the steer is applied
+        return "tool-done"
+
+    api = ToolThenTextApi(tool_name="slow_tool")
+    agent = make_agent(tools=[slow_tool], api=api)
+    # signal once the reader applies the steer, so the tool releases deterministically
+    inner_steer = agent.steer
+    def steer_and_signal(text):
+        inner_steer(text)
+        applied.set()
+    agent.steer = steer_and_signal
+
+    wire = serve(agent)
+    wire.send_submit("do X")
+    read_until_tool_call(wire)               # turn 1's drain already happened (empty)
+    wire.send_steer("also consider Y")
+    result = read_to_result(wire)
+
+    assert result == "final"
+    seen = []
+    for m in api.turn2_messages:
+        seen.append((m["role"], m.get("content")))
+    assert ("tool", "tool-done") in seen
+    assert ("user", "also consider Y") in seen   # folded in after the tool, before turn 2
+
+
+def test_interrupt_over_wire_stops_the_run(serve):
+    applied = threading.Event()
+    def slow_tool() -> str:
+        applied.wait(timeout=2)              # hold turn 1 until the interrupt is applied
+        return "tool-done"
+
+    api = ToolThenTextApi(tool_name="slow_tool")
+    agent = make_agent(tools=[slow_tool], api=api)
+    inner_stop = agent.stop
+    def stop_and_signal():
+        inner_stop()
+        applied.set()
+    agent.stop = stop_and_signal
+
+    wire = serve(agent)
+    wire.send_submit("go")
+    read_until_tool_call(wire)
+    wire.send_interrupt()
+    result = read_to_result(wire)
+
+    assert api.calls == 1                     # the second model turn never ran
+    assert result == ""                       # partial: no content this run
+
+
+def test_prompt_answered_during_a_multi_turn_run(serve):
+    asked = {}
+    def before_tool(ctx):
+        asked["confirm"] = ctx.ui.confirm("run the tool?", default=False)
+
+    def the_tool() -> str:
+        return "tool-ran"
+
+    api = ToolThenTextApi(tool_name="the_tool")
+    agent = make_agent(tools=[the_tool],
+                       api=api,
+                       hooks=[(HookEvent.BEFORE_TOOL_CALL, before_tool)])
+    wire = serve(agent)
+    ui = ClientUI(confirm=True)
+    events, result = run_turn(wire, "go", ui=ui)
+
+    assert asked["confirm"] is True           # prompt answered while the run was in flight
+    assert result == "final"

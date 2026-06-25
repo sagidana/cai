@@ -6,20 +6,30 @@ ops to read or replace the agent's state - messages, skills, tools. The channel
 is anything with recv()/sendall() (a socket, one end of a socket pair) and is
 owned by the caller; the wire framing lives in cai.wire.Wire.
 
+serve() runs two threads: a reader that owns recv() and demuxes inbound messages,
+and a worker (the caller's thread) that runs turns and control ops serially. The
+reader handles the fast control plane while a turn is in flight - STEER folds a
+message into the running run, INTERRUPT kills it, REPLY answers a pending UI
+prompt - so these land mid-turn rather than waiting for the turn to end. Turns and
+state-touching CONTROL ops are queued to the worker, so the agent's conversation
+is only ever mutated by one thread.
+
 A served run's UI prompts travel the wire too: the agent is given a WireUI, so a
 hook calling ctx.ui.confirm/select/text/notify mid-run reaches the client as a
-PROMPT and blocks for its REPLY.
+PROMPT and blocks on a reply box the reader resolves from the matching REPLY.
 
 UnixWiredAgent bakes the transport in: it owns a UnixSocketServer and serves the
 agent over it, so a caller hands it an Agent and a path instead of wiring up the
 listener, accept, and channel themselves.
 
-Minimal by design: one message at a time, synchronous, on the caller's thread.
-Steering, interrupts, and attach/snapshot are later layers."""
+One run at a time (one conversation), one client per connection. Multi-client
+attach/snapshot are later layers."""
 from __future__ import annotations
 
 import itertools
 import logging
+import queue
+import threading
 
 from cai.agent import _tool_name
 from cai.channel import UnixSocketServer
@@ -28,6 +38,10 @@ from cai.wire import Wire
 
 
 log = logging.getLogger("cai")
+
+# worker-queue item telling the work loop to exit - same (kind, ...) shape as
+# the real items ("submit", text) / ("control", op, value).
+_STOP = ("stop",)
 
 
 def _tool_names(tools):
@@ -40,20 +54,23 @@ def _tool_names(tools):
 
 
 class WireUI(BaseUI):
-    """the served agent's UI, bound to the wire: each prompt a hook raises mid-run
-    is sent to the client as a PROMPT and blocks for the matching REPLY on the
-    same channel. a dropped client (EOF) falls back to the BaseUI default, so a
-    served run never hangs waiting for an answer that will not come.
+    """the served agent's UI, bound to the wire. each prompt a hook raises mid-run
+    is sent to the client as a PROMPT; the worker thread then blocks on a reply
+    box until the WiredAgent's reader thread resolves it from the matching REPLY.
+    close() (client gone / shutdown) wakes every pending prompt with no answer, so
+    the caller falls back to the BaseUI default and a served run never hangs.
 
-    it shares the WiredAgent's Wire (one reader per channel): a prompt fires from
-    inside a turn, while serve() is parked in that turn and not reading, so the
-    prompt reads the REPLY itself - no second reader competes for the socket."""
+    this UI never reads the channel - the reader owns recv(); it only waits on a
+    per-prompt Event the reader sets."""
 
     interactive = True
 
     def __init__(self, wire):
         self._wire = wire
         self._ids = itertools.count(1)
+        self._lock = threading.Lock()
+        self._pending = {}       # prompt id -> box {evt, value, answered}
+        self._closed = False
 
     def confirm(self, message, *, default=False, detail=""):
         answered, value = self._prompt("confirm",
@@ -92,11 +109,41 @@ class WireUI(BaseUI):
         except OSError:
             pass
 
+    def resolve(self, pid, value):
+        """called by the reader thread on a REPLY: hand the value to the waiting
+        prompt and wake it. an unknown id (already answered / timed out) is a
+        no-op."""
+        with self._lock:
+            box = self._pending.get(pid)
+            if box is None: return
+            box["value"] = value
+            box["answered"] = True
+        box["evt"].set()
+
+    def close(self):
+        """wake every pending prompt with no answer (client gone / shutdown) so
+        each caller applies its BaseUI default, and refuse new prompts."""
+        with self._lock:
+            self._closed = True
+            boxes = list(self._pending.values())
+            self._pending.clear()
+        for box in boxes:
+            box["answered"] = False
+            box["evt"].set()
+
     def _prompt(self, kind, message, *, options=None, default=None, detail="", secret=False):
-        """send a PROMPT and block reading the channel for its REPLY. returns
-        (answered, value): answered is False on a dropped client, so the caller
-        applies its own default."""
+        """send a PROMPT and block on a reply box until the reader resolves it
+        (or close() wakes it). returns (answered, value): answered is False on a
+        dropped client, so the caller applies its own default."""
         pid = str(next(self._ids))
+        box = {}
+        box["evt"] = threading.Event()
+        box["value"] = None
+        box["answered"] = False
+        with self._lock:
+            if self._closed:
+                return False, None
+            self._pending[pid] = box
         try:
             self._wire.send_prompt(pid,
                                    kind,
@@ -106,58 +153,111 @@ class WireUI(BaseUI):
                                    detail=detail,
                                    secret=secret)
         except OSError:
+            with self._lock:
+                self._pending.pop(pid, None)
             return False, None
-        while True:
-            messages = self._wire.recv()
-            if messages is None:
-                return False, None
-            for msg in messages:
-                if msg.get("type") != Wire.REPLY: continue
-                if msg.get("id") != pid: continue
-                return True, msg.get("value")
+        box["evt"].wait()
+        with self._lock:
+            self._pending.pop(pid, None)
+        if not box["answered"]:
+            return False, None
+        return True, box["value"]
 
 
 class WiredAgent:
     """wraps an Agent and serves it over a byte channel using the wire protocol.
 
-    a client sends SUBMIT messages; each one runs a turn on the wrapped agent,
-    streaming the run's Events out as EVENT messages and ending with a RESULT
-    carrying the final answer. CONTROL messages read or replace agent state
-    (get/set messages, skills, tools) and answer with a CONTROL_RESULT.
+    serve() starts a reader thread that owns recv() and demuxes inbound messages,
+    and runs a worker loop on the caller's thread:
+
+      reader (recv):  SUBMIT/CONTROL -> worker queue   (touch agent state serially)
+                      STEER -> agent.steer             (mid-run, thread-safe)
+                      INTERRUPT -> agent.stop           (mid-run, thread-safe)
+                      REPLY -> WireUI.resolve           (answer a pending prompt)
+      worker:         runs each queued turn / control op, streaming EVENTs and a
+                      final RESULT, or a CONTROL_RESULT.
 
     a turn or control op that raises is reported back (a RESULT carrying the
-    'Error:' text, or a failed CONTROL_RESULT) so one bad message ends cleanly
-    instead of tearing down the serve loop."""
+    'Error:' text, or a failed CONTROL_RESULT) so one bad message ends cleanly."""
 
     def __init__(self, agent, channel):
         self.agent = agent
         self.wire = Wire(channel)
+        self.ui = WireUI(self.wire)
         # the served agent's human is now the wire client: route its hooks' UI
-        # prompts over the channel (sharing this Wire, so a prompt reads its own
-        # REPLY while serve() is parked in the turn that raised it).
-        agent._ui = WireUI(self.wire)
+        # prompts over the channel.
+        agent._ui = self.ui
+        self._work = queue.Queue()       # ("submit", text) | ("control", op, value)
+        self._lock = threading.Lock()
+        self._closed = False
 
     def serve(self):
-        """read messages off the channel and handle each until it closes
-        (a clean EOF or the socket dropping). blocking; runs on the caller's
-        thread."""
+        """serve the agent until the channel closes. a reader thread demuxes
+        inbound messages; this (the caller's) thread is the worker. blocking."""
+        reader = threading.Thread(target=self._read_loop,
+                                  daemon=True,
+                                  name="cai-wired-reader")
+        reader.start()
+        self._work_loop()
+
+    def _read_loop(self):
+        """own recv() and route each inbound message until the channel closes."""
         try:
             while True:
                 messages = self.wire.recv()
                 if messages is None: break
                 for msg in messages:
-                    self._handle(msg)
+                    self._dispatch(msg)
         except OSError:
             pass
+        finally:
+            self._shutdown()
 
-    def _handle(self, msg):
+    def _dispatch(self, msg):
+        """route one inbound message. fast control-plane ops (steer / interrupt /
+        reply) run here on the reader thread; anything that touches agent state
+        (a turn, a control op) is queued to the worker so it stays serial."""
         kind = msg.get("type")
         if kind == Wire.SUBMIT:
-            self._run_turn(msg.get("text") or "")
+            self._work.put(("submit", msg.get("text") or ""))
             return
         if kind == Wire.CONTROL:
-            self._run_control(msg.get("op"), msg.get("value"))
+            self._work.put(("control", msg.get("op"), msg.get("value")))
             return
+        if kind == Wire.STEER:
+            self.agent.steer(msg.get("text") or "")
+            return
+        if kind == Wire.INTERRUPT:
+            self.agent.stop()
+            return
+        if kind == Wire.REPLY:
+            self.ui.resolve(msg.get("id"), msg.get("value"))
+            return
+
+    def _work_loop(self):
+        """run queued turns and control ops one at a time, until shutdown."""
+        while True:
+            item = self._work.get()
+            kind = item[0]
+            if kind == "stop": return
+
+            try:
+                if kind == "submit":
+                    self._run_turn(item[1])
+                elif kind == "control":
+                    self._run_control(item[1], item[2])
+            except OSError:
+                pass     # client gone mid-send; the reader's shutdown stops us
+
+    def _shutdown(self):
+        """the channel closed: abort an in-flight turn, wake any pending prompt,
+        and tell the worker to exit."""
+        with self._lock:
+            if self._closed: return
+            self._closed = True
+        self.agent.stop()
+        self.ui.close()
+        self._work.put(_STOP)
 
     def _run_turn(self, text):
         """run one turn on the wrapped agent, relaying each Event to the channel

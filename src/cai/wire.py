@@ -14,6 +14,8 @@ remote agent:
   agent  -> client  CONTROL_RESULT {ok, value, error}   the op's answer
   agent  -> client  PROMPT  {id, kind, ...}   a UI prompt a hook raised
   client -> agent   REPLY   {id, value}   the human's answer to a PROMPT
+  client -> agent   STEER   {text}        fold a message into the running turn
+  client -> agent   INTERRUPT             abort the in-flight run
 
   w = Wire(channel)
   w.send_submit("hello")              # client side
@@ -32,10 +34,13 @@ channel itself until its REPLY arrives. Skills and tools cross as name lists; a
 function tool reads back by name but cannot be re-added from a name (a callable
 does not fit in JSON).
 
-Steering, interrupts, and attach/snapshot are later layers."""
+send() is thread-safe (a lock guards the channel write), because a served agent
+sends from both its worker thread (events/result/prompts) and its reader thread
+(control results). attach/snapshot are later layers."""
 from __future__ import annotations
 
 import json
+import threading
 
 from cai.events import Event
 
@@ -53,10 +58,13 @@ class Wire:
     CONTROL_RESULT = "control_result"
     PROMPT = "prompt"
     REPLY = "reply"
+    STEER = "steer"
+    INTERRUPT = "interrupt"
 
     def __init__(self, channel):
         self.channel = channel
         self._buf = b""
+        self._send_lock = threading.Lock()
 
     # --- outbound: build a typed message, frame it, write it to the channel ---
     def send_event(self, event):
@@ -75,6 +83,17 @@ class Wire:
         msg = {}
         msg["type"] = self.SUBMIT
         msg["text"] = text
+        self.send(msg)
+
+    def send_steer(self, text):
+        msg = {}
+        msg["type"] = self.STEER
+        msg["text"] = text
+        self.send(msg)
+
+    def send_interrupt(self):
+        msg = {}
+        msg["type"] = self.INTERRUPT
         self.send(msg)
 
     def send_control(self, op, value=None):
@@ -122,8 +141,11 @@ class Wire:
         self.send(msg)
 
     def send(self, message):
-        """frame one message dict and write it to the channel."""
-        self.channel.sendall(self.encode(message))
+        """frame one message dict and write it to the channel. thread-safe: a
+        served agent sends from both its worker and reader threads."""
+        data = self.encode(message)
+        with self._send_lock:
+            self.channel.sendall(data)
 
     def control(self, op, value=None):
         """client side: send a control request and block for its reply,
