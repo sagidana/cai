@@ -21,15 +21,20 @@ through via HookContext.ui; None means no human is reachable (NULL_UI). Serving/
 attach, saving, and cloning are later layers."""
 from __future__ import annotations
 
+import logging
 import secrets
 import string
 
 from cai import config
+from cai import wire
 from cai.api import OpenAiApi
 from cai.llm import call_llm
 from cai.tools import ToolRegistry
 from cai.skills import SkillsRegistry
 from cai.hooks import HooksRegistry
+
+
+log = logging.getLogger("cai")
 
 
 def _combine_prompts(base, skills_prompt):
@@ -260,3 +265,51 @@ class Agent:
     def __exit__(self, *exc):
         self.close()
         return False
+
+
+class WiredAgent:
+    """wraps an Agent and serves it over a byte channel using the wire protocol.
+
+    a client sends SUBMIT messages; each one runs a turn on the wrapped agent,
+    streaming the run's Events out as EVENT messages and ending with a RESULT
+    carrying the final answer. the channel is anything with recv()/sendall() -
+    a socket, one end of a socket pair - and is owned by the caller.
+
+    minimal by design: one turn at a time, synchronous, on the caller's thread.
+    steering, interrupts, UI prompts, and attach/snapshot are later layers. a
+    turn that raises is reported back as a RESULT carrying the 'Error:' text, so
+    one bad turn ends cleanly instead of tearing down the serve loop."""
+
+    def __init__(self, agent, channel):
+        self.agent = agent
+        self.wire = wire.Wire(channel)
+
+    def serve(self):
+        """read messages off the channel and handle each until it closes
+        (a clean EOF or the socket dropping). blocking; runs on the caller's
+        thread."""
+        try:
+            while True:
+                messages = self.wire.recv()
+                if messages is None: break
+                for msg in messages:
+                    self._handle(msg)
+        except OSError:
+            pass
+
+    def _handle(self, msg):
+        if msg.get("type") == wire.Wire.SUBMIT:
+            self._run_turn(msg.get("text") or "")
+
+    def _run_turn(self, text):
+        """run one turn on the wrapped agent, relaying each Event to the channel
+        and closing with the final answer (or an 'Error:' string on failure)."""
+        try:
+            run = self.agent.run(text)
+            for event in run:
+                self.wire.send_event(event)
+            result = run.text
+        except Exception as e:
+            log.exception("wired turn failed")
+            result = f"Error: {type(e).__name__}: {e}"
+        self.wire.send_result(result)
