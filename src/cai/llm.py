@@ -28,6 +28,7 @@ import logging
 
 from cai.events import Event, EventType
 from cai.hooks import HookContext, HookEvent, HooksRegistry, ToolCall
+from cai.ui import NULL_UI
 
 
 log = logging.getLogger("cai")
@@ -139,6 +140,7 @@ def _handle_tool_calls(tool_calls,
                        hooks,
                        model,
                        config,
+                       ui,
                        extra,
                        usage):
     """Append the assistant turn carrying every call, then run each tool:
@@ -189,6 +191,7 @@ def _handle_tool_calls(tool_calls,
                                messages=messages,
                                model=model,
                                config=config,
+                               ui=ui,
                                usage=usage,
                                tool_call=tool_call,
                                extra=extra)
@@ -220,6 +223,7 @@ def _handle_tool_calls(tool_calls,
                                   messages=messages,
                                   model=model,
                                   config=config,
+                                  ui=ui,
                                   meta={'name': name, 'id': call_id},
                                   extra=extra)
         hooks.fire(HookEvent.MESSAGES_MUTATED, mutated_ctx)
@@ -228,6 +232,7 @@ def _handle_tool_calls(tool_calls,
                                 messages=messages,
                                 model=model,
                                 config=config,
+                                ui=ui,
                                 usage=usage,
                                 tool_call=tool_call,
                                 content=result,
@@ -242,6 +247,7 @@ def call_llm(messages,
              tools=None,
              tools_dispatch=None,
              hooks=None,
+             ui=None,
              system_prompt=None,
              max_steps=None,
              reasoning_effort=None,
@@ -256,8 +262,11 @@ def call_llm(messages,
     tools      - JSON tool schemas sent to the model (None disables tools).
     tools_dispatch - callable(name, args_dict) -> result, runs one tool.
     hooks      - a HooksRegistry, or None for no hooks.
+    ui         - a UI for hooks to prompt the human, or None for NULL_UI.
     Returns the final assistant text (as the generator's return value)."""
     hooks = _as_registry(hooks)
+    if ui is None:
+        ui = NULL_UI
     if not tools:
         tools = None  # falsy -> the api omits the tools field entirely
 
@@ -295,6 +304,7 @@ def call_llm(messages,
                                     messages=messages,
                                     model=model,
                                     config=config,
+                                    ui=ui,
                                     usage=usage,
                                     content=content,
                                     extra=extra)
@@ -313,6 +323,7 @@ def call_llm(messages,
                                   messages=messages,
                                   model=model,
                                   config=config,
+                                  ui=ui,
                                   usage=usage,
                                   content=content,
                                   extra=extra)
@@ -327,6 +338,7 @@ def call_llm(messages,
                                       hooks,
                                       model,
                                       config,
+                                      ui,
                                       extra,
                                       usage)
 
@@ -334,6 +346,7 @@ def call_llm(messages,
                                messages=messages,
                                model=model,
                                config=config,
+                               ui=ui,
                                usage=usage,
                                extra=extra)
         hooks.fire(HookEvent.AFTER_TURN, turn_ctx)

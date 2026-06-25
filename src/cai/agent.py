@@ -16,7 +16,9 @@ unions its tools into the registry and folds its prompt into the system prompt.
 Only the tools you pass (plus those skills pull in) are sent to the model. MCP
 servers are spawned lazily on first use. `hooks=` is a list of (event, fn) pairs
 fired through the run (Run turns it into the internal HooksRegistry that call_llm
-wants). Serving/attach, saving, and cloning are later layers."""
+wants). `ui=` is the human-interaction surface (cai.ui.UI) those hooks prompt
+through via HookContext.ui; None means no human is reachable (NULL_UI). Serving/
+attach, saving, and cloning are later layers."""
 from __future__ import annotations
 
 from cai import config
@@ -58,6 +60,7 @@ class Run:
                  tools=None,
                  skills=None,
                  hooks=None,
+                 ui=None,
                  tools_registry=None,
                  skills_registry=None,
                  stream=True):
@@ -68,6 +71,7 @@ class Run:
         self.tools = tools                        # callables/'<mcp>__<tool>' strings (standalone)
         self.skills = skills                      # skill names to activate (standalone)
         self.hooks = hooks                        # [(event, fn), ...] or None; translated at run time
+        self.ui = ui                              # UI hooks prompt through; None -> NULL_UI in call_llm
         self.tools_registry = tools_registry      # a prebuilt ToolRegistry (an Agent passes its own)
         self.skills_registry = skills_registry    # the Agent's SkillsRegistry (for the live prompt)
         # we own (and must close) a registry only if we build it ourselves; one
@@ -112,6 +116,7 @@ class Run:
                        tools=schemas,
                        tools_dispatch=dispatch,
                        hooks=hooks_registry,
+                       ui=self.ui,
                        stream=self.stream)
         try:
             while True:
@@ -155,7 +160,8 @@ class Agent:
                  system_prompt=None,
                  tools=None,
                  skills=None,
-                 hooks=None):
+                 hooks=None,
+                 ui=None):
         cfg = config.load_config()
 
         if model is None: model = cfg.model
@@ -170,6 +176,7 @@ class Agent:
         self.tools_registry = ToolRegistry.for_tools(self._tools)
         self.skills_registry = SkillsRegistry.for_skills(self._skills, tools_registry=self.tools_registry)
         self._hooks = hooks   # [(event, fn), ...] or None; forwarded to each Run as-is
+        self._ui = ui         # UI hooks prompt through; forwarded to each Run as-is
         self.messages = []
 
     @property
@@ -219,6 +226,7 @@ class Agent:
                    self.api,
                    system_prompt=self._system_prompt,
                    hooks=self._hooks,
+                   ui=self._ui,
                    tools_registry=self.tools_registry,
                    skills_registry=self.skills_registry)
 

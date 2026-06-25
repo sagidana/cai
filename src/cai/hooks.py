@@ -8,14 +8,17 @@ hook returning a str replaces the answer) or ignore them. An exception in a
 hook is logged and skipped, so one bad hook never breaks the turn.
 
 HookContext is the one shape every hook receives; ToolCall is the slice it
-carries for the *_tool_call events. Fields that don't apply to the firing
-event are None."""
+carries for the *_tool_call events. ctx.ui is the live frontend during a run
+(so a hook can prompt the human) and a no-op UI otherwise. Fields that don't
+apply to the firing event are None."""
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
 from enum import Enum
 from typing import Mapping, Optional
+
+from cai.ui import UI, NULL_UI
 
 
 log = logging.getLogger("cai")
@@ -56,6 +59,7 @@ class HookContext:
     messages: list
     model: str
     config: Optional[Mapping] = None
+    ui: UI = NULL_UI
     usage: Optional[dict] = None
     tool_call: Optional[ToolCall] = None
     content: Optional[str] = None
