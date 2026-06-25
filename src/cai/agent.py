@@ -69,7 +69,7 @@ def _tool_name(tool):
     return tool
 
 
-class _Run:
+class RunHandle:
     """the handle Agent.run() returns: a lazy, single-consumption stream over one
     turn on the agent's live conversation. iterate it for Event objects; once it
     drains, `text` holds the final answer and the agent's `messages` have grown,
@@ -128,8 +128,11 @@ class Agent:
                  temperature=None,
                  max_steps=None,
                  stream=True):
-        cfg = config.load_config()
-
+        # only read config/key for a default the caller didn't supply - a child
+        # agent given both a model and an api never touches the disk.
+        cfg = None
+        if model is None or api is None:
+            cfg = config.load_config()
         if model is None: model = cfg.model
         if name is None: name = _new_name()
         if api is None: api = OpenAiApi(cfg.base_url, config.load_api_key())
@@ -162,6 +165,18 @@ class Agent:
         # in-flight (or next) run as user turns at each turn boundary.
         self._steer = SteerQueue()
         self.messages = []
+        # SubAgent handles for children launched via the sub-agent tools - both
+        # active and dead; they are never pruned (a wait_agent can still read a
+        # finished child's result).
+        self.children = []
+        # a child agent is an in-process layer that needs a live reference to
+        # this Agent, so the 'subagents' skill's tools are bound here at
+        # construction rather than spawned as an MCP subprocess (which could not
+        # reach us). lazy import: subagent imports Agent in turn.
+        if "subagents" in self._skills:
+            from cai.subagent import subagent_tools
+            for tool in subagent_tools(self):
+                self.tools_registry.add(tool)
 
     @property
     def system_prompt(self):
@@ -267,7 +282,7 @@ class Agent:
             self.interrupt.set()
         if prompt is not None:
             self.messages.append({"role": "user", "content": prompt})
-        return _Run(self, self.stream)
+        return RunHandle(self, self.stream)
 
     def close(self):
         """close the tool registry, terminating any live MCP server connections
@@ -282,7 +297,7 @@ class Agent:
         return False
 
 
-class Run(_Run):
+class Run(RunHandle):
     """one-shot sugar: build a throwaway Agent from these params and stream a
     single turn over `messages` (which must already include the prompt turn). the
     surface is the run handle's - iterate for Events, then read `text` - and

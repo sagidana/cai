@@ -85,6 +85,7 @@ def bare_agent(tools_registry, api):
     agent._killed = threading.Event()
     agent._steer = SteerQueue()
     agent.messages = []
+    agent.children = []
     return agent
 
 

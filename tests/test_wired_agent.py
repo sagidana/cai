@@ -99,6 +99,7 @@ def make_agent(tools=None, skills=None, hooks=None, api=None):
     agent._killed = threading.Event()
     agent._steer = SteerQueue()
     agent.messages = []
+    agent.children = []
     return agent
 
 

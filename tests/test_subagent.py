@@ -1,0 +1,170 @@
+"""Tests for cai.subagent - launching, polling, and killing sub-agents.
+
+Fully offline: the child agent's model is a FakeApi that streams canned content,
+and each child is served over a real unix socket on background threads, driven by
+the parent as a wire client. No network, no config, no API key.
+"""
+import time
+import threading
+
+from cai.agent import Agent, _tool_name
+from cai.subagent import _inherit_tools
+from cai.subagent import _inherit_skills
+from cai.subagent import _launch_agent
+from cai.subagent import _wait_agent
+from cai.subagent import _kill_agent
+
+
+class FakeApi:
+    """streams `chunks` as one turn's answer (no tool calls -> final)."""
+
+    def __init__(self, chunks=None):
+        self.chunks = chunks
+        if self.chunks is None:
+            self.chunks = ["ok"]
+
+    def chat(self, messages, model, **kwargs):
+        chunks = self.chunks
+        def gen():
+            for chunk in chunks:
+                yield (chunk, None, None, {})
+        return gen()
+
+
+class BlockingApi:
+    """streams empty deltas forever, so a run stays in flight until interrupted.
+    `started` fires once the model call begins, so a test can wait for the child
+    to actually be running before it kills it."""
+
+    def __init__(self):
+        self.started = threading.Event()
+
+    def chat(self, messages, model, **kwargs):
+        started = self.started
+        def gen():
+            started.set()
+            while True:
+                yield ("", None, None, {})
+                time.sleep(0.005)
+        return gen()
+
+
+def make_parent(api, tools=None, skills=None):
+    """a parent Agent without config/network (bypass __init__), carrying just the
+    state the sub-agent tools read: model, api, tools, skills, hooks, children."""
+    parent = Agent.__new__(Agent)
+    parent.name = "parent"
+    parent.model = "m"
+    parent.api = api
+    parent._system_prompt = "PARENT PROMPT"
+    parent._tools = tools or []
+    parent._skills = skills or ["subagents"]
+    parent._hooks = None
+    parent.children = []
+    return parent
+
+
+def _tool_names(tools):
+    names = []
+    for tool in tools:
+        names.append(_tool_name(tool))
+    return names
+
+
+# --------------------------------------------------------------------------
+# reduce-only inheritance
+# --------------------------------------------------------------------------
+
+def foo(x: str) -> str:
+    return x
+
+
+def bar() -> str:
+    return "b"
+
+
+def test_inherit_tools_is_reduce_only_and_keeps_request_order():
+    parent = make_parent(FakeApi(), tools=[foo, bar])
+    assert _inherit_tools(parent, ["foo", "ghost"]) == [foo]
+    assert _inherit_tools(parent, ["bar", "foo"]) == [bar, foo]
+    assert _inherit_tools(parent, None) == []
+
+
+def test_inherit_skills_is_reduce_only():
+    parent = make_parent(FakeApi(), skills=["subagents", "fs"])
+    assert _inherit_skills(parent, ["fs", "nope"]) == ["fs"]
+    assert _inherit_skills(parent, None) == []
+
+
+# --------------------------------------------------------------------------
+# launch -> wait
+# --------------------------------------------------------------------------
+
+def test_launch_registers_a_child_and_wait_returns_its_answer():
+    parent = make_parent(FakeApi(chunks=["done"]))
+    message = _launch_agent(parent, "do the thing", "worker")
+    assert "worker" in message
+    assert len(parent.children) == 1
+    assert parent.children[0].id == "worker"
+    assert _wait_agent(parent, "worker", timeout=5) == "done"
+
+
+def test_child_tools_are_restricted_to_the_requested_subset():
+    parent = make_parent(FakeApi(chunks=["k"]), tools=[foo, bar])
+    _launch_agent(parent, "t", "w", tools=["foo", "ghost"])
+    assert _wait_agent(parent, "w", timeout=5) == "k"
+    child = parent.children[0].agent
+    assert _tool_names(child.get_tools()) == ["foo"]
+
+
+def test_wait_on_unknown_agent_is_an_error():
+    parent = make_parent(FakeApi())
+    out = _wait_agent(parent, "nope", timeout=1)
+    assert "no sub-agent" in out
+
+
+# --------------------------------------------------------------------------
+# timeout + kill
+# --------------------------------------------------------------------------
+
+def test_wait_timeout_reports_still_running():
+    api = BlockingApi()
+    parent = make_parent(api)
+    _launch_agent(parent, "loop forever", "runner")
+    assert api.started.wait(5)
+    out = _wait_agent(parent, "runner", timeout=1)
+    assert "still running" in out
+    _kill_agent(parent, "runner")
+    _wait_agent(parent, "runner", timeout=5)
+
+
+def test_kill_winds_a_running_child_down():
+    api = BlockingApi()
+    parent = make_parent(api)
+    _launch_agent(parent, "loop forever", "runner")
+    assert api.started.wait(5)
+    out = _kill_agent(parent, "runner")
+    assert "Killing" in out
+    assert _wait_agent(parent, "runner", timeout=5) == ""
+
+
+# --------------------------------------------------------------------------
+# bootstrap via the 'subagents' skill on a real Agent
+# --------------------------------------------------------------------------
+
+def test_subagents_skill_bootstraps_the_tools():
+    agent = Agent(model="m", api=FakeApi(), skills=["subagents"])
+    assert agent.tools_registry.has("launch_agent")
+    assert agent.tools_registry.has("wait_agent")
+    assert agent.tools_registry.has("kill_agent")
+    assert agent.children == []
+    agent.close()
+
+
+def test_bootstrapped_tools_drive_a_child_end_to_end():
+    agent = Agent(model="m", api=FakeApi(chunks=["hi"]), skills=["subagents"])
+    out = agent.tools_registry.dispatch("launch_agent", {"prompt": "p", "name": "c1"})
+    assert "c1" in out
+    result = agent.tools_registry.dispatch("wait_agent", {"agent_id": "c1", "timeout": 5})
+    assert result == "hi"
+    agent.close()
