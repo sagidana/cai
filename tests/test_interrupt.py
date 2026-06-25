@@ -78,6 +78,7 @@ def bare_agent(tools_registry, api):
     agent._hooks = None
     agent._ui = None
     agent.interrupt = threading.Event()
+    agent._killed = threading.Event()
     agent._steer = SteerQueue()
     agent.messages = []
     return agent
@@ -171,3 +172,31 @@ def test_run_clears_a_stale_interrupt():
     run.wait()
     assert run.text == "hello"
     assert agent.api.calls == 1
+
+
+# --------------------------------------------------------------------------
+# Agent.kill() - the permanent stop
+# --------------------------------------------------------------------------
+
+def test_kill_from_a_tool_halts_run_and_retires_agent():
+    holder = {}
+    def killer() -> str:
+        holder["agent"].kill()
+        return "killed from inside the tool"
+
+    agent = bare_agent(ToolRegistry.for_tools([killer]), ToolThenTextApi())
+    holder["agent"] = agent
+    run = agent.run("go")
+    run.wait()
+    assert agent.api.calls == 1                  # the second model turn never ran
+    assert run.text == ""
+    assert agent.killed is True
+
+
+def test_killed_agent_refuses_further_runs():
+    agent = bare_agent(ToolRegistry.for_tools([]), CountApi(chunks=["hello"]))
+    agent.kill()
+    run = agent.run("hi")                        # killed -> aborts at once
+    run.wait()
+    assert run.text == ""
+    assert agent.api.calls == 0

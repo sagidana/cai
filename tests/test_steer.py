@@ -61,6 +61,7 @@ def bare_agent(tools_registry, api):
     agent._hooks = None
     agent._ui = None
     agent.interrupt = threading.Event()
+    agent._killed = threading.Event()
     agent._steer = SteerQueue()
     agent.messages = []
     return agent

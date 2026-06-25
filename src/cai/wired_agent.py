@@ -177,8 +177,10 @@ class WiredAgent:
       worker:         runs each queued turn / control op, streaming EVENTs and a
                       final RESULT, or a CONTROL_RESULT.
 
-    a turn or control op that raises is reported back (a RESULT carrying the
-    'Error:' text, or a failed CONTROL_RESULT) so one bad message ends cleanly."""
+    the 'kill' control op retires the agent and ends the serve loop (the reader
+    fires agent.kill() at once so it bites a running turn). a turn or control op
+    that raises is reported back (a RESULT carrying the 'Error:' text, or a
+    failed CONTROL_RESULT) so one bad message ends cleanly."""
 
     def __init__(self, agent, channel):
         self.agent = agent
@@ -222,7 +224,13 @@ class WiredAgent:
             self._work.put(("submit", msg.get("text") or ""))
             return
         if kind == Wire.CONTROL:
-            self._work.put(("control", msg.get("op"), msg.get("value")))
+            op = msg.get("op")
+            if op == "kill":
+                # kill must bite a running turn now, not wait its turn in the
+                # worker queue - so retire the agent here on the reader thread.
+                # the queued op still runs, to ack and end the serve loop.
+                self.agent.kill()
+            self._work.put(("control", op, msg.get("value")))
             return
         if kind == Wire.STEER:
             self.agent.steer(msg.get("text") or "")
@@ -246,6 +254,9 @@ class WiredAgent:
                     self._run_turn(item[1])
                 elif kind == "control":
                     self._run_control(item[1], item[2])
+                    if item[1] == "kill":
+                        # the kill op has been acked; end the serve loop.
+                        self._shutdown()
             except OSError:
                 pass     # client gone mid-send; the reader's shutdown stops us
 
@@ -286,6 +297,9 @@ class WiredAgent:
         """run one control op, returning (ok, value, error). getters carry their
         value; setters return ok with no value. tools/skills are name lists."""
         agent = self.agent
+        if op == "kill":
+            agent.kill()
+            return True, None, None
         if op == "get_messages":
             return True, agent.get_messages(), None
         if op == "set_messages":

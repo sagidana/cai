@@ -206,6 +206,9 @@ class Agent:
         # set from another thread (stop()) to abort the in-flight run; each run()
         # clears it so a fresh run starts un-interrupted.
         self.interrupt = threading.Event()
+        # set by kill(): a harder stop that also retires the agent - it aborts
+        # the in-flight run and refuses further ones. never cleared.
+        self._killed = threading.Event()
         # messages pushed from another thread (steer()) and folded into the
         # in-flight (or next) run as user turns at each turn boundary.
         self._steer = SteerQueue()
@@ -261,6 +264,16 @@ class Agent:
         turns, or between streamed chunks). safe to call from another thread."""
         self.interrupt.set()
 
+    def kill(self):
+        """retire the agent: abort the in-flight run and refuse further ones.
+        unlike stop(), this is permanent. safe to call from another thread."""
+        self._killed.set()
+        self.interrupt.set()
+
+    @property
+    def killed(self):
+        return self._killed.is_set()
+
     def steer(self, text):
         """queue a steering message; the in-flight (or next) run folds it in as a
         user turn at its next turn boundary. safe to call from another thread."""
@@ -271,6 +284,10 @@ class Agent:
         agent's live conversation. Iterate it to stream events; `messages`
         keeps growing, so the next run continues this conversation."""
         self.interrupt.clear()
+        if self._killed.is_set():
+            # a killed agent never runs again: re-arm the interrupt so the run
+            # winds down at once instead of calling the model.
+            self.interrupt.set()
         if prompt is not None:
             self.messages.append({"role": "user", "content": prompt})
         return Run(self.messages,

@@ -92,6 +92,7 @@ def make_agent(tools=None, skills=None, hooks=None, api=None):
     agent._hooks = hooks
     agent._ui = None
     agent.interrupt = threading.Event()
+    agent._killed = threading.Event()
     agent._steer = SteerQueue()
     agent.messages = []
     return agent
@@ -505,3 +506,63 @@ def test_prompt_answered_during_a_multi_turn_run(serve):
 
     assert asked["confirm"] is True           # prompt answered while the run was in flight
     assert result == "final"
+
+
+# --------------------------------------------------------------------------
+# the kill control op: retire the agent and end the serve loop
+# --------------------------------------------------------------------------
+
+def test_kill_control_op_retires_agent_and_ends_serve():
+    agent = make_agent(api=FakeApi(chunks=["hi"]))
+    server_sock, client_sock = socket.socketpair()
+    thread = threading.Thread(target=WiredAgent(agent, server_sock).serve, daemon=True)
+    thread.start()
+    wire = Wire(client_sock)
+
+    assert run_turn_over(wire, "first") == "hi"     # a normal turn first
+    ok, value, error = wire.control("kill")
+    assert ok is True
+    assert agent.killed is True
+
+    thread.join(timeout=5)
+    assert not thread.is_alive()                    # serve ended after kill
+    client_sock.close()
+    server_sock.close()
+
+
+def test_kill_during_a_run_aborts_it():
+    applied = threading.Event()
+    def slow_tool() -> str:
+        applied.wait(timeout=2)                     # hold turn 1 until kill is applied
+        return "tool-done"
+
+    api = ToolThenTextApi(tool_name="slow_tool")
+    agent = make_agent(tools=[slow_tool], api=api)
+    inner_kill = agent.kill
+    def kill_and_signal():
+        inner_kill()
+        applied.set()
+    agent.kill = kill_and_signal
+
+    server_sock, client_sock = socket.socketpair()
+    thread = threading.Thread(target=WiredAgent(agent, server_sock).serve, daemon=True)
+    thread.start()
+    wire = Wire(client_sock)
+
+    wire.send_submit("go")
+    read_until_tool_call(wire)
+    wire.send_control("kill")
+    # drain: a partial RESULT for the aborted turn, then the CONTROL_RESULT ok
+    killed_ok = None
+    while killed_ok is None:
+        for msg in wire.recv():
+            if msg["type"] == Wire.CONTROL_RESULT:
+                killed_ok = msg["ok"]
+
+    assert api.calls == 1                           # the second model turn never ran
+    assert killed_ok is True
+    assert agent.killed is True
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    client_sock.close()
+    server_sock.close()
