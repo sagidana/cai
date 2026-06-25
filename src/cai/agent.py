@@ -21,6 +21,9 @@ through via HookContext.ui; None means no human is reachable (NULL_UI). Serving/
 attach, saving, and cloning are later layers."""
 from __future__ import annotations
 
+import secrets
+import string
+
 from cai import config
 from cai.api import OpenAiApi
 from cai.llm import call_llm
@@ -40,6 +43,19 @@ def _combine_prompts(base, skills_prompt):
     if not parts:
         return None
     return "\n\n".join(parts)
+
+
+_NAME_ALPHABET = string.digits + "abcdef"
+
+
+def _new_name():
+    """a git-commit-style short id: 7 lowercase hex chars, drawn the way the
+    reference names its session files. used when an Agent is built without an
+    explicit name."""
+    name = ""
+    for _ in range(7):
+        name += secrets.choice(_NAME_ALPHABET)
+    return name
 
 
 def _tool_name(tool):
@@ -156,6 +172,7 @@ class Run:
 class Agent:
     def __init__(self,
                  *,
+                 name=None,
                  model=None,
                  system_prompt=None,
                  tools=None,
@@ -165,7 +182,9 @@ class Agent:
         cfg = config.load_config()
 
         if model is None: model = cfg.model
+        if name is None: name = _new_name()
 
+        self.name = name
         self.model = model
         self.api = OpenAiApi(cfg.base_url, config.load_api_key())
         self._system_prompt = system_prompt   # base; combined with skills on demand
