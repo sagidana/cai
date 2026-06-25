@@ -20,3 +20,9 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# builtins/ holds drop-in MCP servers (*.py, spawned as scripts) and skill files
+# (*.md). they live beside the package but are not importable modules, so they
+# must be declared as package data or a non-editable install drops them.
+[tool.setuptools.package-data]
+cai = ["builtins/tools/*.py", "builtins/skills/*.md"]

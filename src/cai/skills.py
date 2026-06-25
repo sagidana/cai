@@ -127,6 +127,19 @@ class SkillsRegistry:
             registry.add(name)
         return registry
 
+    @classmethod
+    def available_skills(cls):
+        """every skill name available to activate: the *.md stems in the user's
+        skills dir and the builtins, deduped (a user file shadows a builtin) and
+        sorted. a filesystem scan only - no skill is loaded."""
+        names = set()
+        for directory in (skills_dir(), builtin_skills_dir()):
+            if not os.path.isdir(directory): continue
+            for filename in sorted(os.listdir(directory)):
+                if not filename.endswith(".md"): continue
+                names.add(filename[:-len(".md")])
+        return sorted(names)
+
     def add(self, name):
         """activate a skill (and, first, the skills it builds on), unioning its
         tools into the tool registry. already-active skills are a no-op."""

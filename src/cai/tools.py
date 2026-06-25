@@ -232,30 +232,33 @@ class ToolRegistry:
 
     @classmethod
     def available_tools(cls):
-        """discover every tool exposed by every MCP server in
-        ~/.config/cai/mcps/, returned as a flat list of '<mcp_name>__<tool_name>'
-        names (the form `tools=` / for_tools accept). each server is spawned
-        briefly to list its tools and then closed - nothing is left running. a
-        server that fails to start is logged and skipped."""
+        """discover every tool exposed by every MCP server in the user's mcps dir
+        and the builtins, as a flat list of '<mcp_name>__<tool_name>' names (the
+        form `tools=` / for_tools accept). each server is spawned briefly to list
+        its tools and then closed - nothing is left running. a user file shadows
+        a builtin of the same name; a server that fails to start is logged and
+        skipped."""
         names = []
-        directory = mcps_dir()
-        if not os.path.isdir(directory):
-            return names
-        for filename in sorted(os.listdir(directory)):
-            if not filename.endswith(".py"): continue
-            if filename.startswith("_"): continue
-            path = os.path.join(directory, filename)
-            label = filename[:-len(".py")]
-            server = None
-            try:
-                server = LocalMCPServer([sys.executable, path], label)
-                for tool in server.list_tools():
-                    names.append(f"{label}__{tool['name']}")
-            except Exception as e:
-                log.error("available_tools: %r failed: %s", path, e)
-            finally:
-                if server is not None:
-                    server.close()
+        seen_labels = set()
+        for directory in (mcps_dir(), builtin_tools_dir()):
+            if not os.path.isdir(directory): continue
+            for filename in sorted(os.listdir(directory)):
+                if not filename.endswith(".py"): continue
+                if filename.startswith("_"): continue
+                label = filename[:-len(".py")]
+                if label in seen_labels: continue   # user file shadows a builtin
+                seen_labels.add(label)
+                path = os.path.join(directory, filename)
+                server = None
+                try:
+                    server = LocalMCPServer([sys.executable, path], label)
+                    for tool in server.list_tools():
+                        names.append(f"{label}__{tool['name']}")
+                except Exception as e:
+                    log.error("available_tools: %r failed: %s", path, e)
+                finally:
+                    if server is not None:
+                        server.close()
         return names
 
     def register_function(self, fn):

@@ -80,6 +80,9 @@ class Run:
                  ui=None,
                  interrupt=None,
                  steer=None,
+                 reasoning_effort=None,
+                 temperature=None,
+                 max_steps=None,
                  tools_registry=None,
                  skills_registry=None,
                  stream=True):
@@ -93,6 +96,9 @@ class Run:
         self.ui = ui                              # UI hooks prompt through; None -> NULL_UI in call_llm
         self.interrupt = interrupt                # threading.Event to abort the run; None -> uninterruptible
         self.steer = steer                        # callable() -> pending steer texts; None -> no steering
+        self.reasoning_effort = reasoning_effort  # forwarded to call_llm; None -> model default
+        self.temperature = temperature            # forwarded to call_llm; None -> model default
+        self.max_steps = max_steps                # forwarded to call_llm; None -> uncapped
         self.tools_registry = tools_registry      # a prebuilt ToolRegistry (an Agent passes its own)
         self.skills_registry = skills_registry    # the Agent's SkillsRegistry (for the live prompt)
         # we own (and must close) a registry only if we build it ourselves; one
@@ -140,6 +146,9 @@ class Run:
                        ui=self.ui,
                        interrupt=self.interrupt,
                        steer=self.steer,
+                       reasoning_effort=self.reasoning_effort,
+                       temperature=self.temperature,
+                       max_steps=self.max_steps,
                        stream=self.stream)
         try:
             while True:
