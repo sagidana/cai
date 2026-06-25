@@ -82,10 +82,6 @@ def build_parser():
     parser.add_argument("--system-prompt",
                         default=None,
                         help="system prompt text")
-    parser.add_argument("--system-prompt-file",
-                        default=None,
-                        metavar="PATH",
-                        help="read the system prompt from a file")
     skill_arg = parser.add_argument("--skill",
                                     nargs="+",
                                     default=[],
@@ -146,15 +142,7 @@ def _resolve_prompt(args, dashdash_prompt, parser):
     return dashdash_prompt
 
 
-def _resolve_system_prompt(args, parser):
-    if args.system_prompt and args.system_prompt_file:
-        parser.error("--system-prompt and --system-prompt-file are mutually exclusive")
-    if args.system_prompt_file:
-        try:
-            with open(args.system_prompt_file) as f:
-                return f.read()
-        except OSError as e:
-            parser.error(f"cannot read --system-prompt-file: {e}")
+def _resolve_system_prompt(args):
     return args.system_prompt
 
 
@@ -255,7 +243,7 @@ def main(argv=None):
         return 1
 
     prompt = _resolve_prompt(args, dashdash_prompt, parser)
-    system_prompt = _resolve_system_prompt(args, parser)
+    system_prompt = _resolve_system_prompt(args)
     messages = _build_messages(args, prompt, parser)
     if not messages:
         parser.error("no prompt: pass -p/--prompt, a prompt after '--', --file, or piped stdin")
