@@ -17,6 +17,7 @@ Minimal by design: the only commands are :q/:quit and :clear, and no overlays
 beyond the core loop are wired yet. Model/config/messages/tools pickers and
 tool-approval gating are added in later layers.
 """
+import os
 import queue
 import threading
 import time
@@ -24,15 +25,22 @@ import time
 from cai import usage
 from cai.events import EventType
 from cai.screen import Screen
+from cai.session import SessionsRegistry
 
 
 # command palette (Ctrl-P) and command-mode (:) completion entries.
 _PALETTE_COMMANDS = [
     ("models", "switch the model (pin favorites)"),
     ("messages", "view / edit / delete the conversation"),
+    ("sessions", "load a saved session"),
+    ("save", "save the session (optional path)"),
+    ("load", "load a session file (path)"),
     ("clear", "clear the conversation view"),
     ("quit", "exit the interactive session"),
 ]
+# commands that take an argument: picking them in the palette pre-fills command
+# mode (':save ') instead of dispatching immediately.
+_PALETTE_ARG_COMMANDS = ("save", "load")
 
 # how often the status thread resamples the signals and repaints the line.
 _REFRESH_INTERVAL = 0.1
@@ -350,6 +358,93 @@ def _open_models(screen, agent, status, registry):
         status.set_model(picked)
 
 
+def _replay_messages(screen, messages):
+    """write a loaded conversation into the (cleared) viewport so the user sees
+    what they switched to. only user/assistant turns are rendered."""
+    for message in messages:
+        role = message.get("role")
+        content = message.get("content")
+        if not isinstance(content, str):
+            content = str(content)
+        if role == "user":
+            screen.write(f"> {content}\n\n", kind=Screen.USER)
+        elif role == "assistant":
+            screen.write(content + "\n\n", kind=Screen.LLM)
+
+
+def _session_preview(path, width, max_lines):
+    """the picker's right-hand preview: up to max_lines '<role>: <snippet>' rows
+    read from the flow at path."""
+    if not path:
+        return []
+    try:
+        payload = SessionsRegistry.read_flow(path)
+    except (OSError, ValueError):
+        return []
+    lines = []
+    for message in (payload.get("messages") or []):
+        role = message.get("role")
+        if role == "system": continue
+        content = message.get("content")
+        if not isinstance(content, str):
+            content = str(content)
+        snippet = " ".join(content.split())[:width]
+        lines.append(f"{role}: {snippet}")
+        if len(lines) >= max_lines:
+            break
+    return lines
+
+
+def _load_session(screen, agent, status, path):
+    """load a .flow into the agent in place, then refresh the view: clear the
+    viewport, replay the conversation, and follow the restored model. shared by
+    :load and the :sessions picker. caller idle-gates (load mutates messages)."""
+    try:
+        agent.load(path)
+    except (OSError, ValueError) as e:
+        screen.write(f"[load error] {e}\n", kind=Screen.ERROR)
+        return
+    status.set_model(agent.model)
+    screen.clear_buffer()
+    _replay_messages(screen, agent.get_messages())
+    screen.write(f"[loaded {os.path.basename(path)}]\n", kind=Screen.META)
+
+
+def _open_sessions(screen, agent, status):
+    """open the :sessions picker and load the chosen saved session in place."""
+    paths = SessionsRegistry.list_sessions()
+    if not paths:
+        screen.write("[no saved sessions]\n", kind=Screen.META)
+        return
+    labels = []
+    by_label = {}
+    for path in paths:
+        label = SessionsRegistry.session_label(path)
+        labels.append(label)
+        by_label[label] = path
+
+    def _preview(label, width, max_lines):
+        return _session_preview(by_label.get(label), width, max_lines)
+
+    picked = screen.prompt_session_overlay(labels, preview_fn=_preview)
+    if not picked:
+        return
+    path = by_label.get(picked)
+    if path is None:
+        return
+    _load_session(screen, agent, status, path)
+
+
+def _save_session(screen, agent, path):
+    """save the agent to path (or its default <name>.flow when path is empty)."""
+    try:
+        written = agent.save(path or None)
+    except OSError as e:
+        screen.write(f"[save error] {e}\n", kind=Screen.ERROR)
+        return
+    screen.write(f"[saved {written}]\n", kind=Screen.META)
+
+
 def _handle_command(screen, agent, status, registry, cmd):
     """dispatch a `:`-command. returns True to quit the loop, else False.
 
@@ -357,9 +452,30 @@ def _handle_command(screen, agent, status, registry, cmd):
     command name."""
     if cmd == "q" or cmd == "quit":
         return True
-    head = cmd.split(" ", 1)[0]
+    parts = cmd.split(" ", 1)
+    head = parts[0]
+    arg = ""
+    if len(parts) > 1:
+        arg = parts[1].strip()
     if head == "clear":
         screen.clear_buffer()
+        return False
+    if head == "save":
+        # a snapshot read; safe while busy. arg is an optional path.
+        path = ""
+        if arg:
+            path = os.path.expanduser(arg)
+        _save_session(screen, agent, path)
+        return False
+    if head == "load":
+        # loading replaces the live conversation, so only while idle.
+        if screen._busy:
+            screen.write("[busy — :load when idle]\n", kind=Screen.META)
+            return False
+        if not arg:
+            screen.write("[usage: :load <path>]\n", kind=Screen.META)
+            return False
+        _load_session(screen, agent, status, os.path.expanduser(arg))
         return False
     if head == "models":
         # switching only affects the next run, so this is safe while busy.
@@ -372,6 +488,14 @@ def _handle_command(screen, agent, status, registry, cmd):
             screen.write("[busy — open :messages when idle]\n", kind=Screen.META)
             return False
         _open_messages(screen, agent, status)
+        return False
+    if head == "sessions":
+        # loading replaces the live conversation, so only while idle (same race
+        # as :messages).
+        if screen._busy:
+            screen.write("[busy — open :sessions when idle]\n", kind=Screen.META)
+            return False
+        _open_sessions(screen, agent, status)
         return False
     screen.write(f"[unknown command: :{head}]\n", kind=Screen.META)
     return False
@@ -406,7 +530,7 @@ def run(*,
     completions = {}
     for name, _help in _PALETTE_COMMANDS:
         completions[name] = []
-    screen.set_palette_commands(_PALETTE_COMMANDS)
+    screen.set_palette_commands(_PALETTE_COMMANDS, _PALETTE_ARG_COMMANDS)
     screen.set_cmd_completions(completions)
 
     fallback_limit = int(config.load_optional("default_context_size", _DEFAULT_CONTEXT_SIZE))
