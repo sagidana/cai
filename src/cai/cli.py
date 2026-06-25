@@ -5,7 +5,9 @@ answer. Tools/skills come from --tool/--skill; the LLM knobs (--model,
 --system-prompt, --reasoning-effort, --temperature, --max-steps, --non-streaming)
 are forwarded to the run. base_url/model/api_key come from cai.config. Tab
 completion lists every available tool/skill via the registries themselves.
-Interactive (TUI) mode is a later layer.
+
+With no prompt to act on (no -p/'--', no --file, no piped stdin) and a terminal
+attached, cai drops into the interactive full-screen TUI (cai.tui); -i forces it.
 
 The prompt is given via -p/--prompt or after a '--' separator (so --skill/--tool
 can each take several values without swallowing it): `cai --skill fs -- fix x`.
@@ -79,6 +81,9 @@ def build_parser():
     parser.add_argument("-p", "--prompt",
                         default=None,
                         help="the prompt to send (or pass it after '--')")
+    parser.add_argument("-i", "--interactive",
+                        action="store_true",
+                        help="launch the full-screen interactive TUI")
     parser.add_argument("--system-prompt",
                         default=None,
                         help="system prompt text")
@@ -244,6 +249,22 @@ def main(argv=None):
 
     prompt = _resolve_prompt(args, dashdash_prompt, parser)
     system_prompt = _resolve_system_prompt(args)
+
+    # interactive TUI: explicit (-i), or the default when cai is run on a
+    # terminal with no prompt to act on (no -p/'--', no --file, no piped stdin).
+    interactive = args.interactive
+    if not interactive and prompt is None and not args.file and sys.stdin.isatty():
+        interactive = True
+    if interactive:
+        from cai import tui
+        return tui.run(model=args.model,
+                       system_prompt=system_prompt,
+                       tools=args.tool,
+                       skills=args.skill,
+                       reasoning_effort=args.reasoning_effort,
+                       temperature=args.temperature,
+                       max_steps=args.max_steps)
+
     messages = _build_messages(args, prompt, parser)
     if not messages:
         parser.error("no prompt: pass -p/--prompt, a prompt after '--', --file, or piped stdin")
