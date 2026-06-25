@@ -28,6 +28,7 @@ from cai.screen import Screen
 
 # command palette (Ctrl-P) and command-mode (:) completion entries.
 _PALETTE_COMMANDS = [
+    ("models", "switch the model (pin favorites)"),
     ("messages", "view / edit / delete the conversation"),
     ("clear", "clear the conversation view"),
     ("quit", "exit the interactive session"),
@@ -96,16 +97,22 @@ class _Status:
     painting on each event - is what lets a quiet stream fall back to 'waiting'
     on the clock alone."""
 
-    def __init__(self, screen, model, context_limit):
+    def __init__(self, screen, model, registry, fallback_limit):
         self._screen = screen
         self._model = model
-        self._context_limit = context_limit
+        # the context-window limit for the ctx % readout: the current model's
+        # cached context_length from the registry when known, else this fallback.
+        self._registry = registry
+        self._fallback_limit = fallback_limit
         self._lock = threading.Lock()
         self._busy = False
         self._phase = None         # None | "tool" | "waiting"
         self._stream_kind = None   # None | "responding" | "reasoning"
         self._last_char = 0.0      # time.monotonic() of the last streamed token
         self._tokens = 0           # estimated tokens in the conversation so far
+        self._context_limit = fallback_limit
+        self._limit_model = None   # the model _context_limit was resolved for
+        self._resolve_limit()
         # the latest real usage sample (tokens measured when the conversation
         # held sample_chars chars), surfaced to the :messages overlay so its
         # per-message token math matches the status line.
@@ -148,6 +155,32 @@ class _Status:
         with self._lock:
             self._tokens = tokens
 
+    def _resolve_limit(self):
+        # cache the current model's context window (cache-only registry read),
+        # falling back when it is unknown. caller manages locking.
+        limit = None
+        if self._registry is not None:
+            limit = self._registry.context_length(self._model)
+        if limit:
+            self._context_limit = int(limit)
+        else:
+            self._context_limit = self._fallback_limit
+        self._limit_model = self._model
+
+    def refresh_limit(self):
+        # re-resolve the limit for the current model - called once the catalogue
+        # cache has been warmed in the background so a freshly-known
+        # context_length is picked up.
+        with self._lock:
+            self._resolve_limit()
+
+    def set_model(self, model):
+        # reflect a model switch (the :models picker) on the status line, and
+        # re-resolve its context-window limit.
+        with self._lock:
+            self._model = model
+            self._resolve_limit()
+
     def set_sample(self, sample_tokens, sample_chars):
         with self._lock:
             self._sample_tokens = sample_tokens
@@ -173,6 +206,8 @@ class _Status:
 
     def refresh(self):
         with self._lock:
+            if self._limit_model != self._model:
+                self._resolve_limit()
             text = _status_text(self._model, self._state(time.monotonic()))
             right = usage.format_ctx(self._tokens, self._context_limit)
             key = (text, right)
@@ -301,7 +336,21 @@ def _open_messages(screen, agent, status):
         agent.set_messages(edited)
 
 
-def _handle_command(screen, agent, status, cmd):
+def _open_models(screen, agent, status, registry):
+    """open the :models picker and switch the agent to the chosen model. the
+    catalogue (and prices) come from the registry, which fetches+caches from the
+    provider; pins are persisted by the overlay through the same registry."""
+    ids = registry.model_ids()
+    if not ids:
+        screen.write("[no models available]\n", kind=Screen.META)
+        return
+    picked = screen.prompt_model_overlay(ids, prices=registry.prices(), favorites=True)
+    if picked:
+        agent.model = picked
+        status.set_model(picked)
+
+
+def _handle_command(screen, agent, status, registry, cmd):
     """dispatch a `:`-command. returns True to quit the loop, else False.
 
     cmd is the raw command string (the text after ':'); the first token is the
@@ -311,6 +360,10 @@ def _handle_command(screen, agent, status, cmd):
     head = cmd.split(" ", 1)[0]
     if head == "clear":
         screen.clear_buffer()
+        return False
+    if head == "models":
+        # switching only affects the next run, so this is safe while busy.
+        _open_models(screen, agent, status, registry)
         return False
     if head == "messages":
         # editing the live conversation mid-run would race the worker, so only
@@ -336,6 +389,7 @@ def run(*,
     the user quits (:q, Ctrl-C, or EOF). returns the process exit code."""
     from cai import config
     from cai.agent import Agent
+    from cai.models import ModelsRegistry
 
     agent = Agent(model=model,
                   system_prompt=system_prompt,
@@ -355,9 +409,20 @@ def run(*,
     screen.set_palette_commands(_PALETTE_COMMANDS)
     screen.set_cmd_completions(completions)
 
-    context_limit = int(config.load_optional("default_context_size", _DEFAULT_CONTEXT_SIZE))
-    status = _Status(screen, agent.model, context_limit)
+    fallback_limit = int(config.load_optional("default_context_size", _DEFAULT_CONTEXT_SIZE))
+    registry = ModelsRegistry(agent.api)
+    status = _Status(screen, agent.model, registry, fallback_limit)
     status.refresh()   # initial idle paint, before the status thread takes over
+
+    # warm the catalogue cache in the background so the current model's
+    # context_length is saved and the ctx % can derive from it - without
+    # blocking startup or the first prompt. models() respects the daily cache,
+    # so this is a network call at most once a day.
+    def _warm_models():
+        registry.models()
+        status.refresh_limit()
+
+    threading.Thread(target=_warm_models, daemon=True, name="cai-tui-models-warm").start()
 
     def _on_interrupt():
         # Ctrl-C on an empty prompt: cancel an in-flight run if there is one,
@@ -386,7 +451,7 @@ def run(*,
             if screen._command_result is not None:
                 cmd = screen._command_result
                 screen._command_result = None
-                if _handle_command(screen, agent, status, cmd):
+                if _handle_command(screen, agent, status, registry, cmd):
                     break
                 continue
             # '!text' steers the in-flight run; with nothing running it is just

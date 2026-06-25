@@ -7,6 +7,18 @@ from urllib3.exceptions import InsecureRequestWarning
 log = logging.getLogger("cai")
 
 
+def _price_per_mtok(value):
+    """convert a per-token USD price (string or number) to USD per million
+    tokens, or None when absent/unparseable. '0' is a real price (free)."""
+    if value is None:
+        return None
+    try:
+        per_token = float(value)
+    except (TypeError, ValueError):
+        return None
+    return per_token * 1_000_000
+
+
 def _wire_messages(messages):
     """strip local-only ("_"-prefixed) keys before a message goes on the
     wire - some strict providers reject unknown message fields. the single
@@ -121,6 +133,98 @@ class OpenAiApi:
             data['stream_options'] = {"include_usage": True}
             return self._stream(url, headers, data)
         return self._complete(url, headers, data)
+
+    def _get_data(self, url):
+        """GET url and return its JSON 'data' list, or None on any failure
+        (network error, non-200, bad JSON)."""
+        headers = {}
+        headers['Authorization'] = f"Bearer {self.api_key}"
+        try:
+            r = requests.get(url,
+                             headers=headers,
+                             timeout=self.timeout,
+                             verify=self.ssl_verify)
+        except requests.RequestException as e:
+            log.error(f"[!] request {url} failed: {e}")
+            return
+        if r.status_code != 200:
+            log.error(f"[!] request {url} failed with {r.status_code}")
+            return
+        try:
+            return r.json().get('data', [])
+        except ValueError as e:
+            log.error(f"[!] request {url} returned invalid JSON: {e}")
+            return
+
+    def get_models(self):
+        """list the provider's models via the OpenAI-style GET /models endpoint.
+
+        returns a list of records - {'id', plus 'price_in'/'price_out' (USD per
+        million tokens) and 'context_length' when known} - or None on failure so
+        the caller can fall back to a cache.
+
+        provider shapes handled:
+          - OpenRouter: /models carries 'pricing' and 'context_length'.
+          - vLLM:       /models carries 'max_model_len'.
+          - LiteLLM:    /models is the bare OpenAI spec (ids only); the details
+                        live on /model/info, which we merge in when /models gave
+                        no pricing or context for any model."""
+        data = self._get_data(f"{self.base_url}/models")
+        if data is None:
+            return
+
+        records = []
+        detailed = False
+        for model in data:
+            if not model.get('id'): continue
+            record = {}
+            record['id'] = model['id']
+            pricing = model.get('pricing') or {}
+            price_in = _price_per_mtok(pricing.get('prompt'))
+            price_out = _price_per_mtok(pricing.get('completion'))
+            if price_in is not None:
+                record['price_in'] = price_in
+            if price_out is not None:
+                record['price_out'] = price_out
+            context = model.get('context_length') or model.get('max_model_len')
+            if context:
+                record['context_length'] = context
+            if len(record) > 1:
+                detailed = True
+            records.append(record)
+
+        # bare /models (LiteLLM): enrich pricing/context from /model/info.
+        if not detailed:
+            self._merge_model_info(records)
+        return records
+
+    def _merge_model_info(self, records):
+        """fold LiteLLM's /model/info details into records (matched by id). a
+        missing endpoint (not LiteLLM) just leaves records untouched."""
+        data = self._get_data(f"{self.base_url}/model/info")
+        if not data:
+            return
+        extra_by_id = {}
+        for model in data:
+            name = model.get('model_name')
+            if not name: continue
+            info = model.get('model_info') or {}
+            extra = {}
+            price_in = _price_per_mtok(info.get('input_cost_per_token'))
+            price_out = _price_per_mtok(info.get('output_cost_per_token'))
+            if price_in is not None:
+                extra['price_in'] = price_in
+            if price_out is not None:
+                extra['price_out'] = price_out
+            context = info.get('max_input_tokens') or info.get('max_tokens')
+            if context:
+                extra['context_length'] = context
+            if extra:
+                extra_by_id[name] = extra
+        for record in records:
+            extra = extra_by_id.get(record['id'])
+            if extra:
+                record.update(extra)
 
     def _complete(self, url, headers, data):
         """Blocking path: one POST, parse the single JSON body, return the

@@ -19,7 +19,7 @@ from ..ansi import (
 )
 from ..input import read_key, parse_mouse
 from .tools import _find_matches, _handle_search_key, _style_cell
-from ...favorites import load_favorites, save_favorites
+from ...models import load_favorites, toggle_favorite
 
 
 def _overlay_geom(rows, cols, n, selected_idx):
@@ -607,7 +607,7 @@ def prompt_model_overlay(screen, models, *, presorted=False,
                             fav_set.discard(name)
                         else:
                             fav_set.add(name)
-                        save_favorites(fav_set)
+                        toggle_favorite(name)
                         filtered = _filter_and_sort(models, ''.join(search_buf), fav_set)
                         selected_idx = 0
                         for i, item in enumerate(filtered):
