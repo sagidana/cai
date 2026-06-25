@@ -7,17 +7,26 @@ reassembles inbound ones from arbitrary recv chunks, and knows the message kinds
 The protocol is deliberately tiny - just enough for a client to run turns on a
 remote agent:
 
-  client -> agent   SUBMIT {text}     start a user turn
-  agent  -> client  EVENT  {event}    one cai.events.Event as the run streams
-  agent  -> client  RESULT {text}     the final answer; marks the turn's end
+  client -> agent   SUBMIT  {text}        start a user turn
+  agent  -> client  EVENT   {event}       one cai.events.Event as the run streams
+  agent  -> client  RESULT  {text}        the final answer; marks the turn's end
+  client -> agent   CONTROL {op, value}   a request/reply op (get/set state)
+  agent  -> client  CONTROL_RESULT {ok, value, error}   the op's answer
 
   w = Wire(channel)
   w.send_submit("hello")              # client side
   for msg in w.recv():                # -> list of decoded message dicts
       ...
   w.send_event(event); w.send_result(text)   # agent side
+  ok, value, error = w.control("get_messages")   # client request/reply op
 
-Steering, interrupts, prompts, attach/snapshot, and control ops are later layers."""
+The control ops are get_messages/set_messages, get_skills/set_skills,
+get_tools/set_tools. They are synchronous: the agent handles one message fully
+before the next, so a request needs no id - the next CONTROL_RESULT is its
+answer. Skills and tools cross as name lists; a function tool reads back by name
+but cannot be re-added from a name (a callable does not fit in JSON).
+
+Steering, interrupts, prompts, and attach/snapshot are later layers."""
 from __future__ import annotations
 
 import json
@@ -29,10 +38,13 @@ class Wire:
     """the wire protocol over one byte channel: message kinds, framing, and the
     decode buffer in a single object. one Wire per connection."""
 
-    # message kinds. agent -> client: EVENT, RESULT. client -> agent: SUBMIT.
+    # message kinds. agent -> client: EVENT, RESULT, CONTROL_RESULT.
+    # client -> agent: SUBMIT, CONTROL.
     EVENT = "event"
     RESULT = "result"
     SUBMIT = "submit"
+    CONTROL = "control"
+    CONTROL_RESULT = "control_result"
 
     def __init__(self, channel):
         self.channel = channel
@@ -57,9 +69,37 @@ class Wire:
         msg["text"] = text
         self.send(msg)
 
+    def send_control(self, op, value=None):
+        msg = {}
+        msg["type"] = self.CONTROL
+        msg["op"] = op
+        msg["value"] = value
+        self.send(msg)
+
+    def send_control_result(self, ok, value=None, error=None):
+        msg = {}
+        msg["type"] = self.CONTROL_RESULT
+        msg["ok"] = ok
+        msg["value"] = value
+        msg["error"] = error
+        self.send(msg)
+
     def send(self, message):
         """frame one message dict and write it to the channel."""
         self.channel.sendall(self.encode(message))
+
+    def control(self, op, value=None):
+        """client side: send a control request and block for its reply,
+        returning (ok, value, error). use between turns - it reads until the
+        next CONTROL_RESULT. None on the wire (EOF) reads as disconnected."""
+        self.send_control(op, value)
+        while True:
+            messages = self.recv()
+            if messages is None:
+                return False, None, "disconnected"
+            for msg in messages:
+                if msg.get("type") != self.CONTROL_RESULT: continue
+                return msg.get("ok", False), msg.get("value"), msg.get("error")
 
     # --- inbound: read the channel and decode whole messages ---
     def recv(self):
