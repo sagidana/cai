@@ -1,9 +1,11 @@
 """skills: load skill files into a SkillsRegistry that layers prompt fragments
 and tools onto an existing ToolRegistry.
 
-A skill is a markdown file ~/.config/cai/skills/<name>.md. Everything before the
-first '---' line is a header of 'key: value' lines; everything after is the
-prompt body. Header fields:
+A skill is a markdown file <name>.md, resolved from the user's
+~/.config/cai/skills/ first, then the builtins shipped with cai
+(builtins/skills/ beside this module). Everything before the first '---' line is
+a header of 'key: value' lines; everything after is the prompt body. Header
+fields:
 
   name:   <skill name>             the added first field, naming the skill
   tools:  <tool>, <tool>, ...      MCP tool refs to expose ('<mcp>__<tool>')
@@ -34,6 +36,24 @@ class Skill:
 
 def skills_dir():
     return os.path.join(config.config_dir(), "skills")
+
+
+def builtin_skills_dir():
+    """the skills shipped with cai by default, in builtins/skills/ beside this
+    module - a second source searched in addition to the user's skills dir."""
+    return os.path.join(os.path.dirname(__file__), "builtins", "skills")
+
+
+def _skill_path(name):
+    """resolve <name>.md to a source file, searching the user's skills dir first
+    (so a user file can shadow a builtin) then the bundled builtins. None when
+    neither has it."""
+    filename = name + ".md"
+    for directory in (skills_dir(), builtin_skills_dir()):
+        path = os.path.join(directory, filename)
+        if os.path.exists(path):
+            return path
+    return None
 
 
 def _split_csv(value):
@@ -71,8 +91,8 @@ def _parse_skill(text):
 
 
 def _read_skill(name):
-    path = os.path.join(skills_dir(), name + ".md")
-    if not os.path.exists(path):
+    path = _skill_path(name)
+    if path is None:
         return None
     with open(path) as f:
         text = f.read()

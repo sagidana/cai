@@ -1,6 +1,6 @@
 """tools: load MCP servers into a tool registry from the user's
-~/.config/cai/mcps/ and the builtins shipped with cai (builtins/ beside this
-module).
+~/.config/cai/mcps/ and the builtins shipped with cai (builtins/tools/ beside
+this module).
 
 Each *.py file in either dir is an MCP server (a FastMCP stdio program). This
 module spawns each as a subprocess, speaks the MCP JSON-RPC handshake over its
@@ -364,7 +364,7 @@ class ToolRegistry:
         path = _mcp_server_path(mcp_name)
         if path is None:
             raise FileNotFoundError(
-                f"no MCP server {mcp_name!r} in {mcps_dir()} or {builtins_dir()}")
+                f"no MCP server {mcp_name!r} in {mcps_dir()} or {builtin_tools_dir()}")
         server = LocalMCPServer([sys.executable, path], mcp_name)
         self._local_mcp_servers[mcp_name] = server
         return server
@@ -395,10 +395,10 @@ def mcps_dir():
     return os.path.join(config.config_dir(), "mcps")
 
 
-def builtins_dir():
-    """the MCP servers shipped with cai by default, in builtins/ beside this
-    module - a second source searched in addition to the user's mcps dir."""
-    return os.path.join(os.path.dirname(__file__), "builtins")
+def builtin_tools_dir():
+    """the MCP servers shipped with cai by default, in builtins/tools/ beside
+    this module - a second source searched in addition to the user's mcps dir."""
+    return os.path.join(os.path.dirname(__file__), "builtins", "tools")
 
 
 def _mcp_server_path(mcp_name):
@@ -406,7 +406,7 @@ def _mcp_server_path(mcp_name):
     first (so a user file can shadow a builtin) then the bundled builtins.
     None when neither has it."""
     filename = mcp_name + ".py"
-    for directory in (mcps_dir(), builtins_dir()):
+    for directory in (mcps_dir(), builtin_tools_dir()):
         path = os.path.join(directory, filename)
         if os.path.exists(path):
             return path
