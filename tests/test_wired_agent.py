@@ -6,6 +6,7 @@ Wire. The model is a FakeApi that streams canned content - no network, no
 config, no API key.
 """
 import os
+import select
 import socket
 import threading
 
@@ -374,6 +375,113 @@ def test_unix_wired_agent_persists_across_reconnects(tmp_path):
     assert messages[-1]["content"] == "answer"
 
     served.close()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+
+
+# --------------------------------------------------------------------------
+# many clients at once: broadcast turns, unicast control replies, first-wins
+# --------------------------------------------------------------------------
+
+def two_clients(path):
+    """connect two clients and round-trip a control on each, so both are attached
+    (and quiescent) before the test drives a turn."""
+    a = Wire(channel.connect(path))
+    b = Wire(channel.connect(path))
+    a.control("get_messages")
+    b.control("get_messages")
+    return a, b
+
+
+def no_pending(wire, timeout=0.3):
+    """True if nothing is waiting to be read on the wire within `timeout`."""
+    readable, _, _ = select.select([wire.channel], [], [], timeout)
+    return not readable
+
+
+def read_until_prompt(wire):
+    while True:
+        for msg in wire.recv():
+            if msg["type"] == Wire.PROMPT:
+                return msg
+
+
+def test_a_turn_broadcasts_to_every_connected_client(tmp_path):
+    path = str(tmp_path / "a.sock")
+    agent = make_agent(api=FakeApi(chunks=["hi"]))
+    served = UnixWiredAgent(agent, path)
+    thread = threading.Thread(target=served.serve, daemon=True)
+    thread.start()
+
+    a, b = two_clients(path)
+    a.send_submit("ping")
+    assert read_to_result(a) == "hi"
+    assert read_to_result(b) == "hi"          # b never submitted; sees the broadcast
+
+    served.close()
+    a.channel.close()
+    b.channel.close()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+
+
+def test_control_result_is_unicast_to_the_asking_client(tmp_path):
+    path = str(tmp_path / "a.sock")
+    agent = make_agent(api=FakeApi(chunks=["hi"]))
+    served = UnixWiredAgent(agent, path)
+    thread = threading.Thread(target=served.serve, daemon=True)
+    thread.start()
+
+    a, b = two_clients(path)
+    a.send_submit("one")                      # a turn, drained on both -> buffers empty
+    assert read_to_result(a) == "hi"
+    assert read_to_result(b) == "hi"
+
+    ok, messages, error = a.control("get_messages")
+    assert ok is True
+    assert messages[-1]["content"] == "hi"
+    assert no_pending(b)                       # b asked nothing -> never gets a's reply
+
+    served.close()
+    a.channel.close()
+    b.channel.close()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+
+
+def test_prompt_broadcasts_and_first_reply_wins(tmp_path):
+    asked = {}
+    def before_tool(ctx):
+        asked["confirm"] = ctx.ui.confirm("run it?", default=False)
+
+    def the_tool() -> str:
+        return "tool-ran"
+
+    api = ToolThenTextApi(tool_name="the_tool")
+    agent = make_agent(tools=[the_tool],
+                       api=api,
+                       hooks=[(HookEvent.BEFORE_TOOL_CALL, before_tool)])
+    path = str(tmp_path / "a.sock")
+    served = UnixWiredAgent(agent, path)
+    thread = threading.Thread(target=served.serve, daemon=True)
+    thread.start()
+
+    a, b = two_clients(path)
+    a.send_submit("go")
+    pa = read_until_prompt(a)
+    pb = read_until_prompt(b)                  # the PROMPT reached both clients
+    assert pa["id"] == pb["id"]
+
+    a.send_reply(pa["id"], True)              # first (and only) answer wins
+    result = read_to_result(a)
+    b.send_reply(pb["id"], False)             # lands after resolution -> ignored
+
+    assert asked["confirm"] is True           # b's later False never flipped it
+    assert result == "final"
+
+    served.close()
+    a.channel.close()
+    b.channel.close()
     thread.join(timeout=5)
     assert not thread.is_alive()
 
