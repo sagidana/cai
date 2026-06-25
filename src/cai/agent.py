@@ -27,7 +27,7 @@ import threading
 
 from cai import config
 from cai.api import OpenAiApi
-from cai.llm import call_llm
+from cai.llm import call_llm, SteerQueue
 from cai.tools import ToolRegistry
 from cai.skills import SkillsRegistry
 from cai.hooks import HooksRegistry
@@ -79,6 +79,7 @@ class Run:
                  hooks=None,
                  ui=None,
                  interrupt=None,
+                 steer=None,
                  tools_registry=None,
                  skills_registry=None,
                  stream=True):
@@ -91,6 +92,7 @@ class Run:
         self.hooks = hooks                        # [(event, fn), ...] or None; translated at run time
         self.ui = ui                              # UI hooks prompt through; None -> NULL_UI in call_llm
         self.interrupt = interrupt                # threading.Event to abort the run; None -> uninterruptible
+        self.steer = steer                        # callable() -> pending steer texts; None -> no steering
         self.tools_registry = tools_registry      # a prebuilt ToolRegistry (an Agent passes its own)
         self.skills_registry = skills_registry    # the Agent's SkillsRegistry (for the live prompt)
         # we own (and must close) a registry only if we build it ourselves; one
@@ -137,6 +139,7 @@ class Run:
                        hooks=hooks_registry,
                        ui=self.ui,
                        interrupt=self.interrupt,
+                       steer=self.steer,
                        stream=self.stream)
         try:
             while True:
@@ -203,6 +206,9 @@ class Agent:
         # set from another thread (stop()) to abort the in-flight run; each run()
         # clears it so a fresh run starts un-interrupted.
         self.interrupt = threading.Event()
+        # messages pushed from another thread (steer()) and folded into the
+        # in-flight (or next) run as user turns at each turn boundary.
+        self._steer = SteerQueue()
         self.messages = []
 
     @property
@@ -255,6 +261,11 @@ class Agent:
         turns, or between streamed chunks). safe to call from another thread."""
         self.interrupt.set()
 
+    def steer(self, text):
+        """queue a steering message; the in-flight (or next) run folds it in as a
+        user turn at its next turn boundary. safe to call from another thread."""
+        self._steer.push(text)
+
     def run(self, prompt=None):
         """append `prompt` as a user turn (if given) and return a Run over the
         agent's live conversation. Iterate it to stream events; `messages`
@@ -269,6 +280,7 @@ class Agent:
                    hooks=self._hooks,
                    ui=self._ui,
                    interrupt=self.interrupt,
+                   steer=self._steer.drain,
                    tools_registry=self.tools_registry,
                    skills_registry=self.skills_registry)
 

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 
 from cai.events import Event, EventType
 from cai.hooks import HookContext, HookEvent, HooksRegistry, ToolCall
@@ -56,6 +57,26 @@ def _interrupted(interrupt):
     """True when a kill was requested. interrupt is a threading.Event (or None,
     meaning the run can't be interrupted)."""
     return interrupt is not None and interrupt.is_set()
+
+
+class SteerQueue:
+    """thread-safe queue of steering messages: push() from any thread, drain()
+    returns and clears them. call_llm drains it at each turn boundary (via the
+    steer= callable) and folds the messages in as user turns."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._messages = []
+
+    def push(self, text):
+        with self._lock:
+            self._messages.append(text)
+
+    def drain(self):
+        with self._lock:
+            messages = self._messages
+            self._messages = []
+        return messages
 
 
 def _parse_args(arguments):
@@ -258,6 +279,7 @@ def call_llm(messages,
              hooks=None,
              ui=None,
              interrupt=None,
+             steer=None,
              system_prompt=None,
              max_steps=None,
              reasoning_effort=None,
@@ -275,6 +297,8 @@ def call_llm(messages,
     ui         - a UI for hooks to prompt the human, or None for NULL_UI.
     interrupt  - a threading.Event; when set the loop winds down at the next
                  safe boundary and returns the partial text. None = no kill.
+    steer      - callable() -> list of pending steering texts; drained at each
+                 turn boundary and folded in as user turns. None = no steering.
     Returns the final assistant text (as the generator's return value)."""
     hooks = _as_registry(hooks)
     if ui is None:
@@ -292,6 +316,12 @@ def call_llm(messages,
             # killed between turns (or before the first one): stop before the
             # next model call and hand back whatever we have so far.
             return content
+
+        if steer is not None:
+            # fold any steering messages into the conversation as user turns, so
+            # the next model call sees them (after this turn's tool results).
+            for text in steer():
+                messages.append({"role": "user", "content": text})
 
         # the model call wants the system prompt at index 0, but the caller's
         # `messages` must stay system-free and be the live append target for

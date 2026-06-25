@@ -7,7 +7,7 @@ itself, to simulate a kill landing mid-stream). No network, no config.
 import threading
 
 from cai.agent import Agent
-from cai.llm import call_llm
+from cai.llm import call_llm, SteerQueue
 from cai.skills import SkillsRegistry
 from cai.tools import ToolRegistry
 
@@ -78,6 +78,7 @@ def bare_agent(tools_registry, api):
     agent._hooks = None
     agent._ui = None
     agent.interrupt = threading.Event()
+    agent._steer = SteerQueue()
     agent.messages = []
     return agent
 

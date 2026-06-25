@@ -14,6 +14,7 @@ import pytest
 from cai import channel
 from cai.agent import Agent
 from cai.hooks import HookEvent
+from cai.llm import SteerQueue
 from cai.skills import SkillsRegistry
 from cai.tools import ToolRegistry
 from cai.wire import Wire
@@ -58,6 +59,7 @@ def make_agent(tools=None, skills=None, hooks=None, api=None):
     agent._hooks = hooks
     agent._ui = None
     agent.interrupt = threading.Event()
+    agent._steer = SteerQueue()
     agent.messages = []
     return agent
 
