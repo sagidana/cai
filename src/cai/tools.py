@@ -1,6 +1,8 @@
-"""tools: load MCP servers from ~/.config/cai/mcps/ into a tool registry.
+"""tools: load MCP servers into a tool registry from the user's
+~/.config/cai/mcps/ and the builtins shipped with cai (builtins/ beside this
+module).
 
-Each *.py file in the mcps dir is an MCP server (a FastMCP stdio program). This
+Each *.py file in either dir is an MCP server (a FastMCP stdio program). This
 module spawns each as a subprocess, speaks the MCP JSON-RPC handshake over its
 stdin/stdout, lists its tools, and exposes two things the agentic loop needs:
 
@@ -353,14 +355,16 @@ class ToolRegistry:
             return f"Error: tool '{name}' failed: {e}"
 
     def _load_server(self, mcp_name):
-        """the LocalMCPServer for mcp_name, spawned (once) from
-        ~/.config/cai/mcps/<mcp_name>.py and cached in this registry."""
+        """the LocalMCPServer for mcp_name, spawned (once) from its source file
+        and cached in this registry. the file is resolved from the user's
+        ~/.config/cai/mcps/ first, then the builtins shipped with cai."""
         server = self._local_mcp_servers.get(mcp_name)
         if server is not None:
             return server
-        path = os.path.join(mcps_dir(), mcp_name + ".py")
-        if not os.path.exists(path):
-            raise FileNotFoundError(f"no MCP server {mcp_name!r} at {path}")
+        path = _mcp_server_path(mcp_name)
+        if path is None:
+            raise FileNotFoundError(
+                f"no MCP server {mcp_name!r} in {mcps_dir()} or {builtins_dir()}")
         server = LocalMCPServer([sys.executable, path], mcp_name)
         self._local_mcp_servers[mcp_name] = server
         return server
@@ -389,3 +393,21 @@ class ToolRegistry:
 
 def mcps_dir():
     return os.path.join(config.config_dir(), "mcps")
+
+
+def builtins_dir():
+    """the MCP servers shipped with cai by default, in builtins/ beside this
+    module - a second source searched in addition to the user's mcps dir."""
+    return os.path.join(os.path.dirname(__file__), "builtins")
+
+
+def _mcp_server_path(mcp_name):
+    """resolve <mcp_name>.py to a source file, searching the user's mcps dir
+    first (so a user file can shadow a builtin) then the bundled builtins.
+    None when neither has it."""
+    filename = mcp_name + ".py"
+    for directory in (mcps_dir(), builtins_dir()):
+        path = os.path.join(directory, filename)
+        if os.path.exists(path):
+            return path
+    return None
