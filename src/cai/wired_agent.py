@@ -6,13 +6,19 @@ ops to read or replace the agent's state - messages, skills, tools. The channel
 is anything with recv()/sendall() (a socket, one end of a socket pair) and is
 owned by the caller; the wire framing lives in cai.wire.Wire.
 
+A served run's UI prompts travel the wire too: the agent is given a WireUI, so a
+hook calling ctx.ui.confirm/select/text/notify mid-run reaches the client as a
+PROMPT and blocks for its REPLY.
+
 Minimal by design: one message at a time, synchronous, on the caller's thread.
-Steering, interrupts, UI prompts, and attach/snapshot are later layers."""
+Steering, interrupts, and attach/snapshot are later layers."""
 from __future__ import annotations
 
+import itertools
 import logging
 
 from cai.agent import _tool_name
+from cai.ui import BaseUI
 from cai.wire import Wire
 
 
@@ -26,6 +32,84 @@ def _tool_names(tools):
     for tool in tools:
         names.append(_tool_name(tool))
     return names
+
+
+class WireUI(BaseUI):
+    """the served agent's UI, bound to the wire: each prompt a hook raises mid-run
+    is sent to the client as a PROMPT and blocks for the matching REPLY on the
+    same channel. a dropped client (EOF) falls back to the BaseUI default, so a
+    served run never hangs waiting for an answer that will not come.
+
+    it shares the WiredAgent's Wire (one reader per channel): a prompt fires from
+    inside a turn, while serve() is parked in that turn and not reading, so the
+    prompt reads the REPLY itself - no second reader competes for the socket."""
+
+    interactive = True
+
+    def __init__(self, wire):
+        self._wire = wire
+        self._ids = itertools.count(1)
+
+    def confirm(self, message, *, default=False, detail=""):
+        answered, value = self._prompt("confirm",
+                                       message,
+                                       default=default,
+                                       detail=detail)
+        if not answered:
+            return BaseUI.confirm(self, message, default=default, detail=detail)
+        return bool(value)
+
+    def select(self, message, options, *, default=None, detail=""):
+        options = list(options)
+        answered, value = self._prompt("select",
+                                       message,
+                                       options=options,
+                                       default=default,
+                                       detail=detail)
+        if not answered:
+            return BaseUI.select(self, message, options, default=default, detail=detail)
+        if value in options:
+            return value
+        if isinstance(value, int) and 0 <= value < len(options):
+            return options[value]
+        return BaseUI.select(self, message, options, default=default, detail=detail)
+
+    def text(self, message, *, default="", secret=False):
+        answered, value = self._prompt("text", message, default=default, secret=secret)
+        if not answered:
+            return None
+        return value
+
+    def notify(self, message, *, level="info"):
+        # one-way: notify expects no reply, so send and return.
+        try:
+            self._wire.send_prompt(None, "notify", message, level=level)
+        except OSError:
+            pass
+
+    def _prompt(self, kind, message, *, options=None, default=None, detail="", secret=False):
+        """send a PROMPT and block reading the channel for its REPLY. returns
+        (answered, value): answered is False on a dropped client, so the caller
+        applies its own default."""
+        pid = str(next(self._ids))
+        try:
+            self._wire.send_prompt(pid,
+                                   kind,
+                                   message,
+                                   options=options,
+                                   default=default,
+                                   detail=detail,
+                                   secret=secret)
+        except OSError:
+            return False, None
+        while True:
+            messages = self._wire.recv()
+            if messages is None:
+                return False, None
+            for msg in messages:
+                if msg.get("type") != Wire.REPLY: continue
+                if msg.get("id") != pid: continue
+                return True, msg.get("value")
 
 
 class WiredAgent:
@@ -43,6 +127,10 @@ class WiredAgent:
     def __init__(self, agent, channel):
         self.agent = agent
         self.wire = Wire(channel)
+        # the served agent's human is now the wire client: route its hooks' UI
+        # prompts over the channel (sharing this Wire, so a prompt reads its own
+        # REPLY while serve() is parked in the turn that raised it).
+        agent._ui = WireUI(self.wire)
 
     def serve(self):
         """read messages off the channel and handle each until it closes

@@ -12,6 +12,8 @@ remote agent:
   agent  -> client  RESULT  {text}        the final answer; marks the turn's end
   client -> agent   CONTROL {op, value}   a request/reply op (get/set state)
   agent  -> client  CONTROL_RESULT {ok, value, error}   the op's answer
+  agent  -> client  PROMPT  {id, kind, ...}   a UI prompt a hook raised
+  client -> agent   REPLY   {id, value}   the human's answer to a PROMPT
 
   w = Wire(channel)
   w.send_submit("hello")              # client side
@@ -19,14 +21,18 @@ remote agent:
       ...
   w.send_event(event); w.send_result(text)   # agent side
   ok, value, error = w.control("get_messages")   # client request/reply op
+  w.answer(msg, ui)                   # client side: answer a PROMPT via a local UI
 
 The control ops are get_messages/set_messages, get_skills/set_skills,
-get_tools/set_tools. They are synchronous: the agent handles one message fully
-before the next, so a request needs no id - the next CONTROL_RESULT is its
-answer. Skills and tools cross as name lists; a function tool reads back by name
-but cannot be re-added from a name (a callable does not fit in JSON).
+get_tools/set_tools. PROMPT carries a UI request (confirm/select/text, or a
+one-way notify) that a hook raised mid-run via HookContext.ui; the client
+answers with a REPLY (none for notify). Everything is synchronous: the agent
+handles one message fully before the next, and a blocked prompt reads the
+channel itself until its REPLY arrives. Skills and tools cross as name lists; a
+function tool reads back by name but cannot be re-added from a name (a callable
+does not fit in JSON).
 
-Steering, interrupts, prompts, and attach/snapshot are later layers."""
+Steering, interrupts, and attach/snapshot are later layers."""
 from __future__ import annotations
 
 import json
@@ -45,6 +51,8 @@ class Wire:
     SUBMIT = "submit"
     CONTROL = "control"
     CONTROL_RESULT = "control_result"
+    PROMPT = "prompt"
+    REPLY = "reply"
 
     def __init__(self, channel):
         self.channel = channel
@@ -84,6 +92,35 @@ class Wire:
         msg["error"] = error
         self.send(msg)
 
+    def send_prompt(self,
+                    id,
+                    kind,
+                    message,
+                    *,
+                    options=None,
+                    default=None,
+                    detail="",
+                    secret=False,
+                    level="info"):
+        msg = {}
+        msg["type"] = self.PROMPT
+        msg["id"] = id
+        msg["kind"] = kind
+        msg["message"] = message
+        msg["options"] = options
+        msg["default"] = default
+        msg["detail"] = detail
+        msg["secret"] = secret
+        msg["level"] = level
+        self.send(msg)
+
+    def send_reply(self, id, value):
+        msg = {}
+        msg["type"] = self.REPLY
+        msg["id"] = id
+        msg["value"] = value
+        self.send(msg)
+
     def send(self, message):
         """frame one message dict and write it to the channel."""
         self.channel.sendall(self.encode(message))
@@ -100,6 +137,32 @@ class Wire:
             for msg in messages:
                 if msg.get("type") != self.CONTROL_RESULT: continue
                 return msg.get("ok", False), msg.get("value"), msg.get("error")
+
+    def answer(self, msg, ui):
+        """client side: if msg is a PROMPT, answer it through a local UI and send
+        the REPLY (a one-way notify gets no reply). returns True when it handled
+        the message, so a client loop can `if w.answer(msg, ui): continue`."""
+        if msg.get("type") != self.PROMPT:
+            return False
+        kind = msg.get("kind")
+        message = msg.get("message")
+        default = msg.get("default")
+        detail = msg.get("detail") or ""
+        if kind == "notify":
+            ui.notify(message, level=msg.get("level", "info"))
+            return True
+        if kind == "confirm":
+            value = ui.confirm(message, default=bool(default), detail=detail)
+        elif kind == "select":
+            value = ui.select(message, msg.get("options") or [], default=default, detail=detail)
+        elif kind == "text":
+            base = default
+            if base is None: base = ""
+            value = ui.text(message, default=base, secret=msg.get("secret", False))
+        else:
+            value = default
+        self.send_reply(msg.get("id"), value)
+        return True
 
     # --- inbound: read the channel and decode whole messages ---
     def recv(self):
