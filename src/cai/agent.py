@@ -223,6 +223,59 @@ class Agent:
         if messages is None: messages = []
         self.messages = messages
 
+    def save(self, path=None):
+        """persist the conversation + settings to a .flow file (see session.py
+        for the format). path defaults to '<name>.flow' in the sessions dir
+        (named by the agent's id, the reference's convention); the path written
+        is returned. tool callables can't be serialised - their names are saved,
+        so the same callables must be passed to the agent for a loaded session to
+        dispatch them again."""
+        from cai.session import SessionsRegistry
+
+        if path is None:
+            path = SessionsRegistry.session_path(self.name)
+        names = []
+        for tool in self._tools:
+            names.append(_tool_name(tool))
+        payload = SessionsRegistry.flow_payload(list(self.messages),
+                                                self.system_prompt,
+                                                self._system_prompt,
+                                                list(self._skills),
+                                                names,
+                                                self.model,
+                                                reasoning_effort=self.reasoning_effort,
+                                                temperature=self.temperature,
+                                                max_steps=self.max_steps)
+        SessionsRegistry.write_flow(path, payload)
+        return path
+
+    def load(self, path):
+        """replace the conversation + settings in place from a .flow file, so a
+        served agent keeps its identity and live aliases. the stored leading
+        system message is dropped and the prompt is re-derived from base +
+        skills. tools restore by name only (callables must be re-supplied via
+        set_tools). returns the path loaded."""
+        from cai.session import SessionsRegistry
+
+        payload = SessionsRegistry.read_flow(path)
+        settings = payload.get("settings") or {}
+        messages = list(payload.get("messages") or [])
+        # the agent owns the composed prompt; drop a stored leading system msg.
+        if messages and messages[0].get("role") == "system":
+            messages = messages[1:]
+
+        self._system_prompt = settings.get("system_prompt_base")
+        self.set_skills(settings.get("skills") or [])
+        self.set_tools(settings.get("selected_tools") or [])
+        if settings.get("model"):
+            self.model = settings["model"]
+        self.reasoning_effort = settings.get("reasoning_effort")
+        self.temperature = settings.get("temperature")
+        self.max_steps = settings.get("max_steps")
+        # mutate in place so any external alias keeps pointing at live state.
+        self.messages[:] = messages
+        return path
+
     def stop(self):
         """request the in-flight run abort at the next safe boundary (between
         turns, or between streamed chunks). safe to call from another thread."""

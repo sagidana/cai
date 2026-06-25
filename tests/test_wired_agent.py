@@ -292,6 +292,78 @@ def test_control_unknown_op_errs(serve):
 
 
 # --------------------------------------------------------------------------
+# save / load (the .flow format)
+# --------------------------------------------------------------------------
+
+def test_agent_save_load_round_trip(tmp_path):
+    import json
+
+    agent = make_agent()
+    agent._system_prompt = "be terse"
+    agent.reasoning_effort = "high"
+    agent.temperature = 0.5
+    agent.max_steps = 7
+    agent.model = "gpt-x"
+    agent.set_messages([{"role": "user", "content": "hi"},
+                        {"role": "assistant", "content": "yo"}])
+
+    path = str(tmp_path / "s.flow")
+    assert agent.save(path) == path
+
+    payload = json.loads((tmp_path / "s.flow").read_text())
+    assert payload["version"] == 3
+    # the composed prompt is stored as a leading system message.
+    assert payload["messages"][0] == {"role": "system", "content": "be terse"}
+    assert payload["settings"]["system_prompt_base"] == "be terse"
+    assert payload["settings"]["model"] == "gpt-x"
+    assert payload["settings"]["max_steps"] == 7
+
+    other = make_agent()
+    alias = other.messages
+    other.load(path)
+    # the leading system message is dropped; the prompt re-derives from base.
+    assert other.get_messages() == [{"role": "user", "content": "hi"},
+                                    {"role": "assistant", "content": "yo"}]
+    assert other._system_prompt == "be terse"
+    assert other.model == "gpt-x"
+    assert other.reasoning_effort == "high"
+    assert other.temperature == 0.5
+    assert other.max_steps == 7
+    # load mutates in place, so external aliases keep pointing at live state.
+    assert other.messages is alias
+
+
+def test_control_save_then_load_over_the_wire(serve, tmp_path):
+    saver = make_agent()
+    saver.set_messages([{"role": "user", "content": "remember me"}])
+    save_wire = serve(saver)
+    path = str(tmp_path / "wire.flow")
+    ok, written, error = save_wire.control("save", path)
+    assert ok is True
+    assert error is None
+    assert written == path
+
+    loader = serve(make_agent())
+    ok, _value, error = loader.control("load", path)
+    assert ok is True
+    assert error is None
+    ok, messages, error = loader.control("get_messages")
+    assert messages == [{"role": "user", "content": "remember me"}]
+
+
+def test_control_save_defaults_to_a_sessions_path(serve, tmp_path, monkeypatch):
+    from cai.session import SessionsRegistry
+
+    monkeypatch.setattr(SessionsRegistry, "sessions_dir",
+                        staticmethod(lambda: str(tmp_path)))
+    wire = serve(make_agent())
+    ok, written, error = wire.control("save", None)
+    assert ok is True
+    assert written.startswith(str(tmp_path))
+    assert written.endswith(".flow")
+
+
+# --------------------------------------------------------------------------
 # UI prompts over the wire
 # --------------------------------------------------------------------------
 

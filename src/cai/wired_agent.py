@@ -471,6 +471,14 @@ class WiredAgent:
         if op == "set_tools":
             agent.set_tools(value)
             return True, None, None
+        if op == "save":
+            # value is the target path, or None for a default timestamped file;
+            # the path written comes back to the client. control ops run on the
+            # worker thread between turns, so this never races a live run.
+            return True, agent.save(value), None
+        if op == "load":
+            agent.load(value)
+            return True, None, None
         return False, None, f"unknown control op: {op!r}"
 
 
