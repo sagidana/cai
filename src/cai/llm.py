@@ -52,6 +52,12 @@ def _as_registry(hooks):
     return hooks
 
 
+def _interrupted(interrupt):
+    """True when a kill was requested. interrupt is a threading.Event (or None,
+    meaning the run can't be interrupted)."""
+    return interrupt is not None and interrupt.is_set()
+
+
 def _parse_args(arguments):
     """best-effort parse of a tool call's raw argument string into a dict."""
     if not arguments:
@@ -88,9 +94,11 @@ def _turn(api,
           tool_choice,
           reasoning_effort,
           temperature,
-          stream):
+          stream,
+          interrupt):
     """Run one model call, yielding content/reasoning events as they arrive.
-    Returns (content, reasoning, tool_calls, usage)."""
+    Returns (content, reasoning, tool_calls, usage). A set interrupt stops
+    reading a long stream early (caught again at the call_llm loop)."""
     if not stream:
         out = api.chat(call_messages,
                        model,
@@ -119,6 +127,7 @@ def _turn(api,
                           temperature=temperature,
                           stream=True)
     for delta_content, delta_reasoning, finished_tool_calls, chunk_usage in stream_gen:
+        if _interrupted(interrupt): break
         if delta_content:
             content_parts.append(delta_content)
             yield Event(type=EventType.CONTENT, text=delta_content)
@@ -248,6 +257,7 @@ def call_llm(messages,
              tools_dispatch=None,
              hooks=None,
              ui=None,
+             interrupt=None,
              system_prompt=None,
              max_steps=None,
              reasoning_effort=None,
@@ -263,6 +273,8 @@ def call_llm(messages,
     tools_dispatch - callable(name, args_dict) -> result, runs one tool.
     hooks      - a HooksRegistry, or None for no hooks.
     ui         - a UI for hooks to prompt the human, or None for NULL_UI.
+    interrupt  - a threading.Event; when set the loop winds down at the next
+                 safe boundary and returns the partial text. None = no kill.
     Returns the final assistant text (as the generator's return value)."""
     hooks = _as_registry(hooks)
     if ui is None:
@@ -276,6 +288,10 @@ def call_llm(messages,
         turn += 1
         if max_steps is not None and turn > max_steps:
             raise MaxStepsReached(max_steps)
+        if _interrupted(interrupt):
+            # killed between turns (or before the first one): stop before the
+            # next model call and hand back whatever we have so far.
+            return content
 
         # the model call wants the system prompt at index 0, but the caller's
         # `messages` must stay system-free and be the live append target for
@@ -292,10 +308,16 @@ def call_llm(messages,
                                                                  "auto",
                                                                  reasoning_effort,
                                                                  temperature,
-                                                                 stream)
+                                                                 stream,
+                                                                 interrupt)
 
         if usage:
             yield Event(type=EventType.USAGE, usage=dict(usage))
+
+        if _interrupted(interrupt):
+            # killed during the turn (a partial stream, or right after it):
+            # return the partial text without the final-answer / tool handling.
+            return content
 
         if not tool_calls:
             # final answer. let on_final_response hooks rewrite it, append it

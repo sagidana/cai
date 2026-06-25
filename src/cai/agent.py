@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import secrets
 import string
+import threading
 
 from cai import config
 from cai.api import OpenAiApi
@@ -77,6 +78,7 @@ class Run:
                  skills=None,
                  hooks=None,
                  ui=None,
+                 interrupt=None,
                  tools_registry=None,
                  skills_registry=None,
                  stream=True):
@@ -88,6 +90,7 @@ class Run:
         self.skills = skills                      # skill names to activate (standalone)
         self.hooks = hooks                        # [(event, fn), ...] or None; translated at run time
         self.ui = ui                              # UI hooks prompt through; None -> NULL_UI in call_llm
+        self.interrupt = interrupt                # threading.Event to abort the run; None -> uninterruptible
         self.tools_registry = tools_registry      # a prebuilt ToolRegistry (an Agent passes its own)
         self.skills_registry = skills_registry    # the Agent's SkillsRegistry (for the live prompt)
         # we own (and must close) a registry only if we build it ourselves; one
@@ -133,6 +136,7 @@ class Run:
                        tools_dispatch=dispatch,
                        hooks=hooks_registry,
                        ui=self.ui,
+                       interrupt=self.interrupt,
                        stream=self.stream)
         try:
             while True:
@@ -196,6 +200,9 @@ class Agent:
         self.skills_registry = SkillsRegistry.for_skills(self._skills, tools_registry=self.tools_registry)
         self._hooks = hooks   # [(event, fn), ...] or None; forwarded to each Run as-is
         self._ui = ui         # UI hooks prompt through; forwarded to each Run as-is
+        # set from another thread (stop()) to abort the in-flight run; each run()
+        # clears it so a fresh run starts un-interrupted.
+        self.interrupt = threading.Event()
         self.messages = []
 
     @property
@@ -243,10 +250,16 @@ class Agent:
         if messages is None: messages = []
         self.messages = messages
 
+    def stop(self):
+        """request the in-flight run abort at the next safe boundary (between
+        turns, or between streamed chunks). safe to call from another thread."""
+        self.interrupt.set()
+
     def run(self, prompt=None):
         """append `prompt` as a user turn (if given) and return a Run over the
         agent's live conversation. Iterate it to stream events; `messages`
         keeps growing, so the next run continues this conversation."""
+        self.interrupt.clear()
         if prompt is not None:
             self.messages.append({"role": "user", "content": prompt})
         return Run(self.messages,
@@ -255,6 +268,7 @@ class Agent:
                    system_prompt=self._system_prompt,
                    hooks=self._hooks,
                    ui=self._ui,
+                   interrupt=self.interrupt,
                    tools_registry=self.tools_registry,
                    skills_registry=self.skills_registry)
 

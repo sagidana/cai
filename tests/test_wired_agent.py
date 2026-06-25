@@ -57,6 +57,7 @@ def make_agent(tools=None, skills=None, hooks=None, api=None):
     agent.skills_registry = SkillsRegistry.for_skills([], tools_registry=agent.tools_registry)
     agent._hooks = hooks
     agent._ui = None
+    agent.interrupt = threading.Event()
     agent.messages = []
     return agent
 
