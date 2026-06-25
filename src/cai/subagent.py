@@ -17,10 +17,7 @@ The socket is opened at launch and closed at the child's death, when the driver
 tears the child down (closes the wire, the server, and the child Agent)."""
 from __future__ import annotations
 
-import os
-import shutil
 import logging
-import tempfile
 import threading
 
 from cai.agent import Agent, _tool_name
@@ -53,7 +50,6 @@ class SubAgent:
         self.server = None        # the UnixWiredAgent serving it
         self.server_thread = None # thread running server.serve()
         self.thread = None        # the driver thread (wire client)
-        self.sock_dir = None      # temp dir holding the unix socket file
         self.done = threading.Event()
         self.result = None
         self.error = None
@@ -100,8 +96,8 @@ def _child_system_prompt(parent, override):
 
 def _teardown(handle, client):
     """close everything this child owned: the wire client, the server (which
-    unlinks the socket and ends the serve loop), the child Agent (its MCP
-    servers), and the temp dir holding the socket."""
+    unlinks the socket and ends the serve loop) and the child Agent (its MCP
+    servers)."""
     if client is not None:
         try:
             client.close()
@@ -114,8 +110,6 @@ def _teardown(handle, client):
             handle.agent.close()
         except Exception:
             log.exception("sub-agent %r: closing child agent failed", handle.id)
-    if handle.sock_dir is not None:
-        shutil.rmtree(handle.sock_dir, ignore_errors=True)
 
 
 def _drive(handle):
@@ -183,9 +177,9 @@ def _launch_agent(parent, prompt, name, tools=None, skills=None, model="", syste
                              tools=child_tools,
                              skills=child_skills,
                              hooks=parent._hooks)
-        handle.sock_dir = tempfile.mkdtemp(prefix="cai-sub-")
-        sock_path = os.path.join(handle.sock_dir, "sock")
-        handle.server = UnixWiredAgent(handle.agent, sock_path)
+        # no path: the child registers at ~/.config/cai/agents/<name>.sock, the
+        # common folder every UnixWiredAgent binds in.
+        handle.server = UnixWiredAgent(handle.agent)
         handle.server_thread = threading.Thread(target=handle.server.serve,
                                                  daemon=True,
                                                  name=f"cai-sub-serve-{name}")

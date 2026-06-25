@@ -32,6 +32,7 @@ import queue
 import threading
 
 from cai.agent import _tool_name
+from cai.agents_registry import AgentsRegistry
 from cai.channel import UnixSocketServer
 from cai.ui import BaseUI
 from cai.wire import Wire
@@ -326,11 +327,18 @@ class UnixWiredAgent:
     the next - the agent (and its conversation) persists across reconnects.
     close() shuts the listener and unlinks the socket file, which ends serve().
 
+    path defaults to the common agents folder: ~/.config/cai/agents/<name>.sock,
+    keyed by the agent's name, so every UnixWiredAgent registers in one place. a
+    caller wanting a private socket (a test, an isolated child) passes its own.
+
     one client at a time, synchronous: a second client waits in the accept
     backlog until the first disconnects. concurrent multi-client serving is a
     later layer."""
 
-    def __init__(self, agent, path, *, backlog=8):
+    def __init__(self, agent, path=None, *, backlog=8):
+        if path is None:
+            AgentsRegistry.ensure_dir()
+            path = AgentsRegistry.sock_path(agent.name)
         self.agent = agent
         self.server = UnixSocketServer(path, backlog=backlog)
 
