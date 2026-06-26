@@ -399,15 +399,27 @@ def _session_preview(path, width, max_lines):
     return lines
 
 
+def _session_name(path):
+    """the agent name behind a .flow path: its basename without the extension."""
+    base = os.path.basename(path)
+    if base.endswith(".flow"):
+        base = base[:-len(".flow")]
+    return base
+
+
 def _load_session(screen, agent, status, path):
     """load a .flow into the agent in place, then refresh the view: clear the
     viewport, replay the conversation, and follow the restored model. shared by
-    :load and the :sessions picker. caller idle-gates (load mutates messages)."""
+    :load, the :sessions picker, and the --continue/--sessions resume flags.
+    caller idle-gates (load mutates messages)."""
     try:
         agent.load(path)
     except (OSError, ValueError) as e:
         screen.write(f"[load error] {e}\n", kind=Screen.ERROR)
         return
+    # adopt the loaded file's identity so autosave writes back to it (resume in
+    # place) instead of forking to the fresh agent's own <name>.flow.
+    agent.name = _session_name(path)
     status.set_model(agent.model)
     screen.clear_buffer()
     _replay_messages(screen, agent.get_messages())
@@ -570,9 +582,15 @@ def run(*,
         skills=None,
         reasoning_effort=None,
         temperature=None,
-        max_steps=None):
+        max_steps=None,
+        resume_path=None,
+        pick_session=False):
     """launch the interactive TUI around a fresh in-process Agent. blocks until
-    the user quits (:q, Ctrl-C, or EOF). returns the process exit code."""
+    the user quits (:q, Ctrl-C, or EOF). returns the process exit code.
+
+    resume_path loads that saved session at startup (--continue); pick_session
+    opens the :sessions picker at startup (--sessions). either resumes the chosen
+    session in place, so autosave writes back to it."""
     from cai import config
     from cai.agent import Agent
     from cai.hooks import HookEvent
@@ -652,6 +670,13 @@ def run(*,
 
     screen.write(f"cai — model {agent.model}. type to chat; :q to quit.\n\n",
                  kind=Screen.META)
+
+    # resume at startup: --continue loads the resolved session directly;
+    # --sessions opens the picker. nothing is running yet, so no idle gate.
+    if resume_path:
+        _load_session(screen, agent, status, resume_path)
+    elif pick_session:
+        _open_sessions(screen, agent, status)
 
     try:
         while not stop.is_set():

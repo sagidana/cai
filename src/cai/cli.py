@@ -84,6 +84,13 @@ def build_parser():
     parser.add_argument("-i", "--interactive",
                         action="store_true",
                         help="launch the full-screen interactive TUI")
+    parser.add_argument("-c", "--continue",
+                        dest="continue_session",
+                        action="store_true",
+                        help="resume the most recent saved session (implies -i)")
+    parser.add_argument("--sessions",
+                        action="store_true",
+                        help="pick a saved session to resume (implies -i)")
     parser.add_argument("--system-prompt",
                         default=None,
                         help="system prompt text")
@@ -250,8 +257,29 @@ def main(argv=None):
     prompt = _resolve_prompt(args, dashdash_prompt, parser)
     system_prompt = _resolve_system_prompt(args)
 
-    # interactive TUI: explicit (-i), or the default when cai is run on a
-    # terminal with no prompt to act on (no -p/'--', no --file, no piped stdin).
+    # resume flags. --continue resolves the most recent saved session up front;
+    # --sessions defers the choice to a picker shown once the TUI is up. both
+    # imply interactive and resume the chosen session in place (autosave writes
+    # back to it). they are mutually exclusive.
+    if args.continue_session and args.sessions:
+        parser.error("--continue and --sessions are mutually exclusive")
+    resume_path = None
+    pick_session = False
+    if args.continue_session:
+        from cai.session import SessionsRegistry
+        saved = SessionsRegistry.list_sessions()
+        if saved:
+            resume_path = saved[0]
+        else:
+            _diag("[no saved sessions to continue — starting fresh]")
+        args.interactive = True
+    elif args.sessions:
+        pick_session = True
+        args.interactive = True
+
+    # interactive TUI: explicit (-i / a resume flag), or the default when cai is
+    # run on a terminal with no prompt to act on (no -p/'--', no --file, no
+    # piped stdin).
     interactive = args.interactive
     if not interactive and prompt is None and not args.file and sys.stdin.isatty():
         interactive = True
@@ -263,7 +291,9 @@ def main(argv=None):
                        skills=args.skill,
                        reasoning_effort=args.reasoning_effort,
                        temperature=args.temperature,
-                       max_steps=args.max_steps)
+                       max_steps=args.max_steps,
+                       resume_path=resume_path,
+                       pick_session=pick_session)
 
     messages = _build_messages(args, prompt, parser)
     if not messages:
