@@ -342,7 +342,11 @@ class WiredAgent:
         its origin wire so its reply is unicast back."""
         kind = msg.get("type")
         if kind == Wire.SUBMIT:
-            self._work.put(("submit", msg.get("text") or ""))
+            # a None text is a continue: _run_turn -> agent.run(None) re-enters
+            # the loop without appending a user turn. real submits always carry
+            # non-empty text (the TUI guards empty input), so nothing else hits
+            # this path.
+            self._work.put(("submit", msg.get("text")))
             return
         if kind == Wire.CONTROL:
             op = msg.get("op")

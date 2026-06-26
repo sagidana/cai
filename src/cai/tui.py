@@ -15,11 +15,11 @@ single status thread samples them every _REFRESH_INTERVAL and renders the line,
 so a stream that goes quiet falls back to 'waiting' on its own without any event
 to trigger it.
 
-The `:`-commands cover the session: :models / :messages / :sessions / :save /
-:load, plus :tools and :skills to toggle which tools and skills the agent uses.
-Each picker is a screen overlay; the mutating ones (:messages, :sessions, :load,
-:tools, :skills) are refused while a run is in flight so they never race the
-worker's view of the conversation or the tool registry.
+The `:`-commands cover the session: :models / :messages / :history / :sessions /
+:save / :load, plus :tools and :skills to toggle which tools and skills the agent
+uses. Each picker is a screen overlay; the mutating ones (:messages, :history,
+:sessions, :load, :tools, :skills) are refused while a run is in flight so they
+never race the worker's view of the conversation or the tool registry.
 """
 import logging
 import os
@@ -38,6 +38,10 @@ from cai.wire import Wire
 
 log = logging.getLogger("cai")
 
+# jobs-queue sentinel: a continue turn (re-enter the agentic loop with no new user
+# message), enqueued after a :history fork that lands on an unfinished point.
+_CONTINUE = object()
+
 
 # command palette (Ctrl-P) and command-mode (:) completion entries.
 _PALETTE_COMMANDS = [
@@ -45,6 +49,7 @@ _PALETTE_COMMANDS = [
     ("tools", "enable / disable tools"),
     ("skills", "activate / deactivate skills"),
     ("messages", "view / edit / delete the conversation"),
+    ("history", "fork back to an earlier point in this conversation"),
     ("agents", "live view of sub-agents"),
     ("sessions", "load a saved session"),
     ("save", "save the session (optional path)"),
@@ -275,6 +280,12 @@ class AgentClient:
     def submit(self, text):
         self.stream.send_submit(text)
 
+    def continue_run(self):
+        """re-enter the agentic loop with no new user turn. a None-text SUBMIT
+        runs agent.run(None) on the host - used after a :history fork lands on an
+        unfinished point (a user turn, a tool result, or a pending tool call)."""
+        self.stream.send_submit(None)
+
     def steer(self, text):
         self.stream.send_steer(text)
 
@@ -416,7 +427,10 @@ class _Worker(threading.Thread):
         self._push_tokens()
         ui = BaseUI()
         try:
-            self._client.submit(text)
+            if text is _CONTINUE:
+                self._client.continue_run()
+            else:
+                self._client.submit(text)
             result = None
             while result is None:
                 messages = self._client.recv()
@@ -462,6 +476,83 @@ def _open_messages(screen, client, status):
         sample_chars=sample_chars)
     if modified:
         client.set_messages(edited)
+
+
+def _history_node_label(node):
+    if node["role"] == "user":
+        return "user"
+    if node["has_tools"]:
+        return "assistant + tools"
+    return "assistant"
+
+
+def _history_node_color(node):
+    from cai.screen.ansi import SGR_CYAN, SGR_GREEN
+
+    if node["role"] == "user":
+        return SGR_GREEN
+    return SGR_CYAN
+
+
+def _history_node_preview(tree, node, width, max_lines):
+    from cai.screen.render import _preview_lines
+
+    convo = []
+    for message in tree.prefix_messages(node["id"]):
+        if message.get("role") == "system": continue
+        convo.append(message)
+    head = f"{len(convo)} messages"[:width]
+    lines = [head, ""]
+    body = max(1, max_lines - len(lines))
+    lines.extend(_preview_lines(convo, width, body))
+    return lines[:max_lines]
+
+
+def _open_history(screen, client, status, jobs):
+    """open the :history fork view over a snapshot of the conversation. on Enter,
+    rewind the live conversation to the chosen node, repaint the viewport to match,
+    and - unless the snapshot ends on a final assistant reply - re-enter the
+    agentic loop with a continue turn. the tree lives on the screen across opens;
+    ingest() drops and rebuilds it when the conversation no longer shares its first
+    turn (a clear / load / resume), so stale branches never linger."""
+    from cai.history import HistoryTree
+    from cai.screen.overlays.tree import _flatten_history
+
+    msgs = client.get_messages()
+    if not msgs:
+        screen.write("[no history yet]\n", kind=Screen.META)
+        return
+    tree = screen._convo_history_tree
+    if tree is None:
+        tree = HistoryTree()
+        screen._convo_history_tree = tree
+    tree.ingest(msgs)
+    if not tree.nodes():
+        screen.write("[no history yet]\n", kind=Screen.META)
+        return
+
+    def _preview(node, width, max_lines):
+        return _history_node_preview(tree, node, width, max_lines)
+
+    def _is_head(node):
+        return node["is_head"]
+
+    sel = screen.prompt_tree_overlay(
+        tree.nodes,
+        label_fn=_history_node_label,
+        preview_fn=_preview,
+        color_fn=_history_node_color,
+        is_self_fn=_is_head,
+        flatten_fn=_flatten_history,
+        title="history",
+        hints='  j/k /:search ↵:fork ESC:cancel')
+    if sel is None:
+        return
+    client.set_messages(tree.prefix_messages(sel))
+    screen.clear_buffer()
+    _replay_messages(screen, client.get_messages())
+    if tree.should_continue(sel):
+        jobs.put(_CONTINUE)
 
 
 def _open_models(screen, client, status, registry):
@@ -811,7 +902,7 @@ def _open_skills(screen, client):
     client.set_selected_skills(sorted(new_active))
 
 
-def _handle_command(screen, client, status, registry, cmd):
+def _handle_command(screen, client, status, registry, jobs, cmd):
     """dispatch a `:`-command. returns True to quit the loop, else False.
 
     cmd is the raw command string (the text after ':'); the first token is the
@@ -866,6 +957,12 @@ def _handle_command(screen, client, status, registry, cmd):
             screen.write("[busy — open :messages when idle]\n", kind=Screen.META)
             return False
         _open_messages(screen, client, status)
+        return False
+    if head == "history":
+        if screen._busy:
+            screen.write("[busy — open :history when idle]\n", kind=Screen.META)
+            return False
+        _open_history(screen, client, status, jobs)
         return False
     if head == "agents":
         _open_agents(screen, client)
@@ -1000,7 +1097,7 @@ def run(*,
             if screen._command_result is not None:
                 cmd = screen._command_result
                 screen._command_result = None
-                if _handle_command(screen, client, status, registry, cmd):
+                if _handle_command(screen, client, status, registry, jobs, cmd):
                     break
                 continue
             # '!text' steers the in-flight run; with nothing running it is just
