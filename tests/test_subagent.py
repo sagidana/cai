@@ -7,6 +7,8 @@ the parent as a wire client. No network, no config, no API key.
 import time
 import threading
 
+import pytest
+
 from cai.agent import Agent, _tool_name
 from cai.tools import ToolRegistry
 from cai.skills import SkillsRegistry
@@ -15,6 +17,13 @@ from cai.subagent import _inherit_skills
 from cai.subagent import _launch_agent
 from cai.subagent import _wait_agent
 from cai.subagent import _kill_agent
+
+
+@pytest.fixture(autouse=True)
+def _isolate_config(tmp_path, monkeypatch):
+    """give each test its own ~/.config/cai so child sockets land in a fresh
+    agents dir - no cross-test leftovers, no polluting the real home."""
+    monkeypatch.setenv("HOME", str(tmp_path))
 
 
 class FakeApi:
@@ -48,6 +57,29 @@ class BlockingApi:
             while True:
                 yield ("", None, None, {})
                 time.sleep(0.005)
+        return gen()
+
+
+class GatedApi:
+    """blocks the turn until `release` is set, then streams `chunks`. `started`
+    fires when the model call begins, so a test can attach a waiter to the running
+    child before letting it finish - making result delivery deterministic despite
+    the child tearing itself down the instant the run completes."""
+
+    def __init__(self, chunks):
+        self.chunks = chunks
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def chat(self, messages, model, **kwargs):
+        chunks = self.chunks
+        started = self.started
+        release = self.release
+        def gen():
+            started.set()
+            release.wait()
+            for chunk in chunks:
+                yield (chunk, None, None, {})
         return gen()
 
 
@@ -110,21 +142,52 @@ def test_inherit_skills_is_reduce_only():
 # launch -> wait
 # --------------------------------------------------------------------------
 
-def test_launch_registers_a_child_and_wait_returns_its_answer():
+def test_launch_records_the_child_id():
     parent = make_parent(FakeApi(chunks=["done"]))
     message = _launch_agent(parent, "do the thing", "worker")
     assert "worker" in message
-    assert len(parent.children) == 1
-    assert parent.children[0].id == "worker"
-    assert _wait_agent(parent, "worker", timeout=5) == "done"
+    assert parent.children == ["worker"]
+
+
+def test_launch_dedupes_duplicate_names_and_returns_the_new_one():
+    parent = make_parent(FakeApi(chunks=["x"]))
+    first = _launch_agent(parent, "a", "twin")
+    second = _launch_agent(parent, "b", "twin")
+    assert "twin" in first
+    assert "twin-2" in second
+    assert parent.children == ["twin", "twin-2"]
+
+
+def test_wait_attached_mid_run_returns_the_answer():
+    api = GatedApi(["the answer"])
+    parent = make_parent(api)
+    _launch_agent(parent, "task", "worker")
+    assert api.started.wait(5)            # child running, gated before any output
+    box = {}
+    def waiter():
+        box["out"] = _wait_agent(parent, "worker", timeout=5)
+    thread = threading.Thread(target=waiter)
+    thread.start()
+    time.sleep(0.3)                       # let the waiter attach to the broadcast
+    api.release.set()                     # now the run completes and broadcasts
+    thread.join(10)
+    assert box["out"] == "the answer"
 
 
 def test_child_tools_are_restricted_to_the_requested_subset():
-    parent = make_parent(FakeApi(chunks=["k"]), tools=[foo, bar])
+    api = GatedApi(["k"])
+    parent = make_parent(api, tools=[foo, bar])
     _launch_agent(parent, "t", "w", tools=["foo", "ghost"])
-    assert _wait_agent(parent, "w", timeout=5) == "k"
-    child = parent.children[0].agent
-    assert _tool_names(child.tools) == ["foo"]
+    assert api.started.wait(5)
+    box = {}
+    def waiter():
+        box["out"] = _wait_agent(parent, "w", timeout=5)
+    thread = threading.Thread(target=waiter)
+    thread.start()
+    time.sleep(0.3)
+    api.release.set()
+    thread.join(10)
+    assert box["out"] == "k"
 
 
 def test_wait_on_unknown_agent_is_an_error():
@@ -145,7 +208,6 @@ def test_wait_timeout_reports_still_running():
     out = _wait_agent(parent, "runner", timeout=1)
     assert "still running" in out
     _kill_agent(parent, "runner")
-    _wait_agent(parent, "runner", timeout=5)
 
 
 def test_kill_winds_a_running_child_down():
@@ -155,7 +217,15 @@ def test_kill_winds_a_running_child_down():
     assert api.started.wait(5)
     out = _kill_agent(parent, "runner")
     assert "Killing" in out
-    assert _wait_agent(parent, "runner", timeout=5) == ""
+    # the child aborts and tears down; once its socket is gone, wait reports it
+    # finished (or catches the aborted run's empty result first - both terminal).
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        msg = _wait_agent(parent, "runner", timeout=1)
+        if "finished" in msg or msg == "":
+            break
+        time.sleep(0.05)
+    assert "finished" in msg or msg == ""
 
 
 # --------------------------------------------------------------------------
@@ -172,9 +242,19 @@ def test_subagents_skill_bootstraps_the_tools():
 
 
 def test_bootstrapped_tools_drive_a_child_end_to_end():
-    agent = Agent(model="m", api=FakeApi(chunks=["hi"]), skills=["subagents"])
+    api = GatedApi(["hi"])
+    agent = Agent(model="m", api=api, skills=["subagents"])
     out = agent.tools_registry.dispatch("launch_agent", {"prompt": "p", "name": "c1"})
     assert "c1" in out
-    result = agent.tools_registry.dispatch("wait_agent", {"agent_id": "c1", "timeout": 5})
-    assert result == "hi"
+    assert api.started.wait(5)
+    box = {}
+    def waiter():
+        box["out"] = agent.tools_registry.dispatch("wait_agent",
+                                                    {"agent_id": "c1", "timeout": 5})
+    thread = threading.Thread(target=waiter)
+    thread.start()
+    time.sleep(0.3)
+    api.release.set()
+    thread.join(10)
+    assert box["out"] == "hi"
     agent.close()

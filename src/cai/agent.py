@@ -24,6 +24,7 @@ attach, saving, and cloning are later layers."""
 from __future__ import annotations
 
 import logging
+import os
 import secrets
 import string
 import threading
@@ -156,7 +157,7 @@ class Agent:
         self._killed = threading.Event()
         self._steer = SteerQueue()
         self.messages = []
-        self.children = []
+        self.children = []   # ids of the sub-agents launched this session
         self.tools_registry = ToolRegistry()
 
         # registers subagents tools (lazy import: subagent imports Agent in turn).
@@ -164,7 +165,8 @@ class Agent:
         # name was inherited from a parent (a child's launch_agent must drive the
         # child, not the parent).
         from cai.subagent import subagent_tools
-        for tool in subagent_tools(self): self.tools_registry.register(tool, override=True)
+        for tool in subagent_tools(self):
+            self.tools_registry.register(tool, override=True)
 
         for tool in (tools or []): self.tools_registry.select(tool)
 
@@ -284,9 +286,7 @@ class Agent:
         # a warning. registered-but-unselected tools are not persisted.
         # the ids of the sub-agents this agent launched (each saved under its own
         # '<id>.flow'), so the :sessions picker can nest them under this session.
-        children = []
-        for handle in self.children:
-            children.append(handle.id)
+        children = list(self.children)
         payload = SessionsRegistry.flow_payload(list(self.messages),
                                                 self.system_prompt,
                                                 self._system_prompt,
@@ -302,13 +302,19 @@ class Agent:
 
     def load(self, path):
         """replace the conversation + settings in place from a .flow file, so a
-        served agent keeps its identity and live aliases. the stored leading
-        system message is dropped and the prompt is re-derived from base +
-        skills. tools restore by name only (function tools must be re-supplied via
-        the constructor). returns the path loaded."""
+        served agent keeps its live aliases. the agent also adopts the loaded
+        file's stem as its name, so autosave writes back to that file instead of
+        clobbering this agent's own '<name>.flow'. the stored leading system
+        message is dropped and the prompt is re-derived from base + skills. tools
+        restore by name only (function tools must be re-supplied via the
+        constructor). returns the path loaded."""
         from cai.session import SessionsRegistry
 
         payload = SessionsRegistry.read_flow(path)
+        # retarget name -> the loaded file, so autosave follows it.
+        self.name = os.path.splitext(os.path.basename(path))[0]
+        # restore the flow's sub-agent ids so re-saving keeps the nesting.
+        self.children = list(payload.get("children") or [])
         settings = payload.get("settings") or {}
         messages = list(payload.get("messages") or [])
         # the agent owns the composed prompt; drop a stored leading system msg.

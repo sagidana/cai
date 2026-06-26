@@ -494,9 +494,7 @@ class WiredAgent:
             agent.set_model(value)
             return True, None, None
         if op == "get_info":
-            children = []
-            for handle in agent.children:
-                children.append(handle.id)
+            children = list(agent.children)
             value = {}
             value["name"] = agent.name
             value["model"] = agent.model

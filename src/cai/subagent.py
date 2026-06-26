@@ -5,22 +5,29 @@ three tools at construction (subagent_tools), bound to the parent so they read
 its live state. They are in-process bound tools, NOT MCP tools - an MCP server
 runs in its own subprocess and cannot reach the parent's live Agent.
 
-launch_agent spawns a child Agent and serves it with UnixWiredAgent on its own
-unix socket; a background driver thread connects as a wire client, SUBMITs the
-task, drains the run, and collects the final RESULT into a SubAgent handle. The
-child inherits the parent's api / model / hooks; its tools and skills are
-reduce-only - only a subset of the parent's, requested by name. wait_agent polls
-that handle for the final answer (the only supported channel for now); kill_agent
-stops a running child, which winds it down and frees its socket.
+launch_agent builds a child Agent, serves it with UnixWiredAgent on its own unix
+socket, and hands it to one owner thread that drives it to completion and tears
+it down. From then on the parent reaches the child only over that socket: it
+keeps just the child's id (its socket is AgentsRegistry.sock_path(id)). The child
+inherits the parent's api / model / hooks; its tools and skills are reduce-only -
+only a subset of the parent's, requested by name.
 
-The socket is opened at launch and closed at the child's death, when the driver
-tears the child down (closes the wire, the server, and the child Agent)."""
+wait_agent attaches to the child's socket and waits for the run's RESULT;
+kill_agent sends the kill control op over the wire. A child tears down the moment
+its run finishes, so a wait_agent that attaches too late finds it already gone -
+its result is not retained yet (a future feature pushes the result to the parent
+before teardown). Ownership is a plain membership check: an id must be in
+parent.children for these tools to act on it."""
 from __future__ import annotations
 
 import logging
+import os
+import socket
 import threading
+import time
 
 from cai.agent import Agent
+from cai.agents_registry import AgentsRegistry
 from cai.channel import connect
 from cai.ui import BaseUI
 from cai.wire import Wire
@@ -36,23 +43,6 @@ PREAMBLE = ("You are a sub-agent spawned by a parent agent to complete a specifi
             "task. Work autonomously - you cannot ask the parent questions. Your "
             "final message is the only thing the parent receives, so make it a "
             "complete, self-contained answer.")
-
-
-class SubAgent:
-    """handle for one launched child: its identity plus the live machinery the
-    driver fills - the child Agent, the UnixWiredAgent serving it, the server and
-    driver threads, and the done/result/error a wait_agent reads."""
-
-    def __init__(self, id, prompt):
-        self.id = id
-        self.prompt = prompt
-        self.agent = None         # the child Agent
-        self.server = None        # the UnixWiredAgent serving it
-        self.server_thread = None # thread running server.serve()
-        self.thread = None        # the driver thread (wire client)
-        self.done = threading.Event()
-        self.result = None
-        self.error = None
 
 
 def _inherit_tools(parent, names):
@@ -93,61 +83,60 @@ def _child_system_prompt(parent, override):
     return "\n\n".join(parts)
 
 
-def _teardown(handle, client):
-    """close everything this child owned: the wire client, the server (which
-    unlinks the socket and ends the serve loop) and the child Agent (its MCP
-    servers)."""
-    if client is not None:
-        try:
-            client.close()
-        except OSError:
-            pass
-    if handle.server is not None:
-        handle.server.close()
-    if handle.agent is not None:
-        try:
-            handle.agent.close()
-        except Exception:
-            log.exception("sub-agent %r: closing child agent failed", handle.id)
+def _unique_name(parent, name):
+    """a child name not already taken by a sibling or a live socket; append a
+    numeric suffix on collision so each child gets its own socket. checked against
+    parent.children (ids never leave the list, so this is the durable guard) and
+    against an existing socket file (a live agent elsewhere)."""
+    candidate = name
+    n = 1
+    taken = set(parent.children)
+    while candidate in taken or os.path.exists(AgentsRegistry.sock_path(candidate)):
+        n += 1
+        candidate = f"{name}-{n}"
+    return candidate
 
 
-def _drive(handle):
-    """connect to the served child, submit its task, drain the run dropping the
-    streamed events (poll-only for now), and collect the final RESULT into the
-    handle - then tear the child down. runs on its own thread so launch_agent
-    returns at once. a BaseUI answers any wire PROMPT with its default, so a
-    child whose hook asks the human never hangs."""
+def _own_child(agent, server, prompt):
+    """own one launched child end to end on a single thread: serve it, submit its
+    task over the socket, drain the run (poll-only - streamed events are dropped),
+    then tear it down (the wire, the server+socket, the child Agent). a BaseUI
+    answers any wire PROMPT with its default, so a child whose hook asks the human
+    never hangs. the final result is dropped for now; a future feature pushes it
+    to the parent here, before teardown."""
+    server_thread = threading.Thread(target=server.serve,
+                                     daemon=True,
+                                     name=f"cai-sub-serve-{agent.name}")
+    server_thread.start()
     ui = BaseUI()
     client = None
     try:
-        client = connect(handle.server.path)
+        client = connect(server.path)
         wire = Wire(client)
-        wire.send_submit(handle.prompt)
-        result = None
-        while result is None:
+        wire.send_submit(prompt)
+        while True:
             messages = wire.recv()
             if messages is None: break
+            done = False
             for msg in messages:
                 if wire.answer(msg, ui): continue
                 if msg.get("type") != Wire.RESULT: continue
-                result = msg.get("text") or ""
+                done = True
                 break
-        if result is None:
-            result = ""
-        handle.result = result
-    except Exception as e:
-        log.exception("sub-agent %r driver failed", handle.id)
-        handle.error = f"Error: {type(e).__name__}: {e}"
+            if done: break
+    except Exception:
+        log.exception("sub-agent %r owner failed", agent.name)
     finally:
-        _teardown(handle, client)
-        handle.done.set()
-
-
-def _find(parent, agent_id):
-    for handle in parent.children:
-        if handle.id == agent_id:
-            return handle
-    return None
+        if client is not None:
+            try:
+                client.close()
+            except OSError:
+                pass
+        server.close()
+        try:
+            agent.close()
+        except Exception:
+            log.exception("sub-agent %r: closing child agent failed", agent.name)
 
 
 _LAUNCH_DOC = """Launch ONE background sub-agent and return its agent_id (its name); call it like launch_agent(prompt="<self-contained task>", name="audit-auth-flow"). Pass arguments as named fields.
@@ -156,40 +145,46 @@ _LAUNCH_DOC = """Launch ONE background sub-agent and return its agent_id (its na
     ``prompt`` must be self-contained. ``tools`` and ``skills`` are each a LIST
     of names (a subset of your own); nothing is inherited by default. ``model``
     and ``system_prompt`` override the inherited model / replace the prompt. It
-    runs in the background - collect its result with wait_agent(agent_id=...).
+    runs in the background - collect its result with wait_agent(agent_id=...). The
+    returned name may be de-duplicated, so use the one this returns.
     """
 
 
-def _launch_agent(parent, prompt, name, tools=None, skills=None, model="", system_prompt=""):
-    """build a reduce-only child Agent, serve it over a unix socket, and drive it
-    from a background thread; return at once with the child's name."""
+def _launch_agent(parent,
+                  prompt,
+                  name,
+                  tools=None,
+                  skills=None,
+                  model="",
+                  system_prompt=""):
+    """build a reduce-only child Agent, serve it on its own unix socket, and hand
+    it to an owner thread that drives it to completion and tears it down. the
+    parent keeps only the child's id. returns at once with the (possibly
+    de-duplicated) name."""
     try:
+        name = _unique_name(parent, name)
         child_tools = _inherit_tools(parent, tools)
         child_skills = _inherit_skills(parent, skills)
         child_model = model or parent.model
         child_prompt = _child_system_prompt(parent, system_prompt)
-        handle = SubAgent(name, prompt)
-        handle.agent = Agent(name=name,
-                             model=child_model,
-                             api=parent.api,
-                             system_prompt=child_prompt,
-                             tools=child_tools,
-                             skills=child_skills,
-                             hooks=parent._hooks)
+        agent = Agent(name=name,
+                      model=child_model,
+                      api=parent.api,
+                      system_prompt=child_prompt,
+                      tools=child_tools,
+                      skills=child_skills,
+                      hooks=parent._hooks)
         # no path: the child registers at ~/.config/cai/agents/<name>.sock, the
         # common folder every UnixWiredAgent binds in.
-        handle.server = UnixWiredAgent(handle.agent)
-        handle.server_thread = threading.Thread(target=handle.server.serve,
-                                                 daemon=True,
-                                                 name=f"cai-sub-serve-{name}")
-        handle.thread = threading.Thread(target=_drive,
-                                         args=(handle,),
-                                         daemon=True,
-                                         name=f"cai-sub-{name}")
-        parent.children.append(handle)
-        handle.server_thread.start()
-        handle.thread.start()
-        return f"Launched sub-agent '{name}'. Collect its result with wait_agent('{name}')."
+        server = UnixWiredAgent(agent)
+        thread = threading.Thread(target=_own_child,
+                                  args=(agent, server, prompt),
+                                  daemon=True,
+                                  name=f"cai-sub-{name}")
+        parent.children.append(name)
+        thread.start()
+        return (f"Launched sub-agent '{name}'. Collect its result with "
+                f"wait_agent('{name}').")
     except Exception as e:
         log.exception("launch_agent failed")
         return f"Error: launch_agent failed: {type(e).__name__}: {e}"
@@ -209,30 +204,87 @@ def make_launch_agent(parent):
     return launch_agent
 
 
-_WAIT_DOC = """Wait for ONE sub-agent to finish and return its answer; call it like wait_agent(agent_id="audit-auth-flow") with the name launch_agent returned. agent_id is a single string, one per call - to wait on several, make several calls.
+def _send_kill(agent_id):
+    """send the kill control op to a child over a short-lived connection. returns
+    False when there is no socket to reach (the child already tore down)."""
+    try:
+        client = connect(AgentsRegistry.sock_path(agent_id))
+    except OSError:
+        return False
+    try:
+        Wire(client).control("kill")
+        return True
+    except OSError:
+        return False
+    finally:
+        try:
+            client.close()
+        except OSError:
+            pass
 
-    On timeout the sub-agent keeps running; call wait_agent again to keep
-    waiting. Pass kill=True to instead kill it when the timeout expires and
-    return whatever partial output it had produced.
+
+def _drain(wire, timeout):
+    """read a child's stream until its RESULT (returned) or EOF (None), bounded by
+    `timeout` seconds total. non-RESULT messages (events, broadcast prompts the
+    owner answers) are skipped. returns (result_or_None, timed_out)."""
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None, True
+        try:
+            wire.channel.settimeout(remaining)
+            messages = wire.recv()
+        except socket.timeout:
+            return None, True
+        except OSError:
+            return None, False     # socket gone mid-read: the child tore down
+        if messages is None:
+            return None, False
+        for msg in messages:
+            if msg.get("type") != Wire.RESULT: continue
+            return (msg.get("text") or ""), False
+
+
+_WAIT_DOC = """Wait for ONE sub-agent and return its answer; call it like wait_agent(agent_id="audit-auth-flow") with the name launch_agent returned. agent_id is a single string, one per call - to wait on several, make several calls.
+
+    Attaches to the running child over its socket. On timeout the sub-agent keeps
+    running; call wait_agent again to keep waiting, or pass kill=True to kill it
+    when the timeout expires. A child that already finished has torn down, so its
+    answer is no longer retrievable here.
     """
 
 
 def _wait_agent(parent, agent_id, timeout=30, kill=False):
-    """poll a child handle for its final answer; on timeout report it is still
-    running, or (kill=True) kill it and collect whatever partial output it had."""
-    handle = _find(parent, agent_id)
-    if handle is None:
+    """attach to a child over its socket and wait for the run's RESULT. on timeout
+    report it is still running, or (kill=True) kill it and drain what it emits. a
+    child that has finished and torn down is gone - its result is not retained."""
+    if agent_id not in parent.children:
         return f"Error: no sub-agent named '{agent_id}'."
-    finished = handle.done.wait(timeout)
-    if not finished:
+    try:
+        client = connect(AgentsRegistry.sock_path(agent_id))
+    except OSError:
+        return f"Sub-agent '{agent_id}' already finished."
+    wire = Wire(client)
+    try:
+        result, timed_out = _drain(wire, timeout)
+        if not timed_out:
+            if result is None:
+                return f"Sub-agent '{agent_id}' already finished."
+            return result
         if not kill:
             return (f"Sub-agent '{agent_id}' is still running after {timeout}s; "
                     f"call wait_agent('{agent_id}') again to keep waiting.")
-        handle.agent.kill()
-        handle.done.wait()
-    if handle.error is not None:
-        return handle.error
-    return handle.result or ""
+        _send_kill(agent_id)
+        result, _timed_out = _drain(wire, timeout)
+        if result is None:
+            return f"Killed sub-agent '{agent_id}'; it produced no output."
+        return result
+    finally:
+        try:
+            client.close()
+        except OSError:
+            pass
 
 
 def make_wait_agent(parent):
@@ -245,22 +297,18 @@ def make_wait_agent(parent):
 
 _KILL_DOC = """Kill ONE running sub-agent now; call it like kill_agent(agent_id="audit-auth-flow") with the name launch_agent returned. It winds down in the background.
 
-    Returns immediately. Collect whatever partial output it produced with
-    wait_agent(agent_id="<name>").
+    Returns immediately. A child that already finished is gone.
     """
 
 
 def _kill_agent(parent, agent_id):
-    """retire a running child; it winds down on its own thread, the driver then
-    collects its partial output and frees the socket."""
-    handle = _find(parent, agent_id)
-    if handle is None:
+    """retire a running child over the wire; it aborts its run and tears down on
+    its own thread."""
+    if agent_id not in parent.children:
         return f"Error: no sub-agent named '{agent_id}'."
-    if handle.done.is_set():
+    if not _send_kill(agent_id):
         return f"Sub-agent '{agent_id}' already finished."
-    handle.agent.kill()
-    return (f"Killing sub-agent '{agent_id}'. Collect any partial output with "
-            f"wait_agent('{agent_id}').")
+    return f"Killing sub-agent '{agent_id}'."
 
 
 def make_kill_agent(parent):
