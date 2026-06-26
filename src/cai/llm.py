@@ -96,21 +96,15 @@ def _parse_args(arguments):
     return True, parsed
 
 
-def _synth_call_id(index):
-    """a stand-in id for a tool call the model sent without one, so the assistant
-    turn and its tool reply still reference the same id on the next model call."""
-    return f"cai_tool_call_{index}"
-
-
 def _normalize_tool_calls(tool_calls):
-    """coerce the provider's raw tool_calls into calls cai can trust: drop
-    entries that aren't well-formed function calls, and guarantee each surviving
-    call carries a string id (synthesized when missing or duplicated) and a
-    string argument blob. dropping is logged, never raised, so one malformed call
-    can't abort the whole run; keeping ids unique keeps the assistant turn and its
-    tool replies lined up on the next model call."""
+    """coerce the provider's raw tool_calls into call records cai can trust: drop
+    entries that aren't well-formed function calls, and validate each survivor's
+    arguments exactly once here, so _handle_tool_calls never re-parses. each record
+    keeps the provider's own id verbatim (the provider matches tool replies on it,
+    so we must never rewrite it), the model's original argument string, the parsed
+    args, and whether they parsed. dropping is logged, never raised, so one
+    malformed call can't abort the whole run."""
     calls = []
-    seen = set()
     for call in tool_calls:
         if not isinstance(call, dict):
             log.warning("dropping tool call that is not an object: %r", call)
@@ -127,18 +121,15 @@ def _normalize_tool_calls(tool_calls):
             log.warning("dropping tool call with no function name: %r", call)
             continue
         arguments = function.get('arguments')
-        if isinstance(arguments, dict):
-            arguments = json.dumps(arguments)
         if not isinstance(arguments, str):
             arguments = ''
-        call_id = call.get('id')
-        if not isinstance(call_id, str) or not call_id or call_id in seen:
-            call_id = _synth_call_id(len(calls))
-        seen.add(call_id)
+        valid, args = _parse_args(arguments)
         clean = {}
-        clean['id'] = call_id
+        clean['id'] = call.get('id')
         clean['name'] = name
         clean['arguments'] = arguments
+        clean['args'] = args
+        clean['valid'] = valid
         calls.append(clean)
     return calls
 
@@ -237,16 +228,23 @@ def _handle_tool_calls(calls,
     emit tool_call, fire before_tool_call (veto), dispatch, emit tool_result,
     append the tool message, fire messages_mutated + after_tool_call. Mutates
     `messages` in place and yields the tool events. `calls` is the normalized
-    list from _normalize_tool_calls, so every entry has a string id, name, and
-    argument blob; every call gets a matching tool message, even one whose
-    arguments don't parse, so the next request's tool_call ids all line up."""
+    list from _normalize_tool_calls, so every entry has an id, name, original
+    argument blob, parsed args, and a valid flag; every call gets a matching tool
+    message, even one whose arguments don't parse, so the next request's tool_call
+    ids all line up."""
     # one assistant message carrying every call (the canonical OpenAI shape:
-    # one assistant turn with N tool_calls, then N tool messages).
+    # one assistant turn with N tool_calls, then N tool messages). arguments that
+    # didn't parse are echoed as '{}' rather than the model's broken blob: a strict
+    # provider re-parses the history and 400s on invalid JSON. the original blob is
+    # still shown to the model in the tool result below, so it can correct itself.
     wire_calls = []
     for call in calls:
+        arguments = call['arguments']
+        if not call['valid']:
+            arguments = '{}'
         function = {}
         function['name'] = call['name']
-        function['arguments'] = call['arguments']
+        function['arguments'] = arguments
         wire_call = {}
         wire_call['id'] = call['id']
         wire_call['type'] = 'function'
@@ -265,7 +263,7 @@ def _handle_tool_calls(calls,
         call_id = call['id']
         name = call['name']
         arguments = call['arguments']
-        ok, args = _parse_args(arguments)
+        args = call['args']
 
         yield Event(type=EventType.TOOL_CALL, tool_name=name, tool_args=args, tool_call_id=call_id)
 
@@ -286,7 +284,7 @@ def _handle_tool_calls(calls,
         if vetoed:
             result = f"Error: tool '{name}' was aborted by a before_tool_call hook"
             log.info("tool call: %s vetoed by hook", name)
-        elif not ok:
+        elif not call['valid']:
             result = f"Error: arguments for tool '{name}' were not valid JSON: {arguments}"
             log.info("tool call: %s had unparseable arguments", name)
         else:
