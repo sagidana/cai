@@ -50,6 +50,7 @@ _PALETTE_COMMANDS = [
     ("skills", "activate / deactivate skills"),
     ("messages", "view / edit / delete the conversation"),
     ("history", "fork back to an earlier point in this conversation"),
+    ("continue", "continue the conversation without a new prompt"),
     ("agents", "live view of sub-agents"),
     ("sessions", "load a saved session"),
     ("save", "save the session (optional path)"),
@@ -964,6 +965,15 @@ def _handle_command(screen, client, status, registry, jobs, cmd):
             return False
         _open_history(screen, client, status, jobs)
         return False
+    if head == "continue":
+        if screen._busy:
+            screen.write("[busy — :continue when idle]\n", kind=Screen.META)
+            return False
+        if not client.get_messages():
+            screen.write("[nothing to continue]\n", kind=Screen.META)
+            return False
+        jobs.put(_CONTINUE)
+        return False
     if head == "agents":
         _open_agents(screen, client)
         return False
@@ -1076,6 +1086,28 @@ def run(*,
         return False
 
     screen.set_interrupt_handler(_on_interrupt)
+
+    def _on_recall():
+        # Ctrl-X: take back the last user prompt (e.g. one just Ctrl-C'd before
+        # the model answered). only when idle and the conversation actually ends
+        # on a plain user message - an interrupted turn that left a partial
+        # assistant reply, or a mid-run conversation, is left untouched. returns
+        # the text for the screen to drop into the input box; None does nothing.
+        if screen._busy:
+            return None
+        msgs = client.get_messages()
+        if not msgs:
+            return None
+        last = msgs[-1]
+        if last.get("role") != "user":
+            return None
+        content = last.get("content")
+        if not isinstance(content, str):
+            return None
+        client.set_messages(msgs[:-1])
+        return content
+
+    screen.set_recall_handler(_on_recall)
 
     worker = _Worker(client, screen, jobs, stop, status)
     worker.start()
