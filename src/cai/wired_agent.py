@@ -408,14 +408,18 @@ class WiredAgent:
             pass
 
     def _broadcast(self, method, *args):
-        """call `method`(*args) on every live wire; a wire that errors is dropped.
-        the set is snapshotted so a disconnect mid-broadcast can't mutate it."""
+        """call `method`(*args) on every live wire as a best-effort send: a wire
+        whose peer isn't draining its socket drops the message (it loses that
+        event) instead of blocking the broadcast to every other wire - one stuck
+        client can no longer wedge the run. a wire whose socket is dead raises
+        OSError and is dropped. the set is snapshotted so a disconnect mid-broadcast
+        can't mutate it."""
         with self._wires_lock:
             wires = list(self._wires)
         for wire in wires:
             send = getattr(wire, method)
             try:
-                send(*args)
+                send(*args, besteffort=True)
             except OSError:
                 self.disconnect(wire)
 
@@ -429,7 +433,7 @@ class WiredAgent:
             raise OSError("no clients connected")
         for wire in wires:
             try:
-                wire.send_prompt(id, kind, message, **kw)
+                wire.send_prompt(id, kind, message, besteffort=True, **kw)
             except OSError:
                 self.disconnect(wire)
 

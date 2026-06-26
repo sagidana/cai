@@ -41,9 +41,14 @@ sends from both its worker thread (events/result/prompts) and its reader thread
 from __future__ import annotations
 
 import json
+import logging
+import socket
 import threading
 
 from cai.events import Event
+
+
+log = logging.getLogger("cai")
 
 
 class Wire:
@@ -68,17 +73,17 @@ class Wire:
         self._send_lock = threading.Lock()
 
     # --- outbound: build a typed message, frame it, write it to the channel ---
-    def send_event(self, event):
+    def send_event(self, event, besteffort=False):
         msg = {}
         msg["type"] = self.EVENT
         msg["event"] = self.event_to_dict(event)
-        self.send(msg)
+        return self.send(msg, besteffort=besteffort)
 
-    def send_result(self, text):
+    def send_result(self, text, besteffort=False):
         msg = {}
         msg["type"] = self.RESULT
         msg["text"] = text
-        self.send(msg)
+        return self.send(msg, besteffort=besteffort)
 
     def send_submit(self, text):
         msg = {}
@@ -121,7 +126,8 @@ class Wire:
                     default=None,
                     detail="",
                     secret=False,
-                    level="info"):
+                    level="info",
+                    besteffort=False):
         msg = {}
         msg["type"] = self.PROMPT
         msg["id"] = id
@@ -132,7 +138,7 @@ class Wire:
         msg["detail"] = detail
         msg["secret"] = secret
         msg["level"] = level
-        self.send(msg)
+        return self.send(msg, besteffort=besteffort)
 
     def send_reply(self, id, value):
         msg = {}
@@ -141,12 +147,38 @@ class Wire:
         msg["value"] = value
         self.send(msg)
 
-    def send(self, message):
+    def send(self, message, besteffort=False):
         """frame one message dict and write it to the channel. thread-safe: a
-        served agent sends from both its worker and reader threads."""
+        served agent sends from both its worker and reader threads.
+
+        besteffort=True (broadcast traffic) won't block on a peer that isn't
+        draining its socket: it abandons the message the instant the buffer is full
+        and returns False, so one stuck client can't stall the send to every other
+        wire. a message abandoned mid-write leaves a partial line the receiver's
+        feed() resyncs past. the default reliable send blocks until the whole
+        message is out and returns True."""
         data = self.encode(message)
         with self._send_lock:
+            if besteffort:
+                return self._write_nonblocking(data)
             self.channel.sendall(data)
+            return True
+
+    def _write_nonblocking(self, data):
+        """write as much of `data` as the kernel buffer takes right now, without
+        blocking. returns True once it all went out; False the moment the peer
+        can't take more (backpressure), leaving a partial line behind on purpose. a
+        dead-socket OSError propagates so the caller can drop the wire."""
+        view = memoryview(data)
+        while view:
+            try:
+                sent = self.channel.send(view, socket.MSG_DONTWAIT)
+            except BlockingIOError:
+                return False
+            if sent == 0:
+                return False
+            view = view[sent:]
+        return True
 
     def control(self, op, value=None):
         """client side: send a control request and block for its reply,
@@ -198,8 +230,11 @@ class Wire:
 
     def feed(self, chunk):
         """reassemble whole messages from one recv chunk. a channel splits the
-        stream on no particular boundary, so a partial trailing line is held
-        until its newline arrives."""
+        stream on no particular boundary, so a partial trailing line is held until
+        its newline arrives. a line that won't decode is dropped, not raised: a
+        best-effort broadcast abandons a message mid-write under backpressure, so
+        the receiver must resync at the next newline rather than die on the garbage
+        the abandoned bytes leave behind."""
         out = []
 
         if not chunk: return out
@@ -211,7 +246,12 @@ class Wire:
             line = self._buf[:nl]
             self._buf = self._buf[nl + 1:]
             if not line.strip(): continue
-            out.append(json.loads(line.decode("utf-8")))
+            try:
+                message = json.loads(line.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                log.warning("wire: dropping undecodable line (%d bytes)", len(line))
+                continue
+            out.append(message)
         return out
 
     # --- framing + Event (de)serialization: stateless, usable without a channel ---
