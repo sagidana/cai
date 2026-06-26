@@ -80,16 +80,67 @@ class SteerQueue:
 
 
 def _parse_args(arguments):
-    """best-effort parse of a tool call's raw argument string into a dict."""
+    """parse a tool call's raw argument blob into a dict. returns (ok, args): ok
+    is False when the blob was non-empty but not a valid JSON object, so the
+    caller can hand the model a clear error instead of running the tool with no
+    args (which surfaces later as a confusing 'missing argument'). an empty blob
+    is a valid no-arg call."""
     if not arguments:
-        return {}
+        return True, {}
     try:
         parsed = json.loads(arguments)
     except (ValueError, TypeError):
-        return {}
+        return False, {}
     if not isinstance(parsed, dict):
-        return {}
-    return parsed
+        return False, {}
+    return True, parsed
+
+
+def _synth_call_id(index):
+    """a stand-in id for a tool call the model sent without one, so the assistant
+    turn and its tool reply still reference the same id on the next model call."""
+    return f"cai_tool_call_{index}"
+
+
+def _normalize_tool_calls(tool_calls):
+    """coerce the provider's raw tool_calls into calls cai can trust: drop
+    entries that aren't well-formed function calls, and guarantee each surviving
+    call carries a string id (synthesized when missing or duplicated) and a
+    string argument blob. dropping is logged, never raised, so one malformed call
+    can't abort the whole run; keeping ids unique keeps the assistant turn and its
+    tool replies lined up on the next model call."""
+    calls = []
+    seen = set()
+    for call in tool_calls:
+        if not isinstance(call, dict):
+            log.warning("dropping tool call that is not an object: %r", call)
+            continue
+        if call.get('type') != 'function':
+            log.warning("dropping tool call with non-function type: %r", call.get('type'))
+            continue
+        function = call.get('function')
+        if not isinstance(function, dict):
+            log.warning("dropping tool call with no function object: %r", call)
+            continue
+        name = function.get('name')
+        if not isinstance(name, str) or not name:
+            log.warning("dropping tool call with no function name: %r", call)
+            continue
+        arguments = function.get('arguments')
+        if isinstance(arguments, dict):
+            arguments = json.dumps(arguments)
+        if not isinstance(arguments, str):
+            arguments = ''
+        call_id = call.get('id')
+        if not isinstance(call_id, str) or not call_id or call_id in seen:
+            call_id = _synth_call_id(len(calls))
+        seen.add(call_id)
+        clean = {}
+        clean['id'] = call_id
+        clean['name'] = name
+        clean['arguments'] = arguments
+        calls.append(clean)
+    return calls
 
 
 def _dispatch_tool(tools_dispatch, name, args):
@@ -171,7 +222,7 @@ def _merge_data(hooks_data, **event_keys):
     return data
 
 
-def _handle_tool_calls(tool_calls,
+def _handle_tool_calls(calls,
                        messages,
                        content,
                        reasoning,
@@ -185,25 +236,19 @@ def _handle_tool_calls(tool_calls,
     """Append the assistant turn carrying every call, then run each tool:
     emit tool_call, fire before_tool_call (veto), dispatch, emit tool_result,
     append the tool message, fire messages_mutated + after_tool_call. Mutates
-    `messages` in place and yields the tool events."""
-    calls = []
-    for call in tool_calls:
-        if call.get('type') != 'function':
-            log.warning("tool call with invalid type: %s", call.get('type'))
-            continue
-        calls.append(call)
-    if not calls:
-        return
-
+    `messages` in place and yields the tool events. `calls` is the normalized
+    list from _normalize_tool_calls, so every entry has a string id, name, and
+    argument blob; every call gets a matching tool message, even one whose
+    arguments don't parse, so the next request's tool_call ids all line up."""
     # one assistant message carrying every call (the canonical OpenAI shape:
     # one assistant turn with N tool_calls, then N tool messages).
     wire_calls = []
     for call in calls:
         function = {}
-        function['name'] = call.get('function', {}).get('name')
-        function['arguments'] = call.get('function', {}).get('arguments') or ''
+        function['name'] = call['name']
+        function['arguments'] = call['arguments']
         wire_call = {}
-        wire_call['id'] = call.get('id')
+        wire_call['id'] = call['id']
         wire_call['type'] = 'function'
         wire_call['function'] = function
         wire_calls.append(wire_call)
@@ -217,11 +262,10 @@ def _handle_tool_calls(tool_calls,
     messages.append(assistant_msg)
 
     for call in calls:
-        call_id = call.get('id')
-        function = call.get('function', {})
-        name = function.get('name')
-        arguments = function.get('arguments') or ''
-        args = _parse_args(arguments)
+        call_id = call['id']
+        name = call['name']
+        arguments = call['arguments']
+        ok, args = _parse_args(arguments)
 
         yield Event(type=EventType.TOOL_CALL, tool_name=name, tool_args=args, tool_call_id=call_id)
 
@@ -242,6 +286,9 @@ def _handle_tool_calls(tool_calls,
         if vetoed:
             result = f"Error: tool '{name}' was aborted by a before_tool_call hook"
             log.info("tool call: %s vetoed by hook", name)
+        elif not ok:
+            result = f"Error: arguments for tool '{name}' were not valid JSON: {arguments}"
+            log.info("tool call: %s had unparseable arguments", name)
         else:
             result = _dispatch_tool(tools_dispatch, name, args)
 
@@ -357,9 +404,15 @@ def call_llm(messages,
             # return the partial text without the final-answer / tool handling.
             return content
 
-        if not tool_calls:
-            # final answer. let on_final_response hooks rewrite it, append it
-            # to the transcript, fire after_run, and hand it back.
+        calls = _normalize_tool_calls(tool_calls or [])
+
+        if not calls:
+            # no usable tool call: either a plain answer, or the model sent only
+            # malformed calls that normalization dropped. treat the turn as the
+            # final answer so a bad batch ends the run cleanly instead of
+            # re-looping on identical state until max_steps.
+            # let on_final_response hooks rewrite it, append it to the transcript,
+            # fire after_run, and hand it back.
             final_ctx = HookContext(event=HookEvent.ON_FINAL_RESPONSE,
                                     messages=messages,
                                     model=model,
@@ -390,7 +443,7 @@ def call_llm(messages,
             hooks.fire(HookEvent.AFTER_RUN, run_ctx)
             return content
 
-        yield from _handle_tool_calls(tool_calls,
+        yield from _handle_tool_calls(calls,
                                       messages,
                                       content,
                                       reasoning,
