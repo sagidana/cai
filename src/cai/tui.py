@@ -25,9 +25,12 @@ import threading
 import time
 
 from cai import usage
+from cai.channel import connect
 from cai.events import EventType
 from cai.screen import Screen
 from cai.session import SessionsRegistry
+from cai.ui import BaseUI
+from cai.wire import Wire
 
 
 # command palette (Ctrl-P) and command-mode (:) completion entries.
@@ -255,9 +258,10 @@ class _Worker(threading.Thread):
     interrupt gate know a response is in flight; the _Status signals it updates
     drive the status line, painted by the status thread."""
 
-    def __init__(self, agent, screen, jobs, stop, status):
+    def __init__(self, agent, wire, screen, jobs, stop, status):
         super().__init__(daemon=True, name="cai-tui-worker")
         self._agent = agent
+        self._wire = wire
         self._screen = screen
         self._jobs = jobs
         # NB: not self._stop - that shadows threading.Thread._stop, which join()
@@ -310,24 +314,39 @@ class _Worker(threading.Thread):
         self._status.set_tokens(tokens)
 
     def _run_one(self, text):
-        # echo the submitted prompt only now, as the run starts, so the user
-        # line lands in order just above the streamed answer.
         self._screen.write(f"> {text}\n\n", kind=Screen.USER)
         self._screen.set_busy(True)
         self._status.busy()
-        self._push_tokens()   # reflect the just-added user turn immediately
+        self._push_tokens()
+        ui = BaseUI()
         try:
-            run = self._agent.run(text)
-            for event in run:
-                _write_event(self._screen, event)
-                self._update_status(event)
+            self._wire.send_submit(text)
+            result = None
+            while result is None:
+                messages = self._wire.recv()
+                if messages is None:
+                    break
+                for msg in messages:
+                    if self._wire.answer(msg, ui):
+                        continue
+                    kind = msg.get("type")
+                    if kind == Wire.EVENT:
+                        event = Wire.event_from_dict(msg["event"])
+                        _write_event(self._screen, event)
+                        self._update_status(event)
+                        continue
+                    if kind == Wire.RESULT:
+                        result = msg.get("text")
+                        break
+            if result and result.startswith("Error:"):
+                self._screen.write(f"\n[{result}]\n", kind=Screen.ERROR)
             self._screen.write("\n", kind=Screen.DEFAULT)
-        except Exception as e:
+        except OSError as e:
             self._screen.write(f"\n[error: {e}]\n", kind=Screen.ERROR)
         finally:
             self._screen.set_busy(False)
             self._status.idle()
-            self._push_tokens()   # fold in the assistant turn + the fresh sample
+            self._push_tokens()
 
 
 def _open_messages(screen, agent, status):
@@ -476,7 +495,7 @@ def _open_tools(screen, agent):
     briefly to list its tools, so the caller idle-gates it - and mutating the
     toolset would race a run anyway."""
     from cai.tools import ToolRegistry
-    active = set(agent.get_tools())
+    active = set(agent.get_selected_tools())
     available = set(ToolRegistry.available_tools())
     available |= active
     if not available:
@@ -486,7 +505,7 @@ def _open_tools(screen, agent):
     for name in sorted(available):
         entries.append((name, _tool_label(name)))
     new_selected = screen.prompt_tools_overlay(entries, active)
-    agent.set_tools(sorted(new_selected))
+    agent.set_selected_tools(sorted(new_selected))
 
 
 def _open_skills(screen, agent):
@@ -495,13 +514,13 @@ def _open_skills(screen, agent):
     to keep it off the worker's view."""
     from cai.skills import SkillsRegistry
     names = set(SkillsRegistry.available_skills())
-    active = set(agent.get_skills())
+    active = set(agent.get_selected_skills())
     names |= active
     if not names:
         screen.write("[no skills available]\n", kind=Screen.META)
         return
     new_active = screen.prompt_skills_overlay(sorted(names), active)
-    agent.set_skills(sorted(new_active))
+    agent.set_selected_skills(sorted(new_active))
 
 
 def _handle_command(screen, agent, status, registry, cmd):
@@ -631,6 +650,11 @@ def run(*,
                   temperature=temperature,
                   max_steps=max_steps)
 
+    from cai.wired_agent import UnixWiredAgent
+    server = UnixWiredAgent(agent)
+    threading.Thread(target=server.serve, daemon=True, name="cai-tui-serve").start()
+    wire = Wire(connect(server.path))
+
     screen = Screen()
     jobs = queue.Queue()
     stop = threading.Event()
@@ -661,13 +685,13 @@ def run(*,
         # and tell the screen we consumed the interrupt so it skips its quit
         # double-tap. otherwise let the default handling run.
         if screen._busy:
-            agent.stop()
+            wire.send_interrupt()
             return True
         return False
 
     screen.set_interrupt_handler(_on_interrupt)
 
-    worker = _Worker(agent, screen, jobs, stop, status)
+    worker = _Worker(agent, wire, screen, jobs, stop, status)
     worker.start()
     status_loop = _StatusLoop(status, stop)
     status_loop.start()
@@ -698,7 +722,7 @@ def run(*,
             if user_input.startswith("!"):
                 steer_text = user_input[1:]
                 if screen._busy:
-                    agent.steer(steer_text)
+                    wire.send_steer(steer_text)
                     continue
                 user_input = steer_text
             if not user_input.strip():
@@ -708,10 +732,14 @@ def run(*,
         pass
     finally:
         stop.set()
-        agent.stop()
         jobs.put(None)
+        server.close()
         worker.join(timeout=2)
         status_loop.join(timeout=2)
+        try:
+            wire.channel.close()
+        except OSError:
+            pass
         screen.close()
         agent.close()
     return 0

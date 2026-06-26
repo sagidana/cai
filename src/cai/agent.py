@@ -176,12 +176,31 @@ class Agent:
         each read so it reflects skills added or removed since bootstrap."""
         return _combine_prompts(self._system_prompt, self.skills_registry.system_prompt)
 
-    def get_tools(self):
+    @property
+    def tools(self):
         """the names of the active (selected) tools - the subset sent to the
         model, read straight from the registry (the single source of truth)."""
         return self.tools_registry.selected()
 
-    def set_tools(self, names):
+    @property
+    def skills(self):
+        """the active skill names, read straight from the registry (the single
+        source of truth)."""
+        return self.skills_registry.names()
+
+    def get_selected_tools(self):
+        """the active (selected) tool names - what set_selected_tools controls."""
+        return self.tools
+
+    def get_available_tools(self):
+        """every tool the agent could select: the install-wide catalogue plus the
+        tools already registered on this agent (its own function tools included)."""
+        names = set(ToolRegistry.available_tools())
+        for name in self.tools_registry.names():
+            names.add(name)
+        return sorted(names)
+
+    def set_selected_tools(self, names):
         """set the active tools to `names`, diffing against the current selection:
         a tool no longer listed is deselected (it stays registered), and a newly
         listed one is selected. selecting is best effort: a name that can't be
@@ -197,12 +216,19 @@ class Agent:
             except ValueError:
                 log.warning("tool %r is not available to this agent; skipping", name)
 
-    def get_skills(self):
-        """the active skill names, read straight from the registry (the single
-        source of truth)."""
-        return self.skills_registry.names()
+    def get_selected_skills(self):
+        """the active skill names - what set_selected_skills controls."""
+        return self.skills
 
-    def set_skills(self, names):
+    def get_available_skills(self):
+        """every skill the agent could activate: the install-wide catalogue plus
+        the ones already active on this agent."""
+        names = set(SkillsRegistry.available_skills())
+        for name in self.skills_registry.names():
+            names.add(name)
+        return sorted(names)
+
+    def set_selected_skills(self, names):
         """set the active skills to `names`, diffing against the registry: a skill
         no longer listed is removed (along with the tools it pulled in) and a
         newly listed one added. the combined system prompt follows on next read."""
@@ -212,6 +238,11 @@ class Agent:
             self.skills_registry.remove(name)
         for name in want:
             self.skills_registry.add(name)
+
+    def set_model(self, model):
+        """switch the model used for the next run; an empty value is ignored."""
+        if not model: return
+        self.model = model
 
     def get_messages(self):
         """the agent's live conversation list."""
@@ -279,12 +310,9 @@ class Agent:
             messages = messages[1:]
 
         self._system_prompt = settings.get("system_prompt_base")
-        self.set_skills(settings.get("skills") or [])
-        # set_tools is best effort: any saved name this agent can't provide (a
-        # function tool from another agent) is skipped with a warning.
-        self.set_tools(settings.get("selected_tools") or [])
-        if settings.get("model"):
-            self.model = settings["model"]
+        self.set_selected_skills(settings.get("skills") or [])
+        self.set_selected_tools(settings.get("selected_tools") or [])
+        self.set_model(settings.get("model"))
         self.reasoning_effort = settings.get("reasoning_effort")
         self.temperature = settings.get("temperature")
         self.max_steps = settings.get("max_steps")

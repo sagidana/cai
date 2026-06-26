@@ -53,6 +53,12 @@ from cai.wire import Wire
 
 log = logging.getLogger("cai")
 
+# control ops that mutate the live conversation: these are queued to the worker so
+# they apply between turns and never race the run loop. every other control op
+# (reads, and atomic config writes like set_model / set_selected_*) is answered
+# inline on the reader thread, so a poll is served even while a turn is running.
+_DEFERRED_OPS = ("set_messages", "load")
+
 
 def _tool_names(tools):
     """the exposed names of an agent's tools, for sending over the wire (a
@@ -327,10 +333,13 @@ class WiredAgent:
             pass
 
     def _dispatch(self, wire, msg):
-        """route one inbound message from `wire`. fast control-plane ops (steer /
-        interrupt / reply) run here on the reader thread; anything that touches
-        agent state (a turn, a control op) is queued to the worker so it stays
-        serial. a control op carries its origin wire so its reply is unicast back."""
+        """route one inbound message from `wire`. steer / interrupt / reply run
+        here on the reader thread, as do read and atomic-config control ops -
+        answered inline via _run_control so a poll is served even while a turn
+        runs. only a turn and the conversation-mutating control ops (_DEFERRED_OPS)
+        are queued to the worker, which applies them serially. kill bites the run
+        now and is also queued so it acks and ends serving. a control op carries
+        its origin wire so its reply is unicast back."""
         kind = msg.get("type")
         if kind == Wire.SUBMIT:
             self._work.put(("submit", msg.get("text") or ""))
@@ -338,11 +347,13 @@ class WiredAgent:
         if kind == Wire.CONTROL:
             op = msg.get("op")
             if op == "kill":
-                # kill must bite a running turn now, not wait its turn in the
-                # worker queue - so retire the agent here on the reader thread.
-                # the queued op still runs, to ack and end serving.
                 self.agent.kill()
-            self._work.put(("control", op, msg.get("value"), wire))
+                self._work.put(("control", op, msg.get("value"), wire))
+                return
+            if op in _DEFERRED_OPS:
+                self._work.put(("control", op, msg.get("value"), wire))
+                return
+            self._run_control(op, msg.get("value"), wire)
             return
         if kind == Wire.STEER:
             self.agent.steer(msg.get("text") or "")
@@ -461,15 +472,22 @@ class WiredAgent:
         if op == "set_messages":
             agent.set_messages(value)
             return True, None, None
-        if op == "get_skills":
-            return True, agent.get_skills(), None
-        if op == "set_skills":
-            agent.set_skills(value)
+        if op == "get_selected_skills":
+            return True, agent.get_selected_skills(), None
+        if op == "get_available_skills":
+            return True, agent.get_available_skills(), None
+        if op == "set_selected_skills":
+            agent.set_selected_skills(value)
             return True, None, None
-        if op == "get_tools":
-            return True, _tool_names(agent.get_tools()), None
-        if op == "set_tools":
-            agent.set_tools(value)
+        if op == "get_selected_tools":
+            return True, agent.get_selected_tools(), None
+        if op == "get_available_tools":
+            return True, agent.get_available_tools(), None
+        if op == "set_selected_tools":
+            agent.set_selected_tools(value)
+            return True, None, None
+        if op == "set_model":
+            agent.set_model(value)
             return True, None, None
         if op == "get_info":
             children = []

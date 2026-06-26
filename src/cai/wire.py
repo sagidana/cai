@@ -25,8 +25,9 @@ remote agent:
   ok, value, error = w.control("get_messages")   # client request/reply op
   w.answer(msg, ui)                   # client side: answer a PROMPT via a local UI
 
-The control ops are get_messages/set_messages, get_skills/set_skills,
-get_tools/set_tools. PROMPT carries a UI request (confirm/select/text, or a
+The control ops are get_info, get_messages/set_messages, set_model,
+get_selected_skills/get_available_skills/set_selected_skills, and the matching
+tools trio. PROMPT carries a UI request (confirm/select/text, or a
 one-way notify) that a hook raised mid-run via HookContext.ui; the client
 answers with a REPLY (none for notify). Everything is synchronous: the agent
 handles one message fully before the next, and a blocked prompt reads the

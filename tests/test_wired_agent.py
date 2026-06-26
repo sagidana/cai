@@ -263,41 +263,74 @@ def test_control_set_then_get_messages(serve):
     assert messages == seed
 
 
-def test_control_get_skills_empty(serve):
+def test_control_get_selected_skills_empty(serve):
     wire = serve(make_agent())
-    ok, skills, error = wire.control("get_skills")
+    ok, skills, error = wire.control("get_selected_skills")
     assert ok is True
     assert skills == []
 
 
-def test_control_set_skills_records_names(serve):
-    # an unknown skill is warned-and-skipped on activation, but the name set
-    # still updates - no real skill file or MCP server is touched.
+def test_control_set_selected_skills_records_names(serve):
     wire = serve(make_agent())
-    ok, value, error = wire.control("set_skills", ["does-not-exist"])
+    ok, value, error = wire.control("set_selected_skills", ["does-not-exist"])
     assert ok is True
-    ok, skills, error = wire.control("get_skills")
+    ok, skills, error = wire.control("get_selected_skills")
     assert skills == ["does-not-exist"]
 
 
-def test_control_get_tools_returns_names(serve):
+def test_control_get_selected_tools_returns_names(serve):
     def my_tool(x: str) -> str:
         return x
     wire = serve(make_agent(tools=[my_tool, "srv__search"]))
-    ok, tools, error = wire.control("get_tools")
+    ok, tools, error = wire.control("get_selected_tools")
     assert ok is True
     assert set(tools) == {"my_tool", "srv__search"}
 
 
-def test_control_set_tools_skips_an_unavailable_function_name(serve):
-    # a function tool can't be rebuilt from a name (a callable does not fit in
-    # JSON); set_tools is best effort - it skips the name with a warning rather
-    # than failing, so the call succeeds and the tool just isn't added.
+def test_control_set_selected_tools_skips_an_unavailable_function_name(serve):
     wire = serve(make_agent())
-    ok, value, error = wire.control("set_tools", ["my_tool"])
+    ok, value, error = wire.control("set_selected_tools", ["my_tool"])
     assert ok is True
-    ok, tools, error = wire.control("get_tools")
+    ok, tools, error = wire.control("get_selected_tools")
     assert tools == []
+
+
+def test_control_set_model_switches_the_model(serve):
+    agent = make_agent()
+    wire = serve(agent)
+    ok, value, error = wire.control("set_model", "new-model")
+    assert ok is True
+    ok, info, error = wire.control("get_info")
+    assert info["model"] == "new-model"
+
+
+def test_control_get_available_tools_includes_a_registered_tool(serve):
+    def my_tool(x: str) -> str:
+        return x
+    wire = serve(make_agent(tools=[my_tool]))
+    ok, tools, error = wire.control("get_available_tools")
+    assert ok is True
+    assert "my_tool" in tools
+
+
+def test_read_control_answered_during_a_running_turn(serve):
+    started = threading.Event()
+    release = threading.Event()
+
+    class BlockApi:
+        def chat(self, messages, model, **kwargs):
+            started.set()
+            def gen():
+                release.wait(2)
+                yield ("done", None, None, {})
+            return gen()
+
+    wire = serve(make_agent(api=BlockApi()))
+    wire.send_submit("hi")
+    assert started.wait(2)
+    ok, info, error = wire.control("get_info")
+    assert ok is True
+    release.set()
 
 
 def test_control_unknown_op_errs(serve):

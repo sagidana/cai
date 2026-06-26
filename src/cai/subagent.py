@@ -62,7 +62,7 @@ def _inherit_tools(parent, names):
     parent's *active* (selected) tools; any other name is silently dropped."""
     if not names:
         return []
-    selected = set(parent.get_tools())
+    selected = set(parent.tools)
     chosen = []
     for name in names:
         if name not in selected: continue
@@ -75,7 +75,7 @@ def _inherit_skills(parent, names):
     like the tools: an unknown skill is dropped rather than granted."""
     if not names:
         return []
-    allowed = set(parent.get_skills())
+    allowed = set(parent.skills)
     chosen = []
     for name in names:
         if name not in allowed: continue

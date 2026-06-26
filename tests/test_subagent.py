@@ -124,7 +124,7 @@ def test_child_tools_are_restricted_to_the_requested_subset():
     _launch_agent(parent, "t", "w", tools=["foo", "ghost"])
     assert _wait_agent(parent, "w", timeout=5) == "k"
     child = parent.children[0].agent
-    assert _tool_names(child.get_tools()) == ["foo"]
+    assert _tool_names(child.tools) == ["foo"]
 
 
 def test_wait_on_unknown_agent_is_an_error():
