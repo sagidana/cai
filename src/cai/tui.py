@@ -97,6 +97,9 @@ def _write_event(screen, event):
     if event.type == EventType.REASONING:
         screen.write(event.text or "", kind=Screen.REASONING)
         return
+    if event.type == EventType.USER:
+        screen.write(f"\n> {event.text or ''}\n\n", kind=Screen.USER)
+        return
     if event.type == EventType.TOOL_CALL:
         line = f"\n-> {event.tool_name}({_short_args(event.tool_args)})\n"
         screen.write(line, kind=Screen.TOOL)
@@ -408,7 +411,6 @@ class _Worker(threading.Thread):
 
     def _run_one(self, text):
         self._interrupted = False
-        self._screen.write(f"> {text}\n\n", kind=Screen.USER)
         self._screen.set_busy(True)
         self._status.busy()
         self._push_tokens()

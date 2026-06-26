@@ -48,8 +48,12 @@ class UnixSocketServer:
 
     def accept(self):
         """block until a client connects; return the connected socket. raises
-        OSError once close() has been called (the wake pipe fired)."""
-        readable, _, _ = select.select([self._sock, self._wake_r], [], [])
+        OSError once close() has been called (the wake pipe fired, or close()
+        raced the select and left the listener fd closed)."""
+        try:
+            readable, _, _ = select.select([self._sock, self._wake_r], [], [])
+        except (OSError, ValueError):
+            raise OSError("server closed")
         if self._wake_r in readable:
             raise OSError("server closed")
         conn, _addr = self._sock.accept()

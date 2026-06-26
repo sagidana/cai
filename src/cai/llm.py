@@ -371,10 +371,9 @@ def call_llm(messages,
             return content
 
         if steer is not None:
-            # fold any steering messages into the conversation as user turns, so
-            # the next model call sees them (after this turn's tool results).
             for text in steer():
                 messages.append({"role": "user", "content": text})
+                yield Event(type=EventType.USER, text=text)
 
         # the model call wants the system prompt at index 0, but the caller's
         # `messages` must stay system-free and be the live append target for

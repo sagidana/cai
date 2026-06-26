@@ -31,6 +31,7 @@ import threading
 
 from cai import config
 from cai.api import OpenAiApi
+from cai.events import Event, EventType
 from cai.llm import call_llm, SteerQueue
 from cai.tools import ToolRegistry
 from cai.skills import SkillsRegistry
@@ -81,11 +82,12 @@ class RunHandle:
     so the next run() continues from there. it doesn't start until you iterate
     (or call `wait()`), and only once."""
 
-    def __init__(self, agent, stream):
+    def __init__(self, agent, stream, prompt=None):
         self.agent = agent
         self.messages = agent.messages   # the agent's live conversation
         self.interrupt = agent.interrupt  # the agent's interrupt Event
         self.stream = stream
+        self.prompt = prompt
         self.text = ""
         self._consumed = False
 
@@ -95,7 +97,7 @@ class RunHandle:
         self._consumed = True
         # delegate to the agent's generator; `yield from` forwards every Event
         # and captures the generator's return value (the final text) for us.
-        self.text = yield from self.agent._stream(self.stream)
+        self.text = yield from self.agent._stream(self.stream, self.prompt)
 
     def wait(self):
         """drain the run without consuming the events yourself; returns self,
@@ -353,11 +355,13 @@ class Agent:
         user turn at its next turn boundary. safe to call from another thread."""
         self._steer.push(text)
 
-    def _stream(self, stream):
+    def _stream(self, stream, prompt=None):
         """the orchestration: stream one call_llm turn over the live conversation.
         yields Event objects and returns the final answer text. combines the
         system prompt and translates the hooks list here (not at construction) so
         skills and hooks added since are reflected."""
+        if prompt is not None:
+            yield Event(type=EventType.USER, text=prompt)
         skills_prompt = self.skills_registry.system_prompt
         system_prompt = _combine_prompts(self._system_prompt, skills_prompt)
         schemas = self.tools_registry.tools
@@ -393,7 +397,7 @@ class Agent:
             self.interrupt.set()
         if prompt is not None:
             self.messages.append({"role": "user", "content": prompt})
-        return RunHandle(self, self.stream)
+        return RunHandle(self, self.stream, prompt)
 
     def close(self):
         """close the tool registry, terminating any live MCP server connections

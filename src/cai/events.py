@@ -17,6 +17,7 @@ class EventType(str, Enum):
     ('content') interchangeably - they compare equal."""
     CONTENT = "content"          # a chunk of the assistant's answer (text)
     REASONING = "reasoning"      # a chunk of the model's thinking (text)
+    USER = "user"
     TOOL_CALL = "tool_call"      # the model asked to run a tool
     TOOL_RESULT = "tool_result"  # a tool finished
     USAGE = "usage"              # token accounting for a turn (usage)
