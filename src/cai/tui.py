@@ -1,11 +1,13 @@
 """tui: the interactive, full-screen terminal UI.
 
 Wraps the reused screen/ package (an alternate-screen, vim-modal viewport) around
-a single in-process Agent. The main thread owns the terminal and blocks in
-Screen.prompt(); a worker thread drains submitted prompts off a queue, runs the
-agent, and streams its events into the viewport. This is the in-process analogue
-of the socket attach loop the reference frontend uses - there is no wire here,
-the worker simply iterates the agent's RunHandle.
+an Agent that is served over a unix socket (UnixWiredAgent) and driven purely as
+a wire client through AgentClient - the TUI never touches the agent object once it
+is served, so the same client surface will drive a remote agent over --attach. The
+main thread owns the terminal and blocks in Screen.prompt(); a worker thread
+SUBMITs prompts over the client's streaming connection and renders the EVENT/RESULT
+stream into the viewport. Control ops (messages, tools, skills, model, save, load)
+go over a separate, lock-guarded control connection.
 
 The status line follows the reference's pattern: the worker only updates raw
 signals (busy, the kind of the last delta, when the last token arrived); a
@@ -19,6 +21,7 @@ Each picker is a screen overlay; the mutating ones (:messages, :sessions, :load,
 :tools, :skills) are refused while a run is in flight so they never race the
 worker's view of the conversation or the tool registry.
 """
+import logging
 import os
 import queue
 import threading
@@ -31,6 +34,9 @@ from cai.screen import Screen
 from cai.session import SessionsRegistry
 from cai.ui import BaseUI
 from cai.wire import Wire
+
+
+log = logging.getLogger("cai")
 
 
 # command palette (Ctrl-P) and command-mode (:) completion entries.
@@ -250,26 +256,108 @@ class _StatusLoop(threading.Thread):
             self._status.refresh()
 
 
+class AgentClient:
+    """drives a served agent purely over the wire. a streaming connection carries
+    runs (SUBMIT and the EVENT/RESULT stream the worker drains); a separate,
+    lock-guarded control connection carries the request/response state ops. the
+    TUI talks to the agent only through this, so the very same surface drives a
+    local served agent today and a remote one over --attach later."""
+
+    def __init__(self, path):
+        self.stream = Wire(connect(path))
+        self._ctrl = Wire(connect(path))
+        self._ctrl_lock = threading.Lock()
+
+    def submit(self, text):
+        self.stream.send_submit(text)
+
+    def steer(self, text):
+        self.stream.send_steer(text)
+
+    def interrupt(self):
+        self.stream.send_interrupt()
+
+    def recv(self):
+        return self.stream.recv()
+
+    def _call(self, op, value=None):
+        """one request/response control op, serialized so the worker's token
+        polls never interleave with a main-thread overlay op on the one
+        control connection. returns the op's value, or None on failure."""
+        with self._ctrl_lock:
+            ok, result, error = self._ctrl.control(op, value)
+        if not ok:
+            log.warning("control %r failed: %s", op, error)
+            return None
+        return result
+
+    def get_info(self):
+        return self._call("get_info") or {}
+
+    def get_messages(self):
+        return self._call("get_messages") or []
+
+    def set_messages(self, messages):
+        self._call("set_messages", messages)
+
+    def get_selected_tools(self):
+        return self._call("get_selected_tools") or []
+
+    def get_available_tools(self):
+        return self._call("get_available_tools") or []
+
+    def set_selected_tools(self, names):
+        self._call("set_selected_tools", names)
+
+    def get_selected_skills(self):
+        return self._call("get_selected_skills") or []
+
+    def get_available_skills(self):
+        return self._call("get_available_skills") or []
+
+    def set_selected_skills(self, names):
+        self._call("set_selected_skills", names)
+
+    def set_model(self, model):
+        self._call("set_model", model)
+
+    def save(self, path):
+        return self._call("save", path)
+
+    def load(self, path):
+        with self._ctrl_lock:
+            ok, _result, error = self._ctrl.control("load", path)
+        if not ok:
+            log.warning("control 'load' failed: %s", error)
+        return ok
+
+    def close(self):
+        try:
+            self.stream.channel.close()
+        except OSError:
+            pass
+        try:
+            self._ctrl.channel.close()
+        except OSError:
+            pass
+
+
 class _Worker(threading.Thread):
-    """drains submitted prompts and streams each agent run into the screen.
+    """drains submitted prompts and streams each run into the screen, all over the
+    wire client.
 
     one job at a time: the queue serialises runs so the agent is never driven
     concurrently. set_busy() brackets each run so the screen and the Ctrl-C
     interrupt gate know a response is in flight; the _Status signals it updates
     drive the status line, painted by the status thread."""
 
-    def __init__(self, agent, wire, screen, jobs, stop, status):
+    def __init__(self, client, screen, jobs, stop, status):
         super().__init__(daemon=True, name="cai-tui-worker")
-        self._agent = agent
-        self._wire = wire
+        self._client = client
         self._screen = screen
         self._jobs = jobs
-        # NB: not self._stop - that shadows threading.Thread._stop, which join()
-        # calls internally (it would then try to call this Event and crash).
         self._stop_event = stop
         self._status = status
-        # the latest real usage measurement, paired with the message size at
-        # which it was taken, so between-turn estimates scale from a true count.
         self._sample_tokens = 0
         self._sample_chars = 0
 
@@ -296,19 +384,17 @@ class _Worker(threading.Thread):
             self._on_usage(event)
 
     def _on_usage(self, event):
-        # pair the turn's real token count with the conversation's current char
-        # size, so the between-turn estimate scales from a true measurement.
         report = event.usage or {}
         tokens = report.get("total_tokens")
         if not tokens:
             tokens = report.get("prompt_tokens", 0) + report.get("completion_tokens", 0)
-        if tokens:
-            self._sample_tokens = tokens
-            self._sample_chars = usage.message_chars(self._agent.messages)
-            self._status.set_sample(self._sample_tokens, self._sample_chars)
+        if not tokens: return
+        self._sample_tokens = tokens
+        self._sample_chars = usage.message_chars(self._client.get_messages())
+        self._status.set_sample(self._sample_tokens, self._sample_chars)
 
     def _push_tokens(self):
-        tokens = usage.estimate_tokens(self._agent.messages,
+        tokens = usage.estimate_tokens(self._client.get_messages(),
                                        self._sample_tokens,
                                        self._sample_chars)
         self._status.set_tokens(tokens)
@@ -320,14 +406,14 @@ class _Worker(threading.Thread):
         self._push_tokens()
         ui = BaseUI()
         try:
-            self._wire.send_submit(text)
+            self._client.submit(text)
             result = None
             while result is None:
-                messages = self._wire.recv()
+                messages = self._client.recv()
                 if messages is None:
                     break
                 for msg in messages:
-                    if self._wire.answer(msg, ui):
+                    if self._client.stream.answer(msg, ui):
                         continue
                     kind = msg.get("type")
                     if kind == Wire.EVENT:
@@ -349,11 +435,10 @@ class _Worker(threading.Thread):
             self._push_tokens()
 
 
-def _open_messages(screen, agent, status):
+def _open_messages(screen, client, status):
     """open the :messages overlay over a snapshot of the conversation and write
-    back any edits. idle-gated by the caller: it reads and replaces
-    agent.messages directly, which would race a streaming run."""
-    msgs = list(agent.get_messages())
+    back any edits, both over the wire."""
+    msgs = client.get_messages()
     if not msgs:
         screen.write("[no messages yet]\n", kind=Screen.META)
         return
@@ -364,20 +449,21 @@ def _open_messages(screen, agent, status):
         prompt_tokens=prompt_tokens,
         sample_chars=sample_chars)
     if modified:
-        agent.set_messages(edited)
+        client.set_messages(edited)
 
 
-def _open_models(screen, agent, status, registry):
-    """open the :models picker and switch the agent to the chosen model. the
-    catalogue (and prices) come from the registry, which fetches+caches from the
-    provider; pins are persisted by the overlay through the same registry."""
+def _open_models(screen, client, status, registry):
+    """open the :models picker and switch the agent (over the wire) to the chosen
+    model. the catalogue (and prices) come from the registry, which fetches+caches
+    from the provider; pins are persisted by the overlay through the same
+    registry."""
     ids = registry.model_ids()
     if not ids:
         screen.write("[no models available]\n", kind=Screen.META)
         return
     picked = screen.prompt_model_overlay(ids, prices=registry.prices(), favorites=True)
     if picked:
-        agent.model = picked
+        client.set_model(picked)
         status.set_model(picked)
 
 
@@ -418,35 +504,23 @@ def _session_preview(path, width, max_lines):
     return lines
 
 
-def _session_name(path):
-    """the agent name behind a .flow path: its basename without the extension."""
-    base = os.path.basename(path)
-    if base.endswith(".flow"):
-        base = base[:-len(".flow")]
-    return base
-
-
-def _load_session(screen, agent, status, path):
-    """load a .flow into the agent in place, then refresh the view: clear the
+def _load_session(screen, client, status, path):
+    """load a .flow into the agent over the wire, then refresh the view: clear the
     viewport, replay the conversation, and follow the restored model. shared by
-    :load, the :sessions picker, and the --continue/--sessions resume flags.
-    caller idle-gates (load mutates messages)."""
-    try:
-        agent.load(path)
-    except (OSError, ValueError) as e:
-        screen.write(f"[load error] {e}\n", kind=Screen.ERROR)
+    :load, the :sessions picker, and the --continue/--sessions resume flags."""
+    if not client.load(path):
+        screen.write(f"[load error] {path}\n", kind=Screen.ERROR)
         return
-    # adopt the loaded file's identity so autosave writes back to it (resume in
-    # place) instead of forking to the fresh agent's own <name>.flow.
-    agent.name = _session_name(path)
-    status.set_model(agent.model)
+    status.set_model(client.get_info().get("model", ""))
     screen.clear_buffer()
-    _replay_messages(screen, agent.get_messages())
+    _replay_messages(screen, client.get_messages())
     screen.write(f"[loaded {os.path.basename(path)}]\n", kind=Screen.META)
 
 
-def _open_sessions(screen, agent, status):
-    """open the :sessions picker and load the chosen saved session in place."""
+def _open_sessions(screen, client, status):
+    """open the :sessions picker and load the chosen saved session. the .flow list
+    is read from disk (a client-side file concern); the load itself goes over the
+    wire."""
     paths = SessionsRegistry.list_sessions()
     if not paths:
         screen.write("[no saved sessions]\n", kind=Screen.META)
@@ -467,15 +541,15 @@ def _open_sessions(screen, agent, status):
     path = by_label.get(picked)
     if path is None:
         return
-    _load_session(screen, agent, status, path)
+    _load_session(screen, client, status, path)
 
 
-def _save_session(screen, agent, path):
-    """save the agent to path (or its default <name>.flow when path is empty)."""
-    try:
-        written = agent.save(path or None)
-    except OSError as e:
-        screen.write(f"[save error] {e}\n", kind=Screen.ERROR)
+def _save_session(screen, client, path):
+    """save the agent (over the wire) to path, or its default <name>.flow when
+    path is empty. the written path comes back from the control op."""
+    written = client.save(path or None)
+    if written is None:
+        screen.write("[save error]\n", kind=Screen.ERROR)
         return
     screen.write(f"[saved {written}]\n", kind=Screen.META)
 
@@ -488,16 +562,12 @@ def _tool_label(name):
     return "tool"
 
 
-def _open_tools(screen, agent):
-    """open the :tools overlay and apply the new selection. every active tool is
-    shown selected - the agent's own tools and the ones its skills pulled in;
-    set_tools then diffs the registry to match. discovery spawns each MCP server
-    briefly to list its tools, so the caller idle-gates it - and mutating the
-    toolset would race a run anyway."""
-    from cai.tools import ToolRegistry
-    active = set(agent.get_selected_tools())
-    available = set(ToolRegistry.available_tools())
-    available |= active
+def _open_tools(screen, client):
+    """open the :tools overlay and apply the new selection, all over the wire.
+    get_available_tools already unions the catalogue with the agent's own
+    registered tools, so it is the full selectable set."""
+    active = set(client.get_selected_tools())
+    available = set(client.get_available_tools())
     if not available:
         screen.write("[no tools available]\n", kind=Screen.META)
         return
@@ -505,29 +575,26 @@ def _open_tools(screen, agent):
     for name in sorted(available):
         entries.append((name, _tool_label(name)))
     new_selected = screen.prompt_tools_overlay(entries, active)
-    agent.set_selected_tools(sorted(new_selected))
+    client.set_selected_tools(sorted(new_selected))
 
 
-def _open_skills(screen, agent):
-    """open the :skills overlay and apply the new selection. set_skills rebuilds
-    the skill layer (its tools + the system prompt), so the caller idle-gates it
-    to keep it off the worker's view."""
-    from cai.skills import SkillsRegistry
-    names = set(SkillsRegistry.available_skills())
-    active = set(agent.get_selected_skills())
-    names |= active
-    if not names:
+def _open_skills(screen, client):
+    """open the :skills overlay and apply the new selection, all over the wire."""
+    available = set(client.get_available_skills())
+    active = set(client.get_selected_skills())
+    if not available:
         screen.write("[no skills available]\n", kind=Screen.META)
         return
-    new_active = screen.prompt_skills_overlay(sorted(names), active)
-    agent.set_selected_skills(sorted(new_active))
+    new_active = screen.prompt_skills_overlay(sorted(available), active)
+    client.set_selected_skills(sorted(new_active))
 
 
-def _handle_command(screen, agent, status, registry, cmd):
+def _handle_command(screen, client, status, registry, cmd):
     """dispatch a `:`-command. returns True to quit the loop, else False.
 
     cmd is the raw command string (the text after ':'); the first token is the
-    command name."""
+    command name. the idle gates keep conversation-mutating commands off a live
+    run; reads and config switches are allowed while busy."""
     if cmd == "q" or cmd == "quit":
         return True
     parts = cmd.split(" ", 1)
@@ -536,63 +603,53 @@ def _handle_command(screen, agent, status, registry, cmd):
     if len(parts) > 1:
         arg = parts[1].strip()
     if head == "clear":
-        # clearing the conversation mid-run would race the worker, so only idle.
         if screen._busy:
             screen.write("[busy — :clear when idle]\n", kind=Screen.META)
             return False
-        agent.set_messages([])
+        client.set_messages([])
         screen.clear_buffer()
         return False
     if head == "save":
-        # a snapshot read; safe while busy. arg is an optional path.
         path = ""
         if arg:
             path = os.path.expanduser(arg)
-        _save_session(screen, agent, path)
+        _save_session(screen, client, path)
         return False
     if head == "load":
-        # loading replaces the live conversation, so only while idle.
         if screen._busy:
             screen.write("[busy — :load when idle]\n", kind=Screen.META)
             return False
         if not arg:
             screen.write("[usage: :load <path>]\n", kind=Screen.META)
             return False
-        _load_session(screen, agent, status, os.path.expanduser(arg))
+        _load_session(screen, client, status, os.path.expanduser(arg))
         return False
     if head == "models":
-        # switching only affects the next run, so this is safe while busy.
-        _open_models(screen, agent, status, registry)
+        _open_models(screen, client, status, registry)
         return False
     if head == "tools":
-        # changing the toolset mutates the live registry, so only while idle.
         if screen._busy:
             screen.write("[busy — open :tools when idle]\n", kind=Screen.META)
             return False
-        _open_tools(screen, agent)
+        _open_tools(screen, client)
         return False
     if head == "skills":
-        # rebuilding the skill layer mutates the live registry, so only idle.
         if screen._busy:
             screen.write("[busy — open :skills when idle]\n", kind=Screen.META)
             return False
-        _open_skills(screen, agent)
+        _open_skills(screen, client)
         return False
     if head == "messages":
-        # editing the live conversation mid-run would race the worker, so only
-        # while idle. opening it under a busy run is refused, not queued.
         if screen._busy:
             screen.write("[busy — open :messages when idle]\n", kind=Screen.META)
             return False
-        _open_messages(screen, agent, status)
+        _open_messages(screen, client, status)
         return False
     if head == "sessions":
-        # loading replaces the live conversation, so only while idle (same race
-        # as :messages).
         if screen._busy:
             screen.write("[busy — open :sessions when idle]\n", kind=Screen.META)
             return False
-        _open_sessions(screen, agent, status)
+        _open_sessions(screen, client, status)
         return False
     screen.write(f"[unknown command: :{head}]\n", kind=Screen.META)
     return False
@@ -653,7 +710,7 @@ def run(*,
     from cai.wired_agent import UnixWiredAgent
     server = UnixWiredAgent(agent)
     threading.Thread(target=server.serve, daemon=True, name="cai-tui-serve").start()
-    wire = Wire(connect(server.path))
+    client = AgentClient(server.path)
 
     screen = Screen()
     jobs = queue.Queue()
@@ -665,9 +722,12 @@ def run(*,
     screen.set_palette_commands(_PALETTE_COMMANDS, _PALETTE_ARG_COMMANDS)
     screen.set_cmd_completions(completions)
 
+    from cai.api import OpenAiApi
+    cfg = config.load_config()
     fallback_limit = int(config.load_optional("default_context_size", _DEFAULT_CONTEXT_SIZE))
-    registry = ModelsRegistry(agent.api)
-    status = _Status(screen, agent.model, registry, fallback_limit)
+    registry = ModelsRegistry(OpenAiApi(cfg.base_url, config.load_api_key()))
+    model = client.get_info().get("model", "")
+    status = _Status(screen, model, registry, fallback_limit)
     status.refresh()   # initial idle paint, before the status thread takes over
 
     # warm the catalogue cache in the background so the current model's
@@ -685,26 +745,26 @@ def run(*,
         # and tell the screen we consumed the interrupt so it skips its quit
         # double-tap. otherwise let the default handling run.
         if screen._busy:
-            wire.send_interrupt()
+            client.interrupt()
             return True
         return False
 
     screen.set_interrupt_handler(_on_interrupt)
 
-    worker = _Worker(agent, wire, screen, jobs, stop, status)
+    worker = _Worker(client, screen, jobs, stop, status)
     worker.start()
     status_loop = _StatusLoop(status, stop)
     status_loop.start()
 
-    screen.write(f"cai — model {agent.model}. type to chat; :q to quit.\n\n",
+    screen.write(f"cai — model {model}. type to chat; :q to quit.\n\n",
                  kind=Screen.META)
 
     # resume at startup: --continue loads the resolved session directly;
     # --sessions opens the picker. nothing is running yet, so no idle gate.
     if resume_path:
-        _load_session(screen, agent, status, resume_path)
+        _load_session(screen, client, status, resume_path)
     elif pick_session:
-        _open_sessions(screen, agent, status)
+        _open_sessions(screen, client, status)
 
     try:
         while not stop.is_set():
@@ -714,7 +774,7 @@ def run(*,
             if screen._command_result is not None:
                 cmd = screen._command_result
                 screen._command_result = None
-                if _handle_command(screen, agent, status, registry, cmd):
+                if _handle_command(screen, client, status, registry, cmd):
                     break
                 continue
             # '!text' steers the in-flight run; with nothing running it is just
@@ -722,7 +782,7 @@ def run(*,
             if user_input.startswith("!"):
                 steer_text = user_input[1:]
                 if screen._busy:
-                    wire.send_steer(steer_text)
+                    client.steer(steer_text)
                     continue
                 user_input = steer_text
             if not user_input.strip():
@@ -736,10 +796,7 @@ def run(*,
         server.close()
         worker.join(timeout=2)
         status_loop.join(timeout=2)
-        try:
-            wire.channel.close()
-        except OSError:
-            pass
+        client.close()
         screen.close()
         agent.close()
     return 0

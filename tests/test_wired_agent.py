@@ -500,6 +500,35 @@ def test_unix_wired_agent_persists_across_reconnects(tmp_path):
     assert not thread.is_alive()
 
 
+def test_agent_client_drives_runs_and_controls_over_the_wire(tmp_path):
+    from cai.tui import AgentClient
+
+    path = str(tmp_path / "c.sock")
+    agent = make_agent(api=FakeApi(chunks=["hi ", "there"]))
+    served = UnixWiredAgent(agent, path)
+    thread = threading.Thread(target=served.serve, daemon=True)
+    thread.start()
+    client = AgentClient(path)
+    try:
+        assert client.get_info()["model"] == "m"
+        client.set_model("m2")
+        assert client.get_info()["model"] == "m2"
+        assert client.get_selected_tools() == []
+
+        client.submit("hello")
+        result = None
+        while result is None:
+            for msg in client.recv():
+                if msg.get("type") == Wire.RESULT:
+                    result = msg["text"]
+        assert result == "hi there"
+        assert client.get_messages()[-1]["content"] == "hi there"
+    finally:
+        client.close()
+        served.close()
+        thread.join(timeout=5)
+
+
 # --------------------------------------------------------------------------
 # many clients at once: broadcast turns, unicast control replies, first-wins
 # --------------------------------------------------------------------------
