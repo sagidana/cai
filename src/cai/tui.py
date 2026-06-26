@@ -513,12 +513,36 @@ def run(*,
     the user quits (:q, Ctrl-C, or EOF). returns the process exit code."""
     from cai import config
     from cai.agent import Agent
+    from cai.hooks import HookEvent
     from cai.models import ModelsRegistry
+
+    # autosave: persist the session to <name>.flow on every conversation
+    # mutation, driven solely by hooks - AFTER_RUN (the final answer landed) and
+    # MESSAGES_MUTATED (tool results appended mid-run) together cover every
+    # change a run makes (a no-tool turn ends in AFTER_RUN; a tool step appends
+    # results and fires MESSAGES_MUTATED). the agent comes through ctx.data, and
+    # the hook runs on the worker thread mid-run, so it sees a consistent
+    # conversation and never races the main thread.
+    def _autosave(ctx):
+        saved = (ctx.data or {}).get("agent")
+
+        if saved is None: return
+        if not SessionsRegistry.has_real_messages(saved.get_messages()): return
+
+        try:
+            saved.save()
+        except OSError:
+            pass
+
+    autosave_hooks = []
+    autosave_hooks.append((HookEvent.AFTER_RUN, _autosave))
+    autosave_hooks.append((HookEvent.MESSAGES_MUTATED, _autosave))
 
     agent = Agent(model=model,
                   system_prompt=system_prompt,
                   tools=tools or [],
                   skills=skills or [],
+                  hooks=autosave_hooks,
                   reasoning_effort=reasoning_effort,
                   temperature=temperature,
                   max_steps=max_steps)

@@ -162,6 +162,15 @@ def _turn(api,
     return "".join(content_parts), "".join(reasoning_parts), tool_calls, usage
 
 
+def _merge_data(hooks_data, **event_keys):
+    """the HookContext.data for one fire: the caller's hooks_data with this
+    event's own keys layered on top, so caller-supplied data reaches every hook
+    while each event can still attach what it needs."""
+    data = dict(hooks_data or {})
+    data.update(event_keys)
+    return data
+
+
 def _handle_tool_calls(tool_calls,
                        messages,
                        content,
@@ -171,7 +180,7 @@ def _handle_tool_calls(tool_calls,
                        model,
                        config,
                        ui,
-                       extra,
+                       hooks_data,
                        usage):
     """Append the assistant turn carrying every call, then run each tool:
     emit tool_call, fire before_tool_call (veto), dispatch, emit tool_result,
@@ -224,7 +233,7 @@ def _handle_tool_calls(tool_calls,
                                ui=ui,
                                usage=usage,
                                tool_call=tool_call,
-                               extra=extra)
+                               data=_merge_data(hooks_data))
         vetoed = False
         for response in hooks.fire(HookEvent.BEFORE_TOOL_CALL, hook_ctx):
             if response is False:
@@ -254,8 +263,7 @@ def _handle_tool_calls(tool_calls,
                                   model=model,
                                   config=config,
                                   ui=ui,
-                                  meta={'name': name, 'id': call_id},
-                                  extra=extra)
+                                  data=_merge_data(hooks_data, name=name, id=call_id))
         hooks.fire(HookEvent.MESSAGES_MUTATED, mutated_ctx)
 
         after_ctx = HookContext(event=HookEvent.AFTER_TOOL_CALL,
@@ -266,7 +274,7 @@ def _handle_tool_calls(tool_calls,
                                 usage=usage,
                                 tool_call=tool_call,
                                 content=result,
-                                extra=extra)
+                                data=_merge_data(hooks_data))
         hooks.fire(HookEvent.AFTER_TOOL_CALL, after_ctx)
 
 
@@ -286,7 +294,7 @@ def call_llm(messages,
              temperature=None,
              stream=True,
              config=None,
-             extra=None):
+             hooks_data=None):
     """The agentic loop. See the module docstring for the consumer contract.
 
     messages   - the live conversation; mutated in place as the loop runs.
@@ -359,7 +367,7 @@ def call_llm(messages,
                                     ui=ui,
                                     usage=usage,
                                     content=content,
-                                    extra=extra)
+                                    data=_merge_data(hooks_data))
             for response in hooks.fire(HookEvent.ON_FINAL_RESPONSE, final_ctx):
                 if isinstance(response, str):
                     content = response
@@ -378,7 +386,7 @@ def call_llm(messages,
                                   ui=ui,
                                   usage=usage,
                                   content=content,
-                                  extra=extra)
+                                  data=_merge_data(hooks_data))
             hooks.fire(HookEvent.AFTER_RUN, run_ctx)
             return content
 
@@ -391,7 +399,7 @@ def call_llm(messages,
                                       model,
                                       config,
                                       ui,
-                                      extra,
+                                      hooks_data,
                                       usage)
 
         turn_ctx = HookContext(event=HookEvent.AFTER_TURN,
@@ -400,5 +408,5 @@ def call_llm(messages,
                                config=config,
                                ui=ui,
                                usage=usage,
-                               extra=extra)
+                               data=_merge_data(hooks_data))
         hooks.fire(HookEvent.AFTER_TURN, turn_ctx)

@@ -63,9 +63,9 @@ class HookContext:
     usage: Optional[dict] = None
     tool_call: Optional[ToolCall] = None
     content: Optional[str] = None
-    meta: Optional[dict] = None   # per-event data (e.g. the tool name/id)
-    extra: object = None          # caller-supplied context, identical across
-                                  # every context of one run - opaque to core.
+    data: Optional[dict] = None   # one unified bag: the caller's hooks_data
+                                  # (identical across every context of a run)
+                                  # with this event's own keys layered on top.
 
 
 class HooksRegistry:
