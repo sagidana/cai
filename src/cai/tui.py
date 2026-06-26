@@ -361,6 +361,12 @@ class _Worker(threading.Thread):
         self._status = status
         self._sample_tokens = 0
         self._sample_chars = 0
+        self._interrupted = False
+
+    def mark_interrupted(self):
+        """flag the in-flight run as Ctrl-C'd so _run_one notes it once the run
+        unwinds. set from the key thread; read on the worker thread."""
+        self._interrupted = True
 
     def run(self):
         while not self._stop_event.is_set():
@@ -401,6 +407,7 @@ class _Worker(threading.Thread):
         self._status.set_tokens(tokens)
 
     def _run_one(self, text):
+        self._interrupted = False
         self._screen.write(f"> {text}\n\n", kind=Screen.USER)
         self._screen.set_busy(True)
         self._status.busy()
@@ -427,6 +434,8 @@ class _Worker(threading.Thread):
                         break
             if result and result.startswith("Error:"):
                 self._screen.write(f"\n[{result}]\n", kind=Screen.ERROR)
+            if self._interrupted:
+                self._screen.write("\n[interrupted]\n", kind=Screen.META)
             self._screen.write("\n", kind=Screen.DEFAULT)
         except OSError as e:
             self._screen.write(f"\n[error: {e}]\n", kind=Screen.ERROR)
@@ -959,6 +968,7 @@ def run(*,
         # and tell the screen we consumed the interrupt so it skips its quit
         # double-tap. otherwise let the default handling run.
         if screen._busy:
+            worker.mark_interrupted()
             client.interrupt()
             return True
         return False
