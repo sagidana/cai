@@ -9,7 +9,7 @@ import threading
 
 import pytest
 
-from cai.agent import Agent, _tool_name
+from cai.agent import Agent
 from cai.tools import ToolRegistry
 from cai.skills import SkillsRegistry
 from cai.subagent import _inherit_tools
@@ -104,13 +104,6 @@ def make_parent(api, tools=None, skills=None):
     parent._hooks = None
     parent.children = []
     return parent
-
-
-def _tool_names(tools):
-    names = []
-    for tool in tools:
-        names.append(_tool_name(tool))
-    return names
 
 
 # --------------------------------------------------------------------------
@@ -258,3 +251,60 @@ def test_bootstrapped_tools_drive_a_child_end_to_end():
     thread.join(10)
     assert box["out"] == "hi"
     agent.close()
+
+
+def test_push_is_skipped_when_the_result_was_already_delivered():
+    # when a wait_agent collected the result inline it sets the child's signal;
+    # the owner's push must then be a no-op, so the parent isn't told twice.
+    from cai.wired_agent import UnixWiredAgent
+    from cai.subagent import _push_result_to_parent
+
+    parent = Agent(model="m", api=FakeApi(chunks=["x"]), skills=["subagents"])
+    served = UnixWiredAgent(parent)
+    thread = threading.Thread(target=served.serve, daemon=True)
+    thread.start()
+    try:
+        delivered = threading.Event()
+        delivered.set()                       # wait_agent already returned the result
+        _push_result_to_parent(parent.name, "c1", "the result", delivered)
+        time.sleep(0.3)                       # give any (erroneous) steered turn time to land
+        for m in list(parent.messages):
+            assert "Sub-agent 'c1' finished" not in (m.get("content") or "")
+    finally:
+        served.close()
+        parent.close()
+        thread.join(timeout=5)
+
+
+def test_child_result_steers_an_idle_served_parent():
+    # a served, idle parent: when its child finishes, the owner thread pushes the
+    # result as a STEER over the parent's socket, and the idle parent runs a turn
+    # on it - so the result lands in the parent's conversation without wait_agent.
+    from cai.wired_agent import UnixWiredAgent
+
+    api = GatedApi(["child output"])
+    parent = Agent(model="m", api=api, skills=["subagents"])
+    served = UnixWiredAgent(parent)
+    thread = threading.Thread(target=served.serve, daemon=True)
+    thread.start()
+    try:
+        out = parent.tools_registry.dispatch("launch_agent", {"prompt": "p", "name": "c1"})
+        assert "c1" in out
+        assert api.started.wait(5)
+        api.release.set()                 # child finishes, then steers its result up
+        landed = None
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            for m in list(parent.messages):
+                content = m.get("content") or ""
+                if m.get("role") == "user" and "c1" in content and "child output" in content:
+                    landed = content
+                    break
+            if landed is not None:
+                break
+            time.sleep(0.02)
+        assert landed is not None         # the child's result reached the parent as a user turn
+    finally:
+        served.close()
+        parent.close()
+        thread.join(timeout=5)

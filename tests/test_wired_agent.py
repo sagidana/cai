@@ -113,6 +113,7 @@ def make_agent(tools=None, skills=None, hooks=None, api=None):
     agent.interrupt = threading.Event()
     agent._killed = threading.Event()
     agent._steer = SteerQueue()
+    agent._running = threading.Event()
     agent.messages = []
     agent.children = []
     return agent
@@ -708,9 +709,10 @@ def test_steer_over_wire_folds_in_mid_run(serve):
     agent = make_agent(tools=[slow_tool], api=api)
     # signal once the reader applies the steer, so the tool releases deterministically
     inner_steer = agent.steer
-    def steer_and_signal(text):
-        inner_steer(text)
+    def steer_and_signal(text, run_on_idle=True):
+        handled = inner_steer(text, run_on_idle=run_on_idle)
         applied.set()
+        return handled
     agent.steer = steer_and_signal
 
     wire = serve(agent)
@@ -725,6 +727,24 @@ def test_steer_over_wire_folds_in_mid_run(serve):
         seen.append((m["role"], m.get("content")))
     assert ("tool", "tool-done") in seen
     assert ("user", "also consider Y") in seen   # folded in after the tool, before turn 2
+
+
+def test_idle_steer_over_wire_runs_as_a_submit(serve):
+    # with no run in flight, the reader's steer() returns False, so the STEER is
+    # queued as a normal submit on the worker - it streams a RESULT back to the
+    # client (it does not run silently on the reader thread).
+    agent = make_agent(api=FakeApi(chunks=["reacted"]))
+    wire = serve(agent)
+    wire.send_steer("a sub-agent finished: here is its result")
+    result = read_to_result(wire)
+
+    assert result == "reacted"
+    ok, messages, error = wire.control("get_messages")
+    roles = []
+    for m in messages:
+        roles.append((m["role"], m.get("content")))
+    assert ("user", "a sub-agent finished: here is its result") in roles
+    assert ("assistant", "reacted") in roles
 
 
 def test_interrupt_over_wire_stops_the_run(serve):

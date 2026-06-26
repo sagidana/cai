@@ -158,6 +158,10 @@ class Agent:
         self.interrupt = interrupt
         self._killed = threading.Event()
         self._steer = SteerQueue()
+        # set while a run is being streamed (see _stream). steer() reads it to
+        # tell a steer that must fold into the in-flight run from one that has to
+        # start a fresh run because the agent is idle.
+        self._running = threading.Event()
         self.messages = []
         self.children = []   # ids of the sub-agents launched this session
         self.tools_registry = ToolRegistry()
@@ -353,41 +357,64 @@ class Agent:
     def killed(self):
         return self._killed.is_set()
 
-    def steer(self, text):
-        """queue a steering message; the in-flight (or next) run folds it in as a
-        user turn at its next turn boundary. safe to call from another thread."""
-        self._steer.push(text)
+    def steer(self, text, run_on_idle=True):
+        """fold `text` into the conversation as a user turn; return whether it was
+        handled here.
+
+        while a run is in flight, always queue it (call_llm drains it at the next
+        turn boundary) and return True.
+
+        while idle there is no run to fold into: with run_on_idle True, behave like
+        a submit and run the turn here, returning True; with run_on_idle False, do
+        nothing and return False, so the caller (e.g. a serving WiredAgent) can
+        drive the turn its own way - as a normal submit on its worker thread, not on
+        the thread that happened to call steer.
+
+        safe to call from another thread."""
+        if self._running.is_set():
+            self._steer.push(text)
+            return True
+        if not run_on_idle:
+            return False
+        self.run(text).wait()
+        return True
 
     def _stream(self, stream, prompt=None):
         """the orchestration: stream one call_llm turn over the live conversation.
         yields Event objects and returns the final answer text. combines the
         system prompt and translates the hooks list here (not at construction) so
-        skills and hooks added since are reflected."""
-        if prompt is not None:
-            yield Event(type=EventType.USER, text=prompt)
-        skills_prompt = self.skills_registry.system_prompt
-        system_prompt = _combine_prompts(self._system_prompt, skills_prompt)
-        schemas = self.tools_registry.tools
-        dispatch = self.tools_registry.dispatch
-        # the one place the public [(event, fn), ...] list becomes the internal
-        # HooksRegistry that call_llm wants.
-        hooks_registry = HooksRegistry.from_list(self._hooks)
-        text = yield from call_llm(self.messages,
-                                   self.model,
-                                   self.api,
-                                   system_prompt=system_prompt,
-                                   tools=schemas,
-                                   tools_dispatch=dispatch,
-                                   hooks=hooks_registry,
-                                   ui=self._ui,
-                                   interrupt=self.interrupt,
-                                   steer=self._steer.drain,
-                                   reasoning_effort=self.reasoning_effort,
-                                   temperature=self.temperature,
-                                   max_steps=self.max_steps,
-                                   stream=stream,
-                                   hooks_data={"agent": self})
-        return text
+        skills and hooks added since are reflected. marks the agent running for the
+        life of the stream, so a concurrent steer folds in rather than starting a
+        second run (cleared in finally, however the stream ends)."""
+        self._running.set()
+        try:
+            if prompt is not None:
+                yield Event(type=EventType.USER, text=prompt)
+            skills_prompt = self.skills_registry.system_prompt
+            system_prompt = _combine_prompts(self._system_prompt, skills_prompt)
+            schemas = self.tools_registry.tools
+            dispatch = self.tools_registry.dispatch
+            # the one place the public [(event, fn), ...] list becomes the internal
+            # HooksRegistry that call_llm wants.
+            hooks_registry = HooksRegistry.from_list(self._hooks)
+            text = yield from call_llm(self.messages,
+                                       self.model,
+                                       self.api,
+                                       system_prompt=system_prompt,
+                                       tools=schemas,
+                                       tools_dispatch=dispatch,
+                                       hooks=hooks_registry,
+                                       ui=self._ui,
+                                       interrupt=self.interrupt,
+                                       steer=self._steer.drain,
+                                       reasoning_effort=self.reasoning_effort,
+                                       temperature=self.temperature,
+                                       max_steps=self.max_steps,
+                                       stream=stream,
+                                       hooks_data={"agent": self})
+            return text
+        finally:
+            self._running.clear()
 
     def run(self, prompt=None):
         """append `prompt` as a user turn (if given) and return a handle over the

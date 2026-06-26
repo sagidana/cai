@@ -204,7 +204,8 @@ class WiredAgent:
     a time, so the agent's one conversation is only ever touched serially:
 
       reader (select): SUBMIT/CONTROL -> worker queue  (touch agent state serially)
-                       STEER -> agent.steer            (mid-run, thread-safe)
+                       STEER -> agent.steer            (folds into a running turn;
+                                                        when idle, queued as a submit)
                        INTERRUPT -> agent.stop          (mid-run, thread-safe)
                        REPLY -> WireUI.resolve          (first answer wins)
       worker:          runs each queued turn / control op. a turn's EVENTs and
@@ -360,7 +361,13 @@ class WiredAgent:
             self._run_control(op, msg.get("value"), wire)
             return
         if kind == Wire.STEER:
-            self.agent.steer(msg.get("text") or "")
+            # while a run is in flight steer() queues the text (folded in at the next
+            # boundary) and returns True. while idle it returns False without acting,
+            # so we run it as a normal submit on the worker - which broadcasts to
+            # every client - instead of on this reader thread.
+            text = msg.get("text") or ""
+            if not self.agent.steer(text, run_on_idle=False):
+                self._work.put(("submit", text))
             return
         if kind == Wire.INTERRUPT:
             self.agent.stop()
