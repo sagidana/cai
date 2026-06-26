@@ -203,8 +203,13 @@ def _mcp_tool_schema(exposed, tool):
 
 class ToolRegistry:
     """The tools an Agent/Run can reach: in-process Python functions and MCP
-    server tools, in one dispatch table. `tools` is what the model sees;
-    `dispatch` is what executes a call.
+    server tools, in one dispatch table.
+
+    Registering a tool and selecting it are separate: register() makes a tool
+    known (and dispatchable), select() marks it active. `tools` - what the model
+    sees - is the selected subset; `dispatch` runs any registered tool. So a tool
+    can be available without being offered to the model (e.g. the sub-agent tools
+    an Agent always registers but only sends once a skill or the user selects).
 
     An MCP tool referenced by name ('<mcp_name>__<tool_name>') is lazy: the
     server at ~/.config/cai/mcps/<mcp_name>.py is spawned on first use - when
@@ -215,19 +220,21 @@ class ToolRegistry:
         self._dispatch = {}      # exposed_name -> tagged entry
         self._schemas = {}       # exposed_name -> schema (eager, or resolved lazily)
         self._order = []         # exposed names, registration order
+        self._selected = []      # exposed names that are active (sent to the model)
         # mcp_name -> LocalMCPServer: both the spawned-once cache and the set of
         # servers to close.
         self._local_mcp_servers = {}
 
     @classmethod
     def for_tools(cls, tools):
-        """build a registry from a mixed list: a callable becomes a Python
-        function tool; a string is an MCP tool reference '<mcp>__<tool>'."""
+        """build a registry from a mixed list, registering and selecting each: a
+        callable becomes a Python function tool; a string is an MCP tool
+        reference '<mcp>__<tool>'."""
         registry = cls()
         if not tools:
             return registry
         for item in tools:
-            registry.add(item)
+            registry.select(item)
         return registry
 
     @classmethod
@@ -301,21 +308,50 @@ class ToolRegistry:
             return _mcp_tool_schema(exposed, tool)
         return None
 
-    def add(self, tool):
-        """add one tool on the fly: a callable becomes a function tool, a string
-        is an MCP tool reference '<mcp>__<tool>'. a tool already registered is
-        left as-is."""
+    def register(self, tool, override=False):
+        """make one tool known (dispatchable) without selecting it: a callable
+        becomes a function tool, a string is an MCP tool reference '<mcp>__<tool>'.
+        a tool already registered is left as-is, unless override=True, which
+        replaces the existing registration with this tool - e.g. to bind an
+        inherited tool name to this agent's own tool. like any fresh
+        registration, the replacement is left unselected."""
+        name = tool.__name__ if callable(tool) else tool
+        if self.has(name):
+            if not override: return
+            self.remove(name)
         if callable(tool):
-            if self.has(tool.__name__): return
             self.register_function(tool)
             return
-        if self.has(tool): return
         self.register_mcp_tool(tool)
 
+    def select(self, tool, auto_register=True):
+        """mark `tool` active (sent to the model). `tool` may be a callable or an
+        MCP-ref name.
+
+        with auto_register=True (default) the tool is registered first if it isn't
+        known yet (a malformed name raises, from register; an MCP name whose
+        server fails to load registers nothing and so selects nothing). with
+        auto_register=False the tool must already be registered - an unknown tool
+        is left unselected, so registering and selecting stay fully separate."""
+        if auto_register:
+            self.register(tool)
+        name = tool.__name__ if callable(tool) else tool
+        if not self.has(name): return
+        if name in self._selected: return
+        self._selected.append(name)
+
+    def deselect(self, name):
+        """make a tool inactive (no longer sent to the model). it stays
+        registered, so it can be selected again. unknown/unselected names are
+        ignored."""
+        if name not in self._selected: return
+        self._selected.remove(name)
+
     def remove(self, name):
-        """remove a registered tool by its exposed name; unknown names are
-        ignored. an MCP server connection stays cached (closed with the
+        """fully unregister a tool by its exposed name (and deselect it); unknown
+        names are ignored. an MCP server connection stays cached (closed with the
         registry), since other tools may still use it."""
+        self.deselect(name)
         if name not in self._dispatch: return
         del self._dispatch[name]
         self._schemas.pop(name, None)
@@ -323,8 +359,29 @@ class ToolRegistry:
         self._order.remove(name)
 
     def has(self, name):
-        """True if a tool with this exposed name is already registered."""
+        """True if a tool with this exposed name is registered (selected or not)."""
         return name in self._dispatch
+
+    def names(self):
+        """exposed names of every registered tool, selected or not, in
+        registration order."""
+        return list(self._order)
+
+    def selected(self):
+        """exposed names of the active tools (the subset sent to the model), in
+        selection order."""
+        return list(self._selected)
+
+    def get(self, name):
+        """the original tool behind `name`, for re-registering it elsewhere (a
+        sub-agent inheriting a parent's tool): the callable for a function tool,
+        or the '<mcp>__<tool>' name string for an MCP tool. None if unknown."""
+        entry = self._dispatch.get(name)
+        if entry is None:
+            return None
+        if entry[0] == "function":
+            return self._functions[name]
+        return name
 
     def _is_name_free(self, name):
         if name in self._dispatch:
@@ -332,12 +389,14 @@ class ToolRegistry:
 
     @property
     def tools(self):
-        """OpenAI-format tool schemas in registration order, or None when empty
-        so call_llm omits the tools field entirely."""
-        if not self._order:
+        """OpenAI-format schemas of the selected tools, in selection order, or
+        None when none are selected so call_llm omits the tools field entirely.
+        only selected tools are offered to the model; registered-but-unselected
+        ones stay dispatchable but hidden."""
+        if not self._selected:
             return None
         schemas = []
-        for exposed in self._order:
+        for exposed in self._selected:
             schemas.append(self._schemas[exposed])
         return schemas
 

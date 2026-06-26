@@ -107,13 +107,15 @@ class SkillsRegistry:
 
     def __init__(self, tools_registry):
         self.tools_registry = tools_registry
-        self.skills = []        # activated Skill objects, foundation-first
-        # names visited, marked before recursing so foundation-first ordering
-        # (append after recursion) stays cycle-safe.
-        self._loaded = set()
-        # tool names this layer registered, so remove() never drops a base tool
-        # the agent itself added (those were already present, so skipped here).
-        self._added_tools = set()
+        # the active skill names, in activation order: this registry is the
+        # single source of truth for which skills are on. dependency skills
+        # (pulled via a `skills:` header) and unresolved names are kept too, so
+        # names() round-trips through set_skills.
+        self._names = []
+        # name -> Skill for the resolved skills, foundation-first by insertion
+        # (a skill is recorded after its dependencies), for the combined prompt
+        # and for knowing which tools to drop on remove().
+        self._skills = {}
 
     @classmethod
     def for_skills(cls, skills=None, *, tools_registry):
@@ -140,67 +142,61 @@ class SkillsRegistry:
                 names.add(filename[:-len(".md")])
         return sorted(names)
 
+    def names(self):
+        """the active skill names, in activation order. includes dependency
+        skills and names that resolved to no file, so the list round-trips
+        through set_skills."""
+        return list(self._names)
+
     def add(self, name):
         """activate a skill (and, first, the skills it builds on), unioning its
-        tools into the tool registry. already-active skills are a no-op."""
-        if name in self._loaded:
+        tools into the tool registry. an already-active name is a no-op."""
+        if name in self._names:
             return
-        self._loaded.add(name)
+        self._names.append(name)
+        self._activate(name)
+
+    def _activate(self, name):
+        """register a skill's tools and record its prompt, after first activating
+        the skills it builds on. an unresolved name is warned and skipped, but
+        stays in names() (mirroring set_skills's input)."""
         skill = _read_skill(name)
         if skill is None:
             log.warning("skill %r not found in %s", name, skills_dir())
             return
         # foundation first: activate everything this skill builds on, then it.
         for used in skill.skills:
-            self.add(used)
+            if used in self._names: continue
+            self._names.append(used)
+            self._activate(used)
+        # select the skill's tools, registering an MCP tool on demand. a tool
+        # already registered (e.g. an Agent's sub-agent tools) is just selected.
         for tool_name in skill.tools:
-            if self.tools_registry.has(tool_name): continue
             try:
-                self.tools_registry.register_mcp_tool(tool_name)
-                self._added_tools.add(tool_name)
+                self.tools_registry.select(tool_name)
             except ValueError as e:
                 log.error("skill %r: bad tool %r: %s", name, tool_name, e)
-        self.skills.append(skill)
+        self._skills[name] = skill
 
     def remove(self, name):
-        """deactivate a skill: drop it, and remove the tools it contributed that
-        no other active skill still declares (base tools are never touched)."""
-        target = None
-        for skill in self.skills:
-            if skill.name != name: continue
-            target = skill
-            break
-        if target is None:
+        """deactivate a skill: drop its name, its prompt, and deselect every tool
+        it declared - even one also selected by hand or shared with another skill
+        (kept deliberately simple). the tools stay registered; dependency skills
+        it pulled in stay active."""
+        if name in self._names:
+            self._names.remove(name)
+        skill = self._skills.pop(name, None)
+        if skill is None:
             return
-        self.skills.remove(target)
-        self._loaded.discard(name)
-        for tool_name in target.tools:
-            if tool_name not in self._added_tools: continue
-            if self._needed_by_active(tool_name): continue
-            self.tools_registry.remove(tool_name)
-            self._added_tools.discard(tool_name)
-
-    def _needed_by_active(self, tool_name):
-        for skill in self.skills:
-            if tool_name in skill.tools: return True
-        return False
-
-    def clear(self):
-        """deactivate every skill, removing the tools this layer added (base
-        tools the agent registered are left untouched). used to rebuild the
-        skill layer cleanly when the whole skill set is replaced."""
-        for tool_name in list(self._added_tools):
-            self.tools_registry.remove(tool_name)
-        self._added_tools.clear()
-        self.skills.clear()
-        self._loaded.clear()
+        for tool_name in skill.tools:
+            self.tools_registry.deselect(tool_name)
 
     @property
     def system_prompt(self):
         """the activated skills' prompt bodies, foundation-first, joined - or
         None when no skill contributed a prompt."""
         parts = []
-        for skill in self.skills:
+        for skill in self._skills.values():
             body = skill.body.strip()
             if not body: continue
             parts.append(body)

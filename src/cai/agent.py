@@ -23,6 +23,7 @@ through via HookContext.ui; None means no human is reachable (NULL_UI). Serving/
 attach, saving, and cloning are later layers."""
 from __future__ import annotations
 
+import logging
 import secrets
 import string
 import threading
@@ -33,6 +34,9 @@ from cai.llm import call_llm, SteerQueue
 from cai.tools import ToolRegistry
 from cai.skills import SkillsRegistry
 from cai.hooks import HookContext, HookEvent, HooksRegistry
+
+
+log = logging.getLogger("cai")
 
 
 def _combine_prompts(base, skills_prompt):
@@ -141,42 +145,30 @@ class Agent:
         self.model = model
         self.api = api
         self._system_prompt = system_prompt   # base; combined with skills on demand
-        self._tools = tools or []
-        self._skills = skills or []
-        # build the registries once at bootstrap so every run() reuses them (and
-        # the MCP servers they spawned); set_tools/set_skills mutate them in place.
-        self.tools_registry = ToolRegistry.for_tools(self._tools)
-        self.skills_registry = SkillsRegistry.for_skills(self._skills, tools_registry=self.tools_registry)
         self._hooks = hooks   # [(event, fn), ...] or None; turned into a HooksRegistry per run
         self._ui = ui         # UI hooks prompt through; None -> NULL_UI in call_llm
-        # per-run defaults forwarded to call_llm; None -> model/library default.
         self.reasoning_effort = reasoning_effort
         self.temperature = temperature
         self.max_steps = max_steps
         self.stream = stream
-        # set from another thread (stop()) to abort the in-flight run; each run()
-        # clears it so a fresh run starts un-interrupted.
         if interrupt is None: interrupt = threading.Event()
         self.interrupt = interrupt
-        # set by kill(): a harder stop that also retires the agent - it aborts
-        # the in-flight run and refuses further ones. never cleared.
         self._killed = threading.Event()
-        # messages pushed from another thread (steer()) and folded into the
-        # in-flight (or next) run as user turns at each turn boundary.
         self._steer = SteerQueue()
         self.messages = []
-        # SubAgent handles for children launched via the sub-agent tools - both
-        # active and dead; they are never pruned (a wait_agent can still read a
-        # finished child's result).
         self.children = []
-        # a child agent is an in-process layer that needs a live reference to
-        # this Agent, so the 'subagents' skill's tools are bound here at
-        # construction rather than spawned as an MCP subprocess (which could not
-        # reach us). lazy import: subagent imports Agent in turn.
-        if "subagents" in self._skills:
-            from cai.subagent import subagent_tools
-            for tool in subagent_tools(self):
-                self.tools_registry.add(tool)
+        self.tools_registry = ToolRegistry()
+
+        # registers subagents tools (lazy import: subagent imports Agent in turn).
+        # override=True so these bind to *this* agent even if a tool of the same
+        # name was inherited from a parent (a child's launch_agent must drive the
+        # child, not the parent).
+        from cai.subagent import subagent_tools
+        for tool in subagent_tools(self): self.tools_registry.register(tool, override=True)
+
+        for tool in (tools or []): self.tools_registry.select(tool)
+
+        self.skills_registry = SkillsRegistry.for_skills(skills, tools_registry=self.tools_registry)
 
     @property
     def system_prompt(self):
@@ -185,34 +177,41 @@ class Agent:
         return _combine_prompts(self._system_prompt, self.skills_registry.system_prompt)
 
     def get_tools(self):
-        return self._tools
+        """the names of the active (selected) tools - the subset sent to the
+        model, read straight from the registry (the single source of truth)."""
+        return self.tools_registry.selected()
 
-    def set_tools(self, tools):
-        """replace the agent's tools, updating the live registry in place."""
-        if tools is None: tools = []
-        new_names = set()
-        for tool in tools:
-            new_names.add(_tool_name(tool))
-        for tool in self._tools:
-            name = _tool_name(tool)
-            if name in new_names: continue
-            self.tools_registry.remove(name)
-        for tool in tools:
-            self.tools_registry.add(tool)
-        self._tools = tools
+    def set_tools(self, names):
+        """set the active tools to `names`, diffing against the current selection:
+        a tool no longer listed is deselected (it stays registered), and a newly
+        listed one is selected. selecting is best effort: a name that can't be
+        resolved to a tool this agent can reach (a function tool, which can't be
+        rebuilt from a name) is skipped with a warning rather than failing."""
+        want = set(names or [])
+        for name in self.tools_registry.selected():
+            if name in want: continue
+            self.tools_registry.deselect(name)
+        for name in want:
+            try:
+                self.tools_registry.select(name)
+            except ValueError:
+                log.warning("tool %r is not available to this agent; skipping", name)
 
     def get_skills(self):
-        return self._skills
+        """the active skill names, read straight from the registry (the single
+        source of truth)."""
+        return self.skills_registry.names()
 
-    def set_skills(self, skills):
-        """replace the agent's skills. the skill layer is torn down and rebuilt
-        so dependencies and shared tools resolve correctly; base tools and the
-        cached MCP servers are left in place. tools and system prompt follow."""
-        if skills is None: skills = []
-        self.skills_registry.clear()
-        for name in skills:
+    def set_skills(self, names):
+        """set the active skills to `names`, diffing against the registry: a skill
+        no longer listed is removed (along with the tools it pulled in) and a
+        newly listed one added. the combined system prompt follows on next read."""
+        want = set(names or [])
+        for name in self.skills_registry.names():
+            if name in want: continue
+            self.skills_registry.remove(name)
+        for name in want:
             self.skills_registry.add(name)
-        self._skills = skills
 
     def get_messages(self):
         """the agent's live conversation list."""
@@ -248,14 +247,15 @@ class Agent:
 
         if path is None:
             path = SessionsRegistry.session_path(self.name)
-        names = []
-        for tool in self._tools:
-            names.append(_tool_name(tool))
+        # the selected (active) tool names are saved as-is, function tools
+        # included. a name that names no MCP tool (a function tool) simply won't
+        # resolve when a different agent loads the flow - set_tools skips it with
+        # a warning. registered-but-unselected tools are not persisted.
         payload = SessionsRegistry.flow_payload(list(self.messages),
                                                 self.system_prompt,
                                                 self._system_prompt,
-                                                list(self._skills),
-                                                names,
+                                                self.skills_registry.names(),
+                                                self.tools_registry.selected(),
                                                 self.model,
                                                 reasoning_effort=self.reasoning_effort,
                                                 temperature=self.temperature,
@@ -267,8 +267,8 @@ class Agent:
         """replace the conversation + settings in place from a .flow file, so a
         served agent keeps its identity and live aliases. the stored leading
         system message is dropped and the prompt is re-derived from base +
-        skills. tools restore by name only (callables must be re-supplied via
-        set_tools). returns the path loaded."""
+        skills. tools restore by name only (function tools must be re-supplied via
+        the constructor). returns the path loaded."""
         from cai.session import SessionsRegistry
 
         payload = SessionsRegistry.read_flow(path)
@@ -280,6 +280,8 @@ class Agent:
 
         self._system_prompt = settings.get("system_prompt_base")
         self.set_skills(settings.get("skills") or [])
+        # set_tools is best effort: any saved name this agent can't provide (a
+        # function tool from another agent) is skipped with a warning.
         self.set_tools(settings.get("selected_tools") or [])
         if settings.get("model"):
             self.model = settings["model"]

@@ -470,23 +470,22 @@ def _tool_label(name):
 
 
 def _open_tools(screen, agent):
-    """open the :tools overlay and apply the new selection. discovery spawns each
-    MCP server briefly to list its tools, so the caller idle-gates it - and
-    replacing the toolset mutates the live registry, which would race a run."""
-    from cai.agent import _tool_name
+    """open the :tools overlay and apply the new selection. every active tool is
+    shown selected - the agent's own tools and the ones its skills pulled in;
+    set_tools then diffs the registry to match. discovery spawns each MCP server
+    briefly to list its tools, so the caller idle-gates it - and mutating the
+    toolset would race a run anyway."""
     from cai.tools import ToolRegistry
-    selected = set()
-    for tool in agent.get_tools():
-        selected.add(_tool_name(tool))
-    names = set(ToolRegistry.available_tools())
-    names |= selected
-    if not names:
+    active = set(agent.get_tools())
+    available = set(ToolRegistry.available_tools())
+    available |= active
+    if not available:
         screen.write("[no tools available]\n", kind=Screen.META)
         return
     entries = []
-    for name in sorted(names):
+    for name in sorted(available):
         entries.append((name, _tool_label(name)))
-    new_selected = screen.prompt_tools_overlay(entries, selected)
+    new_selected = screen.prompt_tools_overlay(entries, active)
     agent.set_tools(sorted(new_selected))
 
 

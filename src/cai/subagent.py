@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 import threading
 
-from cai.agent import Agent, _tool_name
+from cai.agent import Agent
 from cai.channel import connect
 from cai.ui import BaseUI
 from cai.wire import Wire
@@ -56,18 +56,17 @@ class SubAgent:
 
 
 def _inherit_tools(parent, names):
-    """the parent tools whose names appear in `names`, in request order. reduce-
-    only: a child only ever gets a subset of the parent's tools, and a name the
-    parent does not have is silently dropped."""
+    """the parent tools whose names appear in `names`, in request order, in a form
+    the child can re-register (the callable for a function tool, the '<mcp>__<tool>'
+    name for an MCP tool). reduce-only: a child only ever gets a subset of the
+    parent's *active* (selected) tools; any other name is silently dropped."""
     if not names:
         return []
-    by_name = {}
-    for tool in parent.get_tools():
-        by_name[_tool_name(tool)] = tool
+    selected = set(parent.get_tools())
     chosen = []
     for name in names:
-        if name not in by_name: continue
-        chosen.append(by_name[name])
+        if name not in selected: continue
+        chosen.append(parent.tools_registry.get(name))
     return chosen
 
 

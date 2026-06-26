@@ -73,23 +73,37 @@ class ToolThenTextApi:
         return gen()
 
 
+def _fake_register(registry, tools):
+    """register and select `tools` into `registry` offline: a callable as a
+    function tool, an MCP-name string as an MCP tool faked in place (no server is
+    spawned), so get_tools (the selected set) sees it without loading."""
+    for tool in (tools or []):
+        if callable(tool):
+            registry.register_function(tool)
+            registry._selected.append(tool.__name__)
+            continue
+        registry._dispatch[tool] = ("mcp", *tool.split("__", 1))
+        registry._schemas[tool] = {"type": "function",
+                                   "function": {"name": tool,
+                                                "description": "",
+                                                "parameters": {"type": "object", "properties": {}}}}
+        registry._order.append(tool)
+        registry._selected.append(tool)
+
+
 def make_agent(tools=None, skills=None, hooks=None, api=None):
-    """build an Agent without touching config/network (bypass __init__). callable
-    tools are registered for dispatch; MCP-name strings are kept in _tools (so
-    get_tools sees them) but not loaded."""
+    """build an Agent without touching config/network (bypass __init__). tools are
+    registered into the registry (the agent's source of truth); skill names are
+    set directly without activating real skill files."""
     agent = Agent.__new__(Agent)
     agent.name = "test"
     agent.model = "m"
     agent.api = api or FakeApi()
     agent._system_prompt = None
-    agent._tools = tools or []
-    agent._skills = skills or []
-    callables = []
-    for tool in (tools or []):
-        if callable(tool):
-            callables.append(tool)
-    agent.tools_registry = ToolRegistry.for_tools(callables)
+    agent.tools_registry = ToolRegistry.for_tools([])
+    _fake_register(agent.tools_registry, tools)
     agent.skills_registry = SkillsRegistry.for_skills([], tools_registry=agent.tools_registry)
+    agent.skills_registry._names = list(skills or [])
     agent._hooks = hooks
     agent._ui = None
     agent.reasoning_effort = None
@@ -275,13 +289,15 @@ def test_control_get_tools_returns_names(serve):
     assert set(tools) == {"my_tool", "srv__search"}
 
 
-def test_control_set_tools_rejects_a_function_name(serve):
-    # a function tool reads back by name but cannot be rebuilt from one over the
-    # wire (a callable does not fit in JSON) - set_tools should fail cleanly.
+def test_control_set_tools_skips_an_unavailable_function_name(serve):
+    # a function tool can't be rebuilt from a name (a callable does not fit in
+    # JSON); set_tools is best effort - it skips the name with a warning rather
+    # than failing, so the call succeeds and the tool just isn't added.
     wire = serve(make_agent())
     ok, value, error = wire.control("set_tools", ["my_tool"])
-    assert ok is False
-    assert error is not None
+    assert ok is True
+    ok, tools, error = wire.control("get_tools")
+    assert tools == []
 
 
 def test_control_unknown_op_errs(serve):

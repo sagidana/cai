@@ -71,8 +71,6 @@ def bare_agent(tools_registry, api):
     agent.model = "m"
     agent.api = api
     agent._system_prompt = None
-    agent._tools = []
-    agent._skills = []
     agent.tools_registry = tools_registry
     agent.skills_registry = SkillsRegistry.for_skills([], tools_registry=tools_registry)
     agent._hooks = None

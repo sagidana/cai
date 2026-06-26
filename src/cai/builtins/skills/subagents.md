@@ -1,4 +1,5 @@
 name: subagents
+tools: launch_agent, wait_agent, kill_agent
 ---
 # Skill: Sub-Agents
 

@@ -8,6 +8,8 @@ import time
 import threading
 
 from cai.agent import Agent, _tool_name
+from cai.tools import ToolRegistry
+from cai.skills import SkillsRegistry
 from cai.subagent import _inherit_tools
 from cai.subagent import _inherit_skills
 from cai.subagent import _launch_agent
@@ -51,14 +53,22 @@ class BlockingApi:
 
 def make_parent(api, tools=None, skills=None):
     """a parent Agent without config/network (bypass __init__), carrying just the
-    state the sub-agent tools read: model, api, tools, skills, hooks, children."""
+    state the sub-agent tools read: model, api, registries, hooks, children."""
     parent = Agent.__new__(Agent)
     parent.name = "parent"
     parent.model = "m"
     parent.api = api
     parent._system_prompt = "PARENT PROMPT"
-    parent._tools = tools or []
-    parent._skills = skills or ["subagents"]
+    # the registries are the agent's source of truth. callable tools register for
+    # dispatch (so get_tools sees them); the skill names are set directly, without
+    # activating real skill files.
+    callables = []
+    for tool in (tools or []):
+        if callable(tool):
+            callables.append(tool)
+    parent.tools_registry = ToolRegistry.for_tools(callables)
+    parent.skills_registry = SkillsRegistry.for_skills([], tools_registry=parent.tools_registry)
+    parent.skills_registry._names = list(skills or ["subagents"])
     parent._hooks = None
     parent.children = []
     return parent
