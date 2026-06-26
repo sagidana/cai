@@ -150,13 +150,13 @@ def _find(parent, agent_id):
     return None
 
 
-_LAUNCH_DOC = """Launch a background sub-agent; name it with descriptive dash-delimited words (e.g. 'audit-auth-flow').
+_LAUNCH_DOC = """Launch ONE background sub-agent and return its agent_id (its name); call it like launch_agent(prompt="<self-contained task>", name="audit-auth-flow"). Pass arguments as named fields.
 
     The child shares your working directory but not your conversation, so
     ``prompt`` must be self-contained. ``tools`` and ``skills`` are each a LIST
     of names (a subset of your own); nothing is inherited by default. ``model``
     and ``system_prompt`` override the inherited model / replace the prompt. It
-    runs in the background - collect its result with ``wait_agent``.
+    runs in the background - collect its result with wait_agent(agent_id=...).
     """
 
 
@@ -209,7 +209,7 @@ def make_launch_agent(parent):
     return launch_agent
 
 
-_WAIT_DOC = """Block until the given sub-agent finishes and return its final answer.
+_WAIT_DOC = """Wait for ONE sub-agent to finish and return its answer; call it like wait_agent(agent_id="audit-auth-flow") with the name launch_agent returned. agent_id is a single string, one per call - to wait on several, make several calls.
 
     On timeout the sub-agent keeps running; call wait_agent again to keep
     waiting. Pass kill=True to instead kill it when the timeout expires and
@@ -243,10 +243,10 @@ def make_wait_agent(parent):
     return wait_agent
 
 
-_KILL_DOC = """Kill a running sub-agent now; it winds down in the background.
+_KILL_DOC = """Kill ONE running sub-agent now; call it like kill_agent(agent_id="audit-auth-flow") with the name launch_agent returned. It winds down in the background.
 
     Returns immediately. Collect whatever partial output it produced with
-    wait_agent('<name>').
+    wait_agent(agent_id="<name>").
     """
 
 
