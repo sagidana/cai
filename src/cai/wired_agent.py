@@ -471,6 +471,15 @@ class WiredAgent:
         if op == "set_tools":
             agent.set_tools(value)
             return True, None, None
+        if op == "get_info":
+            children = []
+            for handle in agent.children:
+                children.append(handle.id)
+            value = {}
+            value["name"] = agent.name
+            value["model"] = agent.model
+            value["children"] = children
+            return True, value, None
         if op == "save":
             # value is the target path, or None for a default timestamped file;
             # the path written comes back to the client. control ops run on the
