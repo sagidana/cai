@@ -282,6 +282,11 @@ class Agent:
         # included. a name that names no MCP tool (a function tool) simply won't
         # resolve when a different agent loads the flow - set_tools skips it with
         # a warning. registered-but-unselected tools are not persisted.
+        # the ids of the sub-agents this agent launched (each saved under its own
+        # '<id>.flow'), so the :sessions picker can nest them under this session.
+        children = []
+        for handle in self.children:
+            children.append(handle.id)
         payload = SessionsRegistry.flow_payload(list(self.messages),
                                                 self.system_prompt,
                                                 self._system_prompt,
@@ -290,7 +295,8 @@ class Agent:
                                                 self.model,
                                                 reasoning_effort=self.reasoning_effort,
                                                 temperature=self.temperature,
-                                                max_steps=self.max_steps)
+                                                max_steps=self.max_steps,
+                                                children=children)
         SessionsRegistry.write_flow(path, payload)
         return path
 

@@ -483,26 +483,29 @@ def _replay_messages(screen, messages):
 
 
 def _session_preview(path, width, max_lines):
-    """the picker's right-hand preview: up to max_lines '<role>: <snippet>' rows
-    read from the flow at path."""
+    """the picker's right-hand preview: a '<n> messages' header then the
+    conversation tail, colored by role. shares the renderer the live :agents
+    preview uses (render._preview_lines), so assistant turns whose text lives in
+    tool calls / structured content render the same here as there, instead of the
+    blank rows a naive content read produces."""
+    from cai.screen.ansi import SGR_DIM_GRAY, SGR_RESET
+    from cai.screen.render import _preview_lines
+
     if not path:
         return []
     try:
         payload = SessionsRegistry.read_flow(path)
     except (OSError, ValueError):
-        return []
-    lines = []
+        return [f"{SGR_DIM_GRAY}could not read session{SGR_RESET}"]
+    convo = []
     for message in (payload.get("messages") or []):
-        role = message.get("role")
-        if role == "system": continue
-        content = message.get("content")
-        if not isinstance(content, str):
-            content = str(content)
-        snippet = " ".join(content.split())[:width]
-        lines.append(f"{role}: {snippet}")
-        if len(lines) >= max_lines:
-            break
-    return lines
+        if message.get("role") == "system": continue
+        convo.append(message)
+    head = f"{len(convo)} messages"[:width]
+    lines = [head, ""]
+    body = max(1, max_lines - len(lines))
+    lines.extend(_preview_lines(convo, width, body))
+    return lines[:max_lines]
 
 
 def _load_session(screen, client, status, path):
@@ -518,31 +521,101 @@ def _load_session(screen, client, status, path):
     screen.write(f"[loaded {os.path.basename(path)}]\n", kind=Screen.META)
 
 
+def _session_tree_nodes():
+    """saved sessions as a hierarchy: each .flow declares the ids of the
+    sub-agents it launched (their own '<id>.flow' stems), so a child nests under
+    the parent that declared it. nodes link by id; a declared child whose own
+    flow was deleted becomes a dead-end leaf rather than vanishing. the .flow
+    list is read from disk - a client-side file concern."""
+    nodes = {}
+    declared = []
+    for path in SessionsRegistry.list_sessions():
+        try:
+            payload = SessionsRegistry.read_flow(path)
+        except (OSError, ValueError):
+            continue
+        node_id = os.path.splitext(os.path.basename(path))[0]
+        node = {}
+        node["id"] = node_id
+        node["parent"] = None
+        node["name"] = SessionsRegistry.session_label(path)
+        node["path"] = path
+        node["dead_end"] = False
+        nodes[node_id] = node
+        for child_id in (payload.get("children") or []):
+            declared.append((node_id, child_id))
+
+    for parent_id, child_id in declared:
+        child = nodes.get(child_id)
+        if child is None:
+            leaf = {}
+            leaf["id"] = child_id
+            leaf["parent"] = parent_id
+            leaf["name"] = child_id
+            leaf["path"] = None
+            leaf["dead_end"] = True
+            nodes[child_id] = leaf
+            continue
+        child["parent"] = parent_id
+    return list(nodes.values())
+
+
 def _open_sessions(screen, client, status):
-    """open the :sessions picker and load the chosen saved session. the .flow list
-    is read from disk (a client-side file concern); the load itself goes over the
-    wire."""
-    paths = SessionsRegistry.list_sessions()
-    if not paths:
+    """open the :sessions picker (a tree of sessions and their sub-agent
+    sessions) and load the chosen saved session. building the tree reads .flow
+    files off disk; the load itself goes over the wire. Ctrl-K deletes the
+    highlighted session's .flow; a pruned dead-end has no transcript to delete."""
+    from cai.screen.ansi import SGR_DIM_GRAY, SGR_RESET
+
+    if not SessionsRegistry.list_sessions():
         screen.write("[no saved sessions]\n", kind=Screen.META)
         return
-    labels = []
-    by_label = {}
-    for path in paths:
-        label = SessionsRegistry.session_label(path)
-        labels.append(label)
-        by_label[label] = path
 
-    def _preview(label, width, max_lines):
-        return _session_preview(by_label.get(label), width, max_lines)
+    def _label(node):
+        name = node.get("name") or node["id"]
+        if node.get("dead_end"):
+            return f"{name} · pruned"
+        return name
 
-    picked = screen.prompt_session_overlay(labels, preview_fn=_preview)
-    if not picked:
+    def _color(node):
+        if node.get("dead_end"):
+            return SGR_DIM_GRAY
+        return ""
+
+    def _preview(node, width, max_lines):
+        if node.get("path") is None:
+            return [f"{SGR_DIM_GRAY}pruned - no saved transcript{SGR_RESET}"]
+        return _session_preview(node["path"], width, max_lines)
+
+    def _delete(nid):
+        for node in _session_tree_nodes():
+            if node["id"] != nid: continue
+            path = node.get("path")
+            if path is None: return
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            return
+
+    sel = screen.prompt_tree_overlay(
+        _session_tree_nodes,
+        label_fn=_label,
+        preview_fn=_preview,
+        color_fn=_color,
+        action_fn=_delete,
+        title="sessions",
+        hints='  j/k /:search ↵:resume ^K:delete ESC:cancel',
+    )
+    if sel is None:
         return
-    path = by_label.get(picked)
-    if path is None:
+    for node in _session_tree_nodes():
+        if node["id"] != sel: continue
+        path = node.get("path")
+        if path is None:
+            return
+        _load_session(screen, client, status, path)
         return
-    _load_session(screen, client, status, path)
 
 
 def _save_session(screen, client, path):
@@ -631,9 +704,23 @@ def _open_agents(screen, client):
         return list(nodes.values())
 
     def _messages_for(node):
-        if not node.get("live"):
+        # prefer the live transcript over the socket; once an agent finishes its
+        # socket is gone, so fall back to the '<id>.flow' it autosaved (its id is
+        # the flow stem). non-system messages only - the leading composed prompt
+        # is not worth previewing.
+        if node.get("live"):
+            messages = _agent_control(node["id"], "get_messages")
+            if messages is not None:
+                return messages
+        try:
+            payload = SessionsRegistry.read_flow(SessionsRegistry.session_path(node["id"]))
+        except (OSError, ValueError):
             return None
-        return _agent_control(node["id"], "get_messages")
+        convo = []
+        for message in (payload.get("messages") or []):
+            if message.get("role") == "system": continue
+            convo.append(message)
+        return convo
 
     def _preview(node, width, max_lines):
         status = node.get("status", "")

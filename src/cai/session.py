@@ -6,6 +6,7 @@ uses - holding a conversation plus the settings needed to resume it:
     {
       "version": 3,
       "messages": [ {"role": "system", ...}, {"role": "user", ...}, ... ],
+      "children": [ <name>, ... ],           # ids of the sub-agents this one launched
       "settings": {
         "system_prompt_base": <str|null>,   # the user-supplied base prompt
         "skills":           [<name>, ...],
@@ -16,6 +17,11 @@ uses - holding a conversation plus the settings needed to resume it:
         "max_steps":        <int|null>
       }
     }
+
+A child's id is its own '<name>.flow' stem, so the saved sessions form a tree:
+the :sessions picker links each flow to the children it declares (see
+tui._session_tree_nodes). Only the downward edge is stored - a child does not
+record its parent.
 
 The leading system message is the *composed* prompt (base + skills) for a
 portable, human-readable record; on load it is dropped and the prompt is
@@ -73,10 +79,12 @@ class SessionsRegistry:
                      model,
                      reasoning_effort=None,
                      temperature=None,
-                     max_steps=None):
+                     max_steps=None,
+                     children=None):
         """build the flow JSON payload. system_prompt (the composed prompt) is
         prepended as a leading system message when set; system_prompt_base is
-        what actually round-trips."""
+        what actually round-trips. children is the ids of the sub-agents this
+        agent launched, stored so the :sessions picker can rebuild the tree."""
         full = list(messages)
         if system_prompt:
             lead = {}
@@ -96,6 +104,7 @@ class SessionsRegistry:
         payload = {}
         payload["version"] = SessionsRegistry.FLOW_VERSION
         payload["messages"] = full
+        payload["children"] = list(children or [])
         payload["settings"] = settings
         return payload
 
