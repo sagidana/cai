@@ -31,6 +31,7 @@ class HookEvent(str, Enum):
     BEFORE_TOOL_CALL = "before_tool_call"
     AFTER_TOOL_CALL = "after_tool_call"
     MESSAGES_MUTATED = "messages_mutated"
+    MESSAGES_LOADED = "messages_loaded"
     AFTER_TURN = "after_turn"
     ON_FINAL_RESPONSE = "on_final_response"
     AFTER_RUN = "after_run"

@@ -1000,11 +1000,14 @@ def run(*,
 
     # autosave: persist the session to <name>.flow on every conversation
     # mutation, driven solely by hooks - AFTER_RUN (the final answer landed) and
-    # MESSAGES_MUTATED (tool results appended mid-run) together cover every
-    # change a run makes (a no-tool turn ends in AFTER_RUN; a tool step appends
-    # results and fires MESSAGES_MUTATED). the agent comes through ctx.data, and
-    # the hook runs on the worker thread mid-run, so it sees a consistent
-    # conversation and never races the main thread.
+    # MESSAGES_MUTATED (tool results appended mid-run, plus out-of-run edits like
+    # a :history fork) together cover every change a run makes (a no-tool turn
+    # ends in AFTER_RUN; a tool step appends results and fires MESSAGES_MUTATED).
+    # loading a session fires MESSAGES_LOADED, not MESSAGES_MUTATED, so a plain
+    # load - whose messages came straight off disk - is not written back and does
+    # not bump the file's mtime. the agent comes through ctx.data, and the hook
+    # runs on the worker thread mid-run, so it sees a consistent conversation and
+    # never races the main thread.
     def _autosave(ctx):
         saved = (ctx.data or {}).get("agent")
 

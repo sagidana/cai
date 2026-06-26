@@ -252,24 +252,27 @@ class Agent:
         """the agent's live conversation list."""
         return self.messages
 
-    def _fire_messages_mutated(self):
-        """fire MESSAGES_MUTATED for a conversation change made outside a run
-        (set_messages, load), so the same hooks call_llm fires mid-run also see
-        these. the agent rides in ctx.data the way call_llm passes it via
+    def _fire_messages_event(self, event):
+        """fire `event` for a conversation change made outside a run, so hooks that
+        watch the conversation (the same ones call_llm fires mid-run) see it too.
+        set_messages fires MESSAGES_MUTATED (an in-place edit); load fires
+        MESSAGES_LOADED instead, so a listener like autosave can tell a fresh load
+        - whose messages came straight off disk - apart from an edit and not write
+        it back. the agent rides in ctx.data the way call_llm passes it via
         hooks_data, so a hook reaches it uniformly however it was triggered."""
         hooks = HooksRegistry.from_list(self._hooks)
-        ctx = HookContext(event=HookEvent.MESSAGES_MUTATED,
+        ctx = HookContext(event=event,
                           messages=self.messages,
                           model=self.model,
                           ui=self._ui,
                           data={"agent": self})
-        hooks.fire(HookEvent.MESSAGES_MUTATED, ctx)
+        hooks.fire(event, ctx)
 
     def set_messages(self, messages):
         """replace the agent's conversation; the next run() continues from it."""
         if messages is None: messages = []
         self.messages = messages
-        self._fire_messages_mutated()
+        self._fire_messages_event(HookEvent.MESSAGES_MUTATED)
 
     def save(self, path=None):
         """persist the conversation + settings to a .flow file (see session.py
@@ -332,7 +335,7 @@ class Agent:
         self.max_steps = settings.get("max_steps")
         # mutate in place so any external alias keeps pointing at live state.
         self.messages[:] = messages
-        self._fire_messages_mutated()
+        self._fire_messages_event(HookEvent.MESSAGES_LOADED)
         return path
 
     def stop(self):
