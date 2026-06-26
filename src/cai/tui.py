@@ -45,6 +45,7 @@ _PALETTE_COMMANDS = [
     ("tools", "enable / disable tools"),
     ("skills", "activate / deactivate skills"),
     ("messages", "view / edit / delete the conversation"),
+    ("agents", "live view of sub-agents"),
     ("sessions", "load a saved session"),
     ("save", "save the session (optional path)"),
     ("load", "load a session file (path)"),
@@ -554,6 +555,129 @@ def _save_session(screen, client, path):
     screen.write(f"[saved {written}]\n", kind=Screen.META)
 
 
+def _agent_control(name, op):
+    """connect to an agent's socket and run one read-only control op; returns its
+    value, or None if the socket is gone/unreachable. the :agents view reads
+    everything this way - solely over ~/.config/cai/agents/*.sock."""
+    from cai.agents_registry import AgentsRegistry
+
+    try:
+        channel = connect(AgentsRegistry.sock_path(name))
+    except OSError:
+        return None
+    wire = Wire(channel)
+    try:
+        ok, value, _error = wire.control(op)
+    except OSError:
+        ok, value = False, None
+    finally:
+        channel.close()
+    if not ok:
+        return None
+    return value
+
+
+def _open_agents(screen, client):
+    """open the live sub-agents tree, built solely from the agents sockets. each
+    live agent answers get_info (name, model, the ids of its children); the tree
+    is linked from those children lists, and a child with no live socket of its
+    own (finished, torn down) still shows as a leaf. preview reads a live agent's
+    conversation over its socket; Enter opens it read-only; Ctrl-K interrupts a
+    live sub-agent. the TUI's own agent is the root, marked self."""
+    from cai.agents_registry import AgentsRegistry
+    from cai.screen.ansi import SGR_DIM_GRAY, SGR_RESET
+    from cai.screen.render import _preview_lines
+
+    self_name = client.get_info().get("name", "")
+
+    def _nodes():
+        nodes = {}
+        for name in AgentsRegistry.list_names():
+            info = _agent_control(name, "get_info")
+            if info is None: continue
+            node = {}
+            node["id"] = name
+            node["parent"] = None
+            node["name"] = info.get("name") or name
+            node["model"] = info.get("model", "")
+            node["children_ids"] = info.get("children") or []
+            node["status"] = "running"
+            node["live"] = True
+            nodes[name] = node
+        for node in list(nodes.values()):
+            for cid in node["children_ids"]:
+                if cid in nodes: continue
+                leaf = {}
+                leaf["id"] = cid
+                leaf["parent"] = None
+                leaf["name"] = cid
+                leaf["model"] = ""
+                leaf["children_ids"] = []
+                leaf["status"] = "done"
+                leaf["live"] = False
+                nodes[cid] = leaf
+        for node in nodes.values():
+            for cid in node["children_ids"]:
+                child = nodes.get(cid)
+                if child is None: continue
+                child["parent"] = node["id"]
+        root = nodes.get(self_name)
+        if root is not None:
+            root["status"] = "idle"
+            if screen._busy:
+                root["status"] = "running"
+        for node in nodes.values():
+            node["children_count"] = len(node["children_ids"])
+        return list(nodes.values())
+
+    def _messages_for(node):
+        if not node.get("live"):
+            return None
+        return _agent_control(node["id"], "get_messages")
+
+    def _preview(node, width, max_lines):
+        status = node.get("status", "")
+        if not node.get("present", True):
+            status = "finished"
+        lines = [status[:width], ""]
+        messages = _messages_for(node)
+        if messages is None:
+            lines.append(f"{SGR_DIM_GRAY}no transcript{SGR_RESET}")
+            return lines[:max_lines]
+        body = max(1, max_lines - len(lines))
+        lines.extend(_preview_lines(messages, width, body))
+        return lines[:max_lines]
+
+    def _stop(name):
+        if name == self_name:
+            return
+        try:
+            channel = connect(AgentsRegistry.sock_path(name))
+        except OSError:
+            return
+        try:
+            Wire(channel).send_interrupt()
+        finally:
+            channel.close()
+
+    sel = screen.prompt_agents_overlay(_nodes, _preview, stop_fn=_stop,
+                                       self_id=self_name)
+    if sel is None:
+        return
+    chosen = None
+    for node in _nodes():
+        if node["id"] != sel: continue
+        chosen = node
+        break
+    if chosen is None:
+        return
+    messages = _messages_for(chosen)
+    if messages is None:
+        screen.write("[no transcript for this agent]\n", kind=Screen.META)
+        return
+    screen.prompt_messages_overlay(messages)
+
+
 def _tool_label(name):
     """the origin column for a tool entry: the MCP server name (the part before
     '__'), or 'tool' for an unprefixed function tool."""
@@ -644,6 +768,9 @@ def _handle_command(screen, client, status, registry, cmd):
             screen.write("[busy — open :messages when idle]\n", kind=Screen.META)
             return False
         _open_messages(screen, client, status)
+        return False
+    if head == "agents":
+        _open_agents(screen, client)
         return False
     if head == "sessions":
         if screen._busy:
