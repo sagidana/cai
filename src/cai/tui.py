@@ -13,9 +13,11 @@ single status thread samples them every _REFRESH_INTERVAL and renders the line,
 so a stream that goes quiet falls back to 'waiting' on its own without any event
 to trigger it.
 
-Minimal by design: the only commands are :q/:quit and :clear, and no overlays
-beyond the core loop are wired yet. Model/config/messages/tools pickers and
-tool-approval gating are added in later layers.
+The `:`-commands cover the session: :models / :messages / :sessions / :save /
+:load, plus :tools and :skills to toggle which tools and skills the agent uses.
+Each picker is a screen overlay; the mutating ones (:messages, :sessions, :load,
+:tools, :skills) are refused while a run is in flight so they never race the
+worker's view of the conversation or the tool registry.
 """
 import os
 import queue
@@ -31,6 +33,8 @@ from cai.session import SessionsRegistry
 # command palette (Ctrl-P) and command-mode (:) completion entries.
 _PALETTE_COMMANDS = [
     ("models", "switch the model (pin favorites)"),
+    ("tools", "enable / disable tools"),
+    ("skills", "activate / deactivate skills"),
     ("messages", "view / edit / delete the conversation"),
     ("sessions", "load a saved session"),
     ("save", "save the session (optional path)"),
@@ -445,6 +449,50 @@ def _save_session(screen, agent, path):
     screen.write(f"[saved {written}]\n", kind=Screen.META)
 
 
+def _tool_label(name):
+    """the origin column for a tool entry: the MCP server name (the part before
+    '__'), or 'tool' for an unprefixed function tool."""
+    if "__" in name:
+        return name.split("__", 1)[0]
+    return "tool"
+
+
+def _open_tools(screen, agent):
+    """open the :tools overlay and apply the new selection. discovery spawns each
+    MCP server briefly to list its tools, so the caller idle-gates it - and
+    replacing the toolset mutates the live registry, which would race a run."""
+    from cai.agent import _tool_name
+    from cai.tools import ToolRegistry
+    selected = set()
+    for tool in agent.get_tools():
+        selected.add(_tool_name(tool))
+    names = set(ToolRegistry.available_tools())
+    names |= selected
+    if not names:
+        screen.write("[no tools available]\n", kind=Screen.META)
+        return
+    entries = []
+    for name in sorted(names):
+        entries.append((name, _tool_label(name)))
+    new_selected = screen.prompt_tools_overlay(entries, selected)
+    agent.set_tools(sorted(new_selected))
+
+
+def _open_skills(screen, agent):
+    """open the :skills overlay and apply the new selection. set_skills rebuilds
+    the skill layer (its tools + the system prompt), so the caller idle-gates it
+    to keep it off the worker's view."""
+    from cai.skills import SkillsRegistry
+    names = set(SkillsRegistry.available_skills())
+    active = set(agent.get_skills())
+    names |= active
+    if not names:
+        screen.write("[no skills available]\n", kind=Screen.META)
+        return
+    new_active = screen.prompt_skills_overlay(sorted(names), active)
+    agent.set_skills(sorted(new_active))
+
+
 def _handle_command(screen, agent, status, registry, cmd):
     """dispatch a `:`-command. returns True to quit the loop, else False.
 
@@ -480,6 +528,20 @@ def _handle_command(screen, agent, status, registry, cmd):
     if head == "models":
         # switching only affects the next run, so this is safe while busy.
         _open_models(screen, agent, status, registry)
+        return False
+    if head == "tools":
+        # changing the toolset mutates the live registry, so only while idle.
+        if screen._busy:
+            screen.write("[busy — open :tools when idle]\n", kind=Screen.META)
+            return False
+        _open_tools(screen, agent)
+        return False
+    if head == "skills":
+        # rebuilding the skill layer mutates the live registry, so only idle.
+        if screen._busy:
+            screen.write("[busy — open :skills when idle]\n", kind=Screen.META)
+            return False
+        _open_skills(screen, agent)
         return False
     if head == "messages":
         # editing the live conversation mid-run would race the worker, so only
