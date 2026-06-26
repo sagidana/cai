@@ -517,6 +517,11 @@ def _handle_command(screen, agent, status, registry, cmd):
     if len(parts) > 1:
         arg = parts[1].strip()
     if head == "clear":
+        # clearing the conversation mid-run would race the worker, so only idle.
+        if screen._busy:
+            screen.write("[busy — :clear when idle]\n", kind=Screen.META)
+            return False
+        agent.set_messages([])
         screen.clear_buffer()
         return False
     if head == "save":
