@@ -21,6 +21,8 @@ extension Python."""
 from __future__ import annotations
 
 import os
+import sys
+import hashlib
 import logging
 import importlib.util
 from dataclasses import dataclass, field
@@ -190,12 +192,32 @@ def _run_register(path, extension):
 
 
 def _load_module(path):
-    name = "cai_ext_" + path.replace(os.sep, "_").replace(".", "_")
+    """load a register module as a package whose search path is its own
+    directory, so it can `from . import helper` a sibling file, and cache it in
+    sys.modules so its body runs once per process. None (logged) on failure."""
+    name = _module_name(path)
+    cached = sys.modules.get(name)
+    if cached is not None:
+        return cached
     try:
-        spec = importlib.util.spec_from_file_location(name, path)
+        spec = importlib.util.spec_from_file_location(
+            name,
+            path,
+            submodule_search_locations=[os.path.dirname(path)])
         module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
         spec.loader.exec_module(module)
         return module
     except Exception:
+        sys.modules.pop(name, None)
         log.exception("userconfig: failed loading %s", path)
         return None
+
+
+def _module_name(path):
+    """a stable, collision-free package name for a bundle file: its directory
+    name for readable tracebacks plus a short hash of the absolute path so two
+    files never map to the same name."""
+    folder = os.path.basename(os.path.dirname(path))
+    digest = hashlib.sha1(os.path.abspath(path).encode()).hexdigest()[:8]
+    return "cai_ext_" + folder + "_" + digest

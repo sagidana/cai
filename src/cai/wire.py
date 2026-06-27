@@ -206,6 +206,9 @@ class Wire:
         if kind == "notify":
             ui.notify(message, level=msg.get("level", "info"))
             return True
+        if kind == "status":
+            ui.status(message)
+            return True
         if kind == "confirm":
             value = ui.confirm(message, default=bool(default), detail=detail)
         elif kind == "select":

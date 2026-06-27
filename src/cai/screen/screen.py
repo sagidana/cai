@@ -399,6 +399,13 @@ class Screen:
         """exit alternate screen and restore the terminal."""
         if self._closed: return
         self._closed = True
+        # wake a worker blocked in submit_request so it doesn't hang on a UI
+        # request that will never be serviced now the prompt loop is gone.
+        with self._req_lock:
+            pend = self._req_pending
+            self._req_pending = None
+        if pend is not None:
+            pend[1].set()
         sys.stdout.write(f'{MOUSE_OFF}{ALT_EXIT}{CUR_SHOW}{CURSOR_RESET}{SGR_RESET}\n')
         sys.stdout.flush()
         signal.signal(signal.SIGWINCH, signal.SIG_DFL)
@@ -732,6 +739,29 @@ class Screen:
         finally:
             self.pop_focus()
 
+    def prompt_select_overlay(self, options, message=""):
+        """blocking single-choice picker (reuses the fuzzy list overlay). returns
+        the chosen option or None on cancel. backs a hook's ctx.ui.select."""
+        from .overlays.model import prompt_model_overlay
+
+        self.push_focus('model')
+        try:
+            return prompt_model_overlay(self, list(options), presorted=True,
+                                        noun=message or "options", navigate=True)
+        finally:
+            self.pop_focus()
+
+    def prompt_text_overlay(self, title, default="", secret=False):
+        """blocking single-line text input. returns the entered string (an empty
+        entry yields default) or None on cancel. backs a hook's ctx.ui.text."""
+        from .overlays.textinput import prompt_text_overlay
+
+        self.push_focus('textinput')
+        try:
+            return prompt_text_overlay(self, title, default=default, secret=secret)
+        finally:
+            self.pop_focus()
+
     def submit_request(self, request):
         """hand a blocking UI request to the main thread and wait for its
         result. safe to call from a non-UI thread (the LLM worker): the main
@@ -760,10 +790,22 @@ class Screen:
 
         request, done, box = pend
         try:
-            if request.get('kind') == 'confirm':
+            kind = request.get('kind')
+            if kind == 'confirm':
                 box['result'] = self.prompt_approval_overlay(
                     request.get('title', 'Allow this action?'),
                     request.get('body', ''),
+                )
+            elif kind == 'select':
+                box['result'] = self.prompt_select_overlay(
+                    request.get('options', []),
+                    message=request.get('title', ''),
+                )
+            elif kind == 'text':
+                box['result'] = self.prompt_text_overlay(
+                    request.get('title', ''),
+                    default=request.get('default', ''),
+                    secret=request.get('secret', False),
                 )
             else:
                 box['result'] = None

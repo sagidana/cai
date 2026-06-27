@@ -144,6 +144,45 @@ def test_registry_owns_per_extension_attribution():
     assert sorted(uc.extensions.commands) == ["a", "b"]
 
 
+def test_register_module_can_import_sibling_relatively():
+    path = _ext("sib")
+    _write(os.path.join(path, "helper.py"), "LABEL = 'from-sibling'\n")
+    _write(os.path.join(path, "init.py"), """
+        from . import helper
+        def register(reg):
+            reg.add_command("sib", lambda ctx: None, help=helper.LABEL)
+    """)
+    uc = userconfig.load()
+    assert uc.extensions.commands["sib"].help == "from-sibling"
+
+
+def test_bare_sibling_import_still_fails():
+    path = _ext("bare")
+    _write(os.path.join(path, "helper.py"), "LABEL = 'x'\n")
+    _write(os.path.join(path, "init.py"), """
+        import helper
+        def register(reg):
+            reg.add_command("bare", lambda ctx: None)
+    """)
+    uc = userconfig.load()
+    assert "bare" not in uc.extensions.commands
+
+
+def test_module_body_runs_once_across_loads():
+    path = _ext("once")
+    log = os.path.join(path, "execs.log")
+    _write(os.path.join(path, "init.py"), f"""
+        with open({log!r}, "a") as f:
+            f.write("x")
+        def register(reg):
+            reg.add_command("once", lambda ctx: None)
+    """)
+    userconfig.load()
+    userconfig.load()
+    with open(log) as f:
+        assert f.read() == "x"
+
+
 def test_module_that_raises_is_isolated():
     good = _ext("aaa_good")
     bad = _ext("zzz_bad")

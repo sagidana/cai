@@ -68,6 +68,9 @@ _REFRESH_INTERVAL = 0.1
 # a stream is "stalled" once this many seconds pass with no new token; the status
 # then falls back from responding/reasoning to waiting.
 _STALL_SECONDS = 3.0
+# how long a ctx.ui.status(...) note stays on the status line before the normal
+# busy/idle readout takes over again.
+_NOTE_SECONDS = 4.0
 # context-window size used for the ctx % readout when config.json sets no
 # 'default_context_size'. matches the reference's fallback.
 _DEFAULT_CONTEXT_SIZE = 1_000_000
@@ -151,6 +154,8 @@ class _Status:
         self._sample_tokens = 0
         self._sample_chars = 0
         self._last = None          # last (text, right) painted; unchanged is a no-op
+        self._note = ""            # transient ctx.ui.status note shown over the state
+        self._note_at = 0.0        # time.monotonic() the note was set
 
     # --- signal updates, called by the worker thread as it streams a run ---
 
@@ -186,6 +191,13 @@ class _Status:
         # owns the agent's messages); we only format it into the ctx readout.
         with self._lock:
             self._tokens = tokens
+
+    def set_note(self, message):
+        # a hook's ctx.ui.status(...) reaches here over the wire; show it on the
+        # status line for _NOTE_SECONDS, then let the normal readout resume.
+        with self._lock:
+            self._note = message or ""
+            self._note_at = time.monotonic()
 
     def _resolve_limit(self):
         # cache the current model's context window (cache-only registry read),
@@ -240,7 +252,11 @@ class _Status:
         with self._lock:
             if self._limit_model != self._model:
                 self._resolve_limit()
-            text = _status_text(self._model, self._state(time.monotonic()))
+            now = time.monotonic()
+            if self._note and now - self._note_at < _NOTE_SECONDS:
+                text = self._note
+            else:
+                text = _status_text(self._model, self._state(now))
             right = usage.format_ctx(self._tokens, self._context_limit)
             key = (text, right)
             if key == self._last:
@@ -359,6 +375,58 @@ class AgentClient:
             pass
 
 
+class ScreenUI(BaseUI):
+    """the TUI client's UI: renders a served hook's prompts against the Screen.
+
+    one-way ops draw immediately (notify -> a transcript line, status -> the
+    status line). the input ops bridge to the main thread via
+    Screen.submit_request, which services the request from inside prompt() by
+    running the matching overlay and handing back the human's answer; a closed
+    screen / no UI yields the headless default."""
+
+    def __init__(self, screen, status):
+        self._screen = screen
+        self._status = status
+
+    def confirm(self, message, *, default=False, detail=""):
+        request = {}
+        request["kind"] = "confirm"
+        request["title"] = message
+        request["body"] = detail
+        result = self._screen.submit_request(request)
+        if result is None:
+            return default
+        return bool(result)
+
+    def select(self, message, options, *, default=None, detail=""):
+        options = list(options)
+        request = {}
+        request["kind"] = "select"
+        request["title"] = message
+        request["options"] = options
+        result = self._screen.submit_request(request)
+        if result is None:
+            return BaseUI.select(self, message, options, default=default, detail=detail)
+        return result
+
+    def text(self, message, *, default="", secret=False):
+        request = {}
+        request["kind"] = "text"
+        request["title"] = message
+        request["default"] = default
+        request["secret"] = secret
+        return self._screen.submit_request(request)
+
+    def notify(self, message, *, level="info"):
+        kind = Screen.META
+        if level == "error":
+            kind = Screen.ERROR
+        self._screen.write(f"[{level}] {message}\n", kind=kind)
+
+    def status(self, message):
+        self._status.set_note(message)
+
+
 class _Worker(threading.Thread):
     """drains submitted prompts and streams each run into the screen, all over the
     wire client.
@@ -375,6 +443,7 @@ class _Worker(threading.Thread):
         self._jobs = jobs
         self._stop_event = stop
         self._status = status
+        self._ui = ScreenUI(screen, status)
         self._sample_tokens = 0
         self._sample_chars = 0
         self._interrupted = False
@@ -427,7 +496,7 @@ class _Worker(threading.Thread):
         self._screen.set_busy(True)
         self._status.busy()
         self._push_tokens()
-        ui = BaseUI()
+        ui = self._ui
         try:
             if text is _CONTINUE:
                 self._client.continue_run()

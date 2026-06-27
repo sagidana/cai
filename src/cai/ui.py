@@ -2,8 +2,9 @@
 
 A UI is the object a hook reaches through HookContext.ui to ask the human a
 question mid-run: confirm a risky tool, pick from options, read a line of text,
-or push a notification. Every primitive returns a safe default, so a hook can
-call ctx.ui.confirm(...) without ever special-casing "no human is reachable".
+push a notification, or post a transient status-line note. Every primitive
+returns a safe default, so a hook can call ctx.ui.confirm(...) without ever
+special-casing "no human is reachable".
 
 This is the inbound prompt surface only. Outbound telemetry is cai.events (the
 Event stream a Run yields), and serving a UI over a socket is a later layer.
@@ -27,6 +28,7 @@ class UI(Protocol):
     def select(self, message, options, *, default=None, detail=""): ...
     def text(self, message, *, default="", secret=False): ...
     def notify(self, message, *, level="info"): ...
+    def status(self, message): ...
 
     @property
     def interactive(self): ...
@@ -50,6 +52,9 @@ class BaseUI:
         return None
 
     def notify(self, message, *, level="info"):
+        pass
+
+    def status(self, message):
         pass
 
 
@@ -119,6 +124,10 @@ class TerminalUI(BaseUI):
 
     def notify(self, message, *, level="info"):
         sys.stderr.write(f"[{level}] {message}\n")
+        sys.stderr.flush()
+
+    def status(self, message):
+        sys.stderr.write(f"[status] {message}\n")
         sys.stderr.flush()
 
     def _ask(self, prompt, detail):

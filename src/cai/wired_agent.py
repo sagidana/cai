@@ -130,6 +130,14 @@ class WireUI(BaseUI):
         except OSError:
             pass
 
+    def status(self, message):
+        # one-way like notify: a transient status-line note, best-effort so a
+        # busy stream is never stalled by frequent progress updates.
+        try:
+            self._sender.send_prompt(None, "status", message, besteffort=True)
+        except OSError:
+            pass
+
     def resolve(self, pid, value):
         """called by the reader thread on a REPLY: hand the value to the waiting
         prompt and wake it. an unknown id (already answered / timed out) is a

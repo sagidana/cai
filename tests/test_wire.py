@@ -83,6 +83,9 @@ class FakeUI:
     def notify(self, message, *, level="info"):
         self.calls.append(("notify", message, level))
 
+    def status(self, message):
+        self.calls.append(("status", message))
+
 
 # --------------------------------------------------------------------------
 # framing: encode / feed
@@ -299,3 +302,12 @@ def test_answer_notify_is_one_way():
     assert handled is True
     assert ui.calls == [("notify", "heads up", "warn")]
     assert ch.sent == b""              # notify expects no reply
+
+
+def test_answer_status_is_one_way():
+    ch = FakeChannel()
+    ui = FakeUI()
+    handled = Wire(ch).answer(prompt("status", "compacting…"), ui)
+    assert handled is True
+    assert ui.calls == [("status", "compacting…")]
+    assert ch.sent == b""              # status expects no reply
