@@ -29,7 +29,7 @@ import logging
 import subprocess
 
 from cai import config
-from cai import userconfig
+from cai.userconfig import UserConfig
 
 
 log = logging.getLogger("cai")
@@ -464,7 +464,7 @@ def builtin_tools_dir():
 def _search_dirs():
     """the MCP source dirs in resolution order: each extension's tools/ dir (an
     earlier one shadows a later one) then the bundled builtins."""
-    dirs = list(userconfig.tool_dirs())
+    dirs = list(UserConfig.tool_dirs())
     dirs.append(builtin_tools_dir())
     return dirs
 

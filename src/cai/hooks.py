@@ -85,7 +85,7 @@ class HooksRegistry:
     def register_global(cls, event, fn):
         """record a hook in the process-global store (cai.hook's backing). it is
         baked into every HooksRegistry created afterward. the origin file is
-        captured from fn so userconfig.extension_for can attribute it later."""
+        captured from fn so UserConfig.extension_for can attribute it later."""
         if event not in VALID_HOOK_EVENTS:
             raise ValueError(f"unknown hook event: {event!r}. valid: {VALID_HOOK_EVENTS}")
         origin = None
@@ -149,7 +149,7 @@ class HooksRegistry:
 def hook(event):
     """decorator: register a function as a global hook for `event`, e.g.
     @cai.hook("after_turn"). it is baked into every HooksRegistry built
-    afterward, so once cai.userconfig.load() imports the extensions every run
+    afterward, so once UserConfig.load() imports the extensions every run
     fires it. see HooksRegistry."""
     def decorator(fn):
         HooksRegistry.register_global(event, fn)

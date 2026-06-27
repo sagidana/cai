@@ -243,7 +243,7 @@ def main(argv=None):
     import threading
 
     from cai import config
-    from cai import userconfig
+    from cai.userconfig import UserConfig
     from cai.agent import Run
     from cai.api import OpenAiApi
     from cai.ui import TerminalUI
@@ -301,7 +301,7 @@ def main(argv=None):
         parser.error("no prompt: pass -p/--prompt, a prompt after '--', --file, or piped stdin")
 
     model = args.model or cfg.model
-    userconfig.load()
+    UserConfig.load()
 
     run = Run(messages,
               model,

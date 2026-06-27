@@ -1,7 +1,7 @@
 """commands: the `:`-commands registered via cai.command.
 
 A Command is a named handler registered through the cai.command decorator into
-the process-global CommandsRegistry; cai.userconfig.load() imports the extensions
+the process-global CommandsRegistry; UserConfig.load() imports the extensions
 so theirs land there too. The tui routes an unrecognized `:`-name to it, calling
 its fn with a CommandContext - the argument text after the name, the agent
 client, and the screen to write back to."""
@@ -25,7 +25,7 @@ class Command:
 class CommandsRegistry:
     """process-global :commands registered via cai.command, as name -> Command.
     the tui reads commands() to populate its `:`-dispatch and palette; once
-    cai.userconfig.load() imports the extensions every session shares the set.
+    UserConfig.load() imports the extensions every session shares the set.
     a later registration of the same name wins (the user's init.py runs last)."""
 
     _registered = {}

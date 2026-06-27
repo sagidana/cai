@@ -8,7 +8,7 @@ import textwrap
 
 import pytest
 
-from cai import userconfig
+from cai.userconfig import UserConfig
 from cai.hooks import HooksRegistry
 from cai.commands import CommandsRegistry
 
@@ -19,7 +19,7 @@ def _isolate_config(tmp_path, monkeypatch):
 
 
 def _ext(name):
-    path = os.path.join(userconfig.extensions_dir(), name)
+    path = os.path.join(UserConfig.extensions_dir(), name)
     os.makedirs(path, exist_ok=True)
     return path
 
@@ -31,10 +31,10 @@ def _write(path, text):
 
 
 def test_no_extensions_dir_registers_nothing():
-    assert userconfig.list_extensions() == []
-    assert userconfig.skill_dirs() == []
-    assert userconfig.tool_dirs() == []
-    userconfig.load()
+    assert UserConfig.list_extensions() == []
+    assert UserConfig.skill_dirs() == []
+    assert UserConfig.tool_dirs() == []
+    UserConfig.load()
     assert HooksRegistry.registered() == []
     assert CommandsRegistry.commands() == {}
 
@@ -43,21 +43,21 @@ def test_extensions_sorted_and_resource_dirs():
     _ext("bbb")
     _ext("aaa")
     names = []
-    for extension in userconfig.list_extensions():
+    for extension in UserConfig.list_extensions():
         names.append(extension.name)
     assert names == ["aaa", "bbb"]
 
-    root = userconfig.extensions_dir()
-    assert userconfig.skill_dirs() == [os.path.join(root, "aaa", "skills"),
+    root = UserConfig.extensions_dir()
+    assert UserConfig.skill_dirs() == [os.path.join(root, "aaa", "skills"),
                                        os.path.join(root, "bbb", "skills")]
-    assert userconfig.tool_dirs() == [os.path.join(root, "aaa", "tools"),
+    assert UserConfig.tool_dirs() == [os.path.join(root, "aaa", "tools"),
                                       os.path.join(root, "bbb", "tools")]
 
 
 def test_files_that_are_not_dirs_are_ignored():
-    os.makedirs(userconfig.extensions_dir(), exist_ok=True)
-    _write(os.path.join(userconfig.extensions_dir(), "README.md"), "not an ext")
-    assert userconfig.list_extensions() == []
+    os.makedirs(UserConfig.extensions_dir(), exist_ok=True)
+    _write(os.path.join(UserConfig.extensions_dir(), "README.md"), "not an ext")
+    assert UserConfig.list_extensions() == []
 
 
 def test_load_registers_hooks_and_commands_globally():
@@ -74,7 +74,7 @@ def test_load_registers_hooks_and_commands_globally():
         def fs(ctx):
             return None
     """)
-    userconfig.load()
+    UserConfig.load()
 
     registered = HooksRegistry.registered()
     assert len(registered) == 1
@@ -94,7 +94,7 @@ def test_registered_hook_is_baked_into_new_registries():
         def fold(ctx):
             return "h"
     """)
-    userconfig.load()
+    UserConfig.load()
     registry = HooksRegistry()
     assert len(registry.pairs()) == 1
     assert registry.pairs()[0][0] == "after_turn"
@@ -108,9 +108,9 @@ def test_attribution_resolves_origin_to_extension():
         def fold(ctx):
             return "h"
     """)
-    userconfig.load()
+    UserConfig.load()
     _event, _fn, origin = HooksRegistry.registered()[0]
-    assert userconfig.extension_for(origin) == "fs"
+    assert UserConfig.extension_for(origin) == "fs"
 
 
 def test_top_level_init_is_user_attributed_and_overrides():
@@ -120,15 +120,15 @@ def test_top_level_init_is_user_attributed_and_overrides():
         @cai.command(name="x", help="from ext")
         def x_ext(ctx): pass
     """)
-    _write(userconfig.init_path(), """
+    _write(UserConfig.init_path(), """
         import cai
         @cai.command(name="x", help="from user")
         def x_user(ctx): pass
     """)
-    userconfig.load()
+    UserConfig.load()
     command = CommandsRegistry.commands()["x"]
     assert command.help == "from user"
-    assert userconfig.extension_for(command.origin) == "user"
+    assert UserConfig.extension_for(command.origin) == "user"
 
 
 def test_command_can_import_sibling_relatively():
@@ -140,7 +140,7 @@ def test_command_can_import_sibling_relatively():
         @cai.command(name="sib", help=helper.LABEL)
         def sib(ctx): pass
     """)
-    userconfig.load()
+    UserConfig.load()
     assert CommandsRegistry.commands()["sib"].help == "from-sibling"
 
 
@@ -153,7 +153,7 @@ def test_bare_sibling_import_still_fails():
         @cai.command(name="bare")
         def bare(ctx): pass
     """)
-    userconfig.load()
+    UserConfig.load()
     assert "bare" not in CommandsRegistry.commands()
 
 
@@ -167,8 +167,8 @@ def test_module_body_runs_once_across_loads():
         @cai.command(name="once")
         def once(ctx): pass
     """)
-    userconfig.load()
-    userconfig.load()
+    UserConfig.load()
+    UserConfig.load()
     with open(log) as f:
         assert f.read() == "x"
 
@@ -184,5 +184,5 @@ def test_module_that_raises_is_isolated():
     _write(os.path.join(bad, "init.py"), """
         raise RuntimeError("boom")
     """)
-    userconfig.load()
+    UserConfig.load()
     assert "good" in CommandsRegistry.commands()

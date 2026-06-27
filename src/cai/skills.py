@@ -21,7 +21,7 @@ import logging
 from dataclasses import dataclass
 
 from cai import config
-from cai import userconfig
+from cai.userconfig import UserConfig
 
 
 log = logging.getLogger("cai")
@@ -44,7 +44,7 @@ def builtin_skills_dir():
 def _search_dirs():
     """the skill source dirs in resolution order: each extension's skills/ dir
     (an earlier one shadows a later one) then the bundled builtins."""
-    dirs = list(userconfig.skill_dirs())
+    dirs = list(UserConfig.skill_dirs())
     dirs.append(builtin_skills_dir())
     return dirs
 

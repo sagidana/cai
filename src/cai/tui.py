@@ -1085,12 +1085,12 @@ def run(*,
     opens the :sessions picker at startup (--sessions). either resumes the chosen
     session in place, so autosave writes back to it."""
     from cai import config
-    from cai import userconfig
+    from cai.userconfig import UserConfig
     from cai.agent import Agent
     from cai.hooks import HookEvent
     from cai.models import ModelsRegistry
 
-    userconfig.load()
+    UserConfig.load()
 
     # autosave: persist the session to <name>.flow on every conversation
     # mutation, driven solely by hooks - AFTER_RUN (the final answer landed) and

@@ -38,10 +38,10 @@ hook compacts on its own as the window fills.
 
 ```sh
 python3 -c "
-from cai import userconfig
+from cai.userconfig import UserConfig
 from cai.hooks import HooksRegistry
 from cai.commands import CommandsRegistry
-userconfig.load()
+UserConfig.load()
 print('commands:', sorted(CommandsRegistry.commands()))
 print('hooks:', [(e, f.__name__) for e, f, _o in HooksRegistry.registered()])
 "
