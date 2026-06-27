@@ -23,6 +23,7 @@ through via HookContext.ui; None means no human is reachable (NULL_UI). Serving/
 attach, saving, and cloning are later layers."""
 from __future__ import annotations
 
+import copy
 import logging
 import os
 import re
@@ -282,6 +283,47 @@ class Agent:
         if messages is None: messages = []
         self.messages = messages
         self._fire_messages_event(HookEvent.MESSAGES_MUTATED)
+
+    def clone(self, name=None, ui=None):
+        """build a new Agent carrying this one's state - a deep copy of the
+        conversation plus the model, base prompt, active tools and skills, hooks,
+        and run parameters - so an SDK caller can fork a conversation and drive
+        the branch independently without disturbing this agent.
+
+        the clone is a separate agent: it gets its own name (a fresh id unless
+        one is given), its own interrupt Event, and an empty children list, so
+        its autosave file and any sub-agents it launches are its own. function
+        tools carry over by callable and MCP tools by name (the clone spawns its
+        own servers on first use), the way a sub-agent inherits a parent's tools.
+        the messages are assigned directly rather than through set_messages so no
+        MESSAGES_MUTATED hook fires on the fresh clone - the branch persists on
+        its first run, not at the moment it is forked.
+
+        the ui is NOT carried over (it defaults to None - no human reachable):
+        the original's ui is mutable interactive state, and on a served agent it
+        is a WireUI bound to that agent's own server, so sharing it would cross
+        the fork's prompts onto the parent's clients. pass ui= to give the branch
+        its own surface (the serving layer sets one of its own when it wraps the
+        clone)."""
+        tools = []
+        for selected in self.tools_registry.selected():
+            tool = self.tools_registry.get(selected)
+            if tool is None: continue
+            tools.append(tool)
+        clone = Agent(name=name,
+                      model=self.model,
+                      api=self.api,
+                      system_prompt=self._system_prompt,
+                      tools=tools,
+                      skills=self.skills_registry.names(),
+                      hooks=self._hooks,
+                      ui=ui,
+                      reasoning_effort=self.reasoning_effort,
+                      temperature=self.temperature,
+                      max_steps=self.max_steps,
+                      stream=self.stream)
+        clone.messages = copy.deepcopy(self.messages)
+        return clone
 
     def save(self, path=None):
         """persist the conversation + settings to a .flow file (see session.py
