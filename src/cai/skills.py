@@ -1,8 +1,8 @@
 """skills: load skill files into a SkillsRegistry that layers prompt fragments
 and tools onto an existing ToolRegistry.
 
-A skill is a markdown file <name>.md, resolved from the user's
-~/.config/cai/skills/ first, then the builtins shipped with cai
+A skill is a markdown file <name>.md, resolved from each extension's skills/
+dir (see cai.userconfig) first, then the builtins shipped with cai
 (builtins/skills/ beside this module). Everything before the first '---' line is
 a header of 'key: value' lines; everything after is the prompt body. Header
 fields:
@@ -21,6 +21,7 @@ import logging
 from dataclasses import dataclass
 
 from cai import config
+from cai import userconfig
 
 
 log = logging.getLogger("cai")
@@ -34,22 +35,25 @@ class Skill:
     body: str
 
 
-def skills_dir():
-    return os.path.join(config.config_dir(), "skills")
-
-
 def builtin_skills_dir():
     """the skills shipped with cai by default, in builtins/skills/ beside this
-    module - a second source searched in addition to the user's skills dir."""
+    module - searched after the extension skills dirs."""
     return os.path.join(os.path.dirname(__file__), "builtins", "skills")
 
 
+def _search_dirs():
+    """the skill source dirs in resolution order: each extension's skills/ dir
+    (an earlier one shadows a later one) then the bundled builtins."""
+    dirs = list(userconfig.skill_dirs())
+    dirs.append(builtin_skills_dir())
+    return dirs
+
+
 def _skill_path(name):
-    """resolve <name>.md to a source file, searching the user's skills dir first
-    (so a user file can shadow a builtin) then the bundled builtins. None when
-    neither has it."""
+    """resolve <name>.md to a source file, searching the extension skills dirs
+    first then the bundled builtins. None when neither has it."""
     filename = name + ".md"
-    for directory in (skills_dir(), builtin_skills_dir()):
+    for directory in _search_dirs():
         path = os.path.join(directory, filename)
         if os.path.exists(path):
             return path
@@ -131,11 +135,11 @@ class SkillsRegistry:
 
     @classmethod
     def available_skills(cls):
-        """every skill name available to activate: the *.md stems in the user's
-        skills dir and the builtins, deduped (a user file shadows a builtin) and
-        sorted. a filesystem scan only - no skill is loaded."""
+        """every skill name available to activate: the *.md stems across the
+        extension skills dirs and the builtins, deduped and sorted. a filesystem
+        scan only - no skill is loaded."""
         names = set()
-        for directory in (skills_dir(), builtin_skills_dir()):
+        for directory in _search_dirs():
             if not os.path.isdir(directory): continue
             for filename in sorted(os.listdir(directory)):
                 if not filename.endswith(".md"): continue
@@ -162,7 +166,7 @@ class SkillsRegistry:
         stays in names() (mirroring set_skills's input)."""
         skill = _read_skill(name)
         if skill is None:
-            log.warning("skill %r not found in %s", name, skills_dir())
+            log.warning("skill %r not found", name)
             return
         # foundation first: activate everything this skill builds on, then it.
         for used in skill.skills:

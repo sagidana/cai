@@ -1,6 +1,6 @@
-"""tools: load MCP servers into a tool registry from the user's
-~/.config/cai/mcps/ and the builtins shipped with cai (builtins/tools/ beside
-this module).
+"""tools: load MCP servers into a tool registry from each extension's tools/
+dir (see cai.userconfig) and the builtins shipped with cai (builtins/tools/
+beside this module).
 
 Each *.py file in either dir is an MCP server (a FastMCP stdio program). This
 module spawns each as a subprocess, speaks the MCP JSON-RPC handshake over its
@@ -29,6 +29,7 @@ import logging
 import subprocess
 
 from cai import config
+from cai import userconfig
 
 
 log = logging.getLogger("cai")
@@ -212,8 +213,9 @@ class ToolRegistry:
     an Agent always registers but only sends once a skill or the user selects).
 
     An MCP tool referenced by name ('<mcp_name>__<tool_name>') is lazy: the
-    server at ~/.config/cai/mcps/<mcp_name>.py is spawned on first use - when
-    its schema is read for the model, or when the tool is called - not before."""
+    server file <mcp_name>.py (under an extension's tools/ dir) is spawned on
+    first use - when its schema is read for the model, or when the tool is
+    called - not before."""
 
     def __init__(self):
         self._functions = {}     # name -> callable
@@ -239,21 +241,21 @@ class ToolRegistry:
 
     @classmethod
     def available_tools(cls):
-        """discover every tool exposed by every MCP server in the user's mcps dir
-        and the builtins, as a flat list of '<mcp_name>__<tool_name>' names (the
+        """discover every tool exposed by every MCP server across the extension
+        tools dirs and the builtins, as a flat list of '<mcp_name>__<tool_name>' names (the
         form `tools=` / for_tools accept). each server is spawned briefly to list
         its tools and then closed - nothing is left running. a user file shadows
         a builtin of the same name; a server that fails to start is logged and
         skipped."""
         names = []
         seen_labels = set()
-        for directory in (mcps_dir(), builtin_tools_dir()):
+        for directory in _search_dirs():
             if not os.path.isdir(directory): continue
             for filename in sorted(os.listdir(directory)):
                 if not filename.endswith(".py"): continue
                 if filename.startswith("_"): continue
                 label = filename[:-len(".py")]
-                if label in seen_labels: continue   # user file shadows a builtin
+                if label in seen_labels: continue
                 seen_labels.add(label)
                 path = os.path.join(directory, filename)
                 server = None
@@ -281,7 +283,7 @@ class ToolRegistry:
 
     def register_mcp_tool(self, name):
         """register an MCP tool reference '<mcp_name>__<tool_name>'. the server
-        at ~/.config/cai/mcps/<mcp_name>.py is loaded into this registry now -
+        file <mcp_name>.py under an extension's tools/ dir is loaded into this registry now -
         lazily, in the sense that only referenced servers load, once each - so
         the dispatcher has a live connection to use. a load failure or unknown
         tool is logged and the tool is skipped."""
@@ -418,15 +420,15 @@ class ToolRegistry:
 
     def _load_server(self, mcp_name):
         """the LocalMCPServer for mcp_name, spawned (once) from its source file
-        and cached in this registry. the file is resolved from the user's
-        ~/.config/cai/mcps/ first, then the builtins shipped with cai."""
+        and cached in this registry. the file is resolved from the extension
+        tools dirs first, then the builtins shipped with cai."""
         server = self._local_mcp_servers.get(mcp_name)
         if server is not None:
             return server
         path = _mcp_server_path(mcp_name)
         if path is None:
             raise FileNotFoundError(
-                f"no MCP server {mcp_name!r} in {mcps_dir()} or {builtin_tools_dir()}")
+                f"no MCP server {mcp_name!r} in any extension tools dir or builtins")
         server = LocalMCPServer([sys.executable, path], mcp_name)
         self._local_mcp_servers[mcp_name] = server
         return server
@@ -453,22 +455,25 @@ class ToolRegistry:
                 log.exception("closing MCP server %r failed", server.label)
 
 
-def mcps_dir():
-    return os.path.join(config.config_dir(), "mcps")
-
-
 def builtin_tools_dir():
     """the MCP servers shipped with cai by default, in builtins/tools/ beside
-    this module - a second source searched in addition to the user's mcps dir."""
+    this module - searched after the extension tools dirs."""
     return os.path.join(os.path.dirname(__file__), "builtins", "tools")
 
 
+def _search_dirs():
+    """the MCP source dirs in resolution order: each extension's tools/ dir (an
+    earlier one shadows a later one) then the bundled builtins."""
+    dirs = list(userconfig.tool_dirs())
+    dirs.append(builtin_tools_dir())
+    return dirs
+
+
 def _mcp_server_path(mcp_name):
-    """resolve <mcp_name>.py to a source file, searching the user's mcps dir
-    first (so a user file can shadow a builtin) then the bundled builtins.
-    None when neither has it."""
+    """resolve <mcp_name>.py to a source file, searching the extension tools
+    dirs first then the bundled builtins. None when neither has it."""
     filename = mcp_name + ".py"
-    for directory in (mcps_dir(), builtin_tools_dir()):
+    for directory in _search_dirs():
         path = os.path.join(directory, filename)
         if os.path.exists(path):
             return path
