@@ -33,6 +33,7 @@ from cai import config
 from cai.api import OpenAiApi
 from cai.events import Event, EventType
 from cai.llm import call_llm, SteerQueue
+from cai.strict import enforce_strict_format
 from cai.tools import ToolsRegistry
 from cai.skills import SkillsRegistry
 from cai.hooks import HookContext, HookEvent, HooksRegistry
@@ -82,12 +83,15 @@ class RunHandle:
     so the next run() continues from there. it doesn't start until you iterate
     (or call `wait()`), and only once."""
 
-    def __init__(self, agent, stream, prompt=None):
+    def __init__(self, agent, stream, prompt=None, strict_format=None):
         self.agent = agent
         self.messages = agent.messages   # the agent's live conversation
         self.interrupt = agent.interrupt  # the agent's interrupt Event
         self.stream = stream
         self.prompt = prompt
+        # a per-run flag, not agent state: it shapes this one answer and is gone
+        # by the next run. None means no enforcement (the plain call_llm path).
+        self.strict_format = strict_format
         self.text = ""
         self._consumed = False
 
@@ -97,7 +101,7 @@ class RunHandle:
         self._consumed = True
         # delegate to the agent's generator; `yield from` forwards every Event
         # and captures the generator's return value (the final text) for us.
-        self.text = yield from self.agent._stream(self.stream, self.prompt)
+        self.text = yield from self.agent._stream(self.stream, self.prompt, self.strict_format)
 
     def wait(self):
         """drain the run without consuming the events yourself; returns self,
@@ -379,13 +383,18 @@ class Agent:
         self.run(text).wait()
         return True
 
-    def _stream(self, stream, prompt=None):
+    def _stream(self, stream, prompt=None, strict_format=None):
         """the orchestration: stream one call_llm turn over the live conversation.
         yields Event objects and returns the final answer text. combines the
         system prompt and translates the hooks list here (not at construction) so
         skills and hooks added since are reflected. marks the agent running for the
         life of the stream, so a concurrent steer folds in rather than starting a
-        second run (cleared in finally, however the stream ends)."""
+        second run (cleared in finally, however the stream ends).
+
+        strict_format, when set, wraps the run in cai.strict: the answer is
+        validated and the turn reissued until it matches. enforcement pins
+        temperature to 0 and forces non-streaming (validation needs the whole
+        answer before it can pass judgement)."""
         self._running.set()
         try:
             if prompt is not None:
@@ -397,6 +406,29 @@ class Agent:
             # the one place the public [(event, fn), ...] list becomes the internal
             # HooksRegistry that call_llm wants.
             hooks_registry = HooksRegistry.from_list(self._hooks)
+            if strict_format:
+                def make_stream(strict_system_prompt):
+                    return call_llm(self.messages,
+                                    self.model,
+                                    self.api,
+                                    system_prompt=strict_system_prompt,
+                                    tools=schemas,
+                                    tools_dispatch=dispatch,
+                                    hooks=hooks_registry,
+                                    ui=self._ui,
+                                    interrupt=self.interrupt,
+                                    steer=self._steer.drain,
+                                    reasoning_effort=self.reasoning_effort,
+                                    temperature=0,
+                                    max_steps=self.max_steps,
+                                    stream=False,
+                                    hooks_data={"agent": self})
+                text = yield from enforce_strict_format(make_stream,
+                                                        strict_format,
+                                                        system_prompt,
+                                                        self.messages,
+                                                        interrupt=self.interrupt)
+                return text
             text = yield from call_llm(self.messages,
                                        self.model,
                                        self.api,
@@ -416,10 +448,13 @@ class Agent:
         finally:
             self._running.clear()
 
-    def run(self, prompt=None):
+    def run(self, prompt=None, *, strict_format=None):
         """append `prompt` as a user turn (if given) and return a handle over the
         agent's live conversation. Iterate it to stream events; `messages`
-        keeps growing, so the next run continues this conversation."""
+        keeps growing, so the next run continues this conversation.
+
+        strict_format is a per-run flag (not agent state): it constrains only this
+        answer's shape - 'json', 'regex:<pat>' or 'regex-each-line:<pat>'."""
         self.interrupt.clear()
         if self._killed.is_set():
             # a killed agent never runs again: re-arm the interrupt so the run
@@ -427,7 +462,7 @@ class Agent:
             self.interrupt.set()
         if prompt is not None:
             self.messages.append({"role": "user", "content": prompt})
-        return RunHandle(self, self.stream, prompt)
+        return RunHandle(self, self.stream, prompt, strict_format=strict_format)
 
     def close(self):
         """close the tool registry, terminating any live MCP server connections
@@ -465,7 +500,8 @@ class Run(RunHandle):
                  reasoning_effort=None,
                  temperature=None,
                  max_steps=None,
-                 stream=True):
+                 stream=True,
+                 strict_format=None):
         agent = Agent(model=model,
                       api=api,
                       system_prompt=system_prompt,
@@ -481,8 +517,9 @@ class Run(RunHandle):
         agent.set_messages(messages)
         # no prompt to fold in: `messages` is already the complete conversation,
         # so stream straight over it (Agent.run's prompt-append is for the
-        # persistent path).
-        super().__init__(agent, stream)
+        # persistent path). strict_format rides the run handle, not the Agent -
+        # it shapes this one turn, never the agent's persistent settings.
+        super().__init__(agent, stream, strict_format=strict_format)
 
     def close(self):
         """close the Agent this Run built (and owns), tearing down its tool

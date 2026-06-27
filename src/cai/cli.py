@@ -176,6 +176,11 @@ def build_parser():
                         type=int,
                         default=None,
                         help="max agentic turns before giving up")
+    parser.add_argument("--strict-format",
+                        default=None,
+                        metavar="FORMAT",
+                        help="constrain the answer's shape: 'json', 'regex:<pat>' or "
+                             "'regex-each-line:<pat>' (retries until it matches)")
 
     # subcommands. the prompt is pulled out before argparse (see _split_dashdash)
     # so the top level keeps no free positional that would clash with these.
@@ -374,6 +379,7 @@ def main(argv=None):
               reasoning_effort=args.reasoning_effort,
               temperature=args.temperature,
               max_steps=args.max_steps,
-              stream=not args.non_streaming)
+              stream=not args.non_streaming,
+              strict_format=args.strict_format)
 
     return _drive(run)
