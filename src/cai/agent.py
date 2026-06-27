@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import secrets
 import string
 import threading
@@ -463,6 +464,36 @@ class Agent:
         if prompt is not None:
             self.messages.append({"role": "user", "content": prompt})
         return RunHandle(self, self.stream, prompt, strict_format=strict_format)
+
+    def gate(self, options, prompt, *, system_prompt=None):
+        """single-turn quality gate: ask `prompt` and get back exactly one of
+        `options`. runs in isolation - a throwaway conversation on this agent's
+        model and api, so the agent's own history is untouched - under a strict
+        gate persona (override with system_prompt). a regex strict_format pins the
+        reply to one option, so the stripped result is guaranteed to be one of
+        them. built on run(strict_format=...): the regex is just '^(a|b|...)$'."""
+        escaped = []
+        for option in options:
+            escaped.append(re.escape(option))
+        pattern = "|".join(escaped)
+
+        if system_prompt is None:
+            quoted = []
+            for option in options:
+                quoted.append(f"'{option}'")
+            system_prompt = "You are a strict quality gate. Answer only " + ", ".join(quoted) + "."
+
+        messages = [{"role": "user", "content": prompt}]
+        run = Run(messages,
+                  self.model,
+                  self.api,
+                  system_prompt=system_prompt,
+                  strict_format=f"regex:^({pattern})$")
+        try:
+            run.wait()
+            return run.text.strip()
+        finally:
+            run.close()
 
     def close(self):
         """close the tool registry, terminating any live MCP server connections
