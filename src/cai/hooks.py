@@ -70,12 +70,44 @@ class HookContext:
 
 
 class HooksRegistry:
+    # process-global hooks registered via cai.hook, as (event, fn, origin)
+    # triples (origin is the file the hook was defined in). every HooksRegistry
+    # built afterward bakes these in, so once extensions load every run fires
+    # them. populated by register_global, cleared by reset_global.
+    _registered = []
+
     def __init__(self):
         self._entries = []
+        for event, fn, _origin in HooksRegistry._registered:
+            self._entries.append((event, fn))
+
+    @classmethod
+    def register_global(cls, event, fn):
+        """record a hook in the process-global store (cai.hook's backing). it is
+        baked into every HooksRegistry created afterward. the origin file is
+        captured from fn so userconfig.extension_for can attribute it later."""
+        if event not in VALID_HOOK_EVENTS:
+            raise ValueError(f"unknown hook event: {event!r}. valid: {VALID_HOOK_EVENTS}")
+        origin = None
+        code = getattr(fn, "__code__", None)
+        if code is not None:
+            origin = code.co_filename
+        cls._registered.append((event, fn, origin))
+
+    @classmethod
+    def registered(cls):
+        """the globally-registered hooks as (event, fn, origin) triples."""
+        return list(cls._registered)
+
+    @classmethod
+    def reset_global(cls):
+        """drop every globally-registered hook (test isolation)."""
+        cls._registered = []
 
     @classmethod
     def from_list(cls, hooks):
-        """build a registry from a list of (event, fn) pairs (None -> empty)."""
+        """build a registry (globals already baked in) and add a list of
+        (event, fn) pairs on top (None -> just the globals)."""
         registry = cls()
         if hooks is None:
             return registry
@@ -112,3 +144,14 @@ class HooksRegistry:
                 log.exception("hook %r for %s raised",
                               getattr(fn, '__name__', repr(fn)), event)
         return responses
+
+
+def hook(event):
+    """decorator: register a function as a global hook for `event`, e.g.
+    @cai.hook("after_turn"). it is baked into every HooksRegistry built
+    afterward, so once cai.userconfig.load() imports the extensions every run
+    fires it. see HooksRegistry."""
+    def decorator(fn):
+        HooksRegistry.register_global(event, fn)
+        return fn
+    return decorator

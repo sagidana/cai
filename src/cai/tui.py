@@ -29,7 +29,7 @@ import time
 
 from cai import usage
 from cai.channel import connect
-from cai.commands import CommandContext
+from cai.commands import CommandContext, CommandsRegistry
 from cai.events import EventType
 from cai.screen import Screen
 from cai.session import SessionsRegistry
@@ -973,14 +973,14 @@ def _open_skills(screen, client):
     client.set_selected_skills(sorted(new_active))
 
 
-def _handle_command(screen, client, status, registry, jobs, extensions, cmd):
+def _handle_command(screen, client, status, registry, jobs, cmd):
     """dispatch a `:`-command. returns True to quit the loop, else False.
 
     cmd is the raw command string (the text after ':'); the first token is the
     command name. builtin names are handled here; an unrecognized one falls back
-    to an extension command registered through cai.userconfig. the idle gates
-    keep conversation-mutating commands off a live run; reads and config switches
-    are allowed while busy."""
+    to a command registered through cai.command (CommandsRegistry). the idle
+    gates keep conversation-mutating commands off a live run; reads and config
+    switches are allowed while busy."""
     if cmd == "q" or cmd == "quit":
         return True
     parts = cmd.split(" ", 1)
@@ -1055,13 +1055,13 @@ def _handle_command(screen, client, status, registry, jobs, extensions, cmd):
             return False
         _open_sessions(screen, client, status)
         return False
-    command = extensions.commands.get(head)
+    command = CommandsRegistry.commands().get(head)
     if command is not None:
         ctx = CommandContext(arg, client, screen)
         try:
             command.fn(ctx)
         except Exception:
-            log.exception("extension command :%s raised", head)
+            log.exception("command :%s raised", head)
             screen.write(f"[command :{head} failed]\n", kind=Screen.META)
         return False
     screen.write(f"[unknown command: :{head}]\n", kind=Screen.META)
@@ -1090,7 +1090,7 @@ def run(*,
     from cai.hooks import HookEvent
     from cai.models import ModelsRegistry
 
-    user_config = userconfig.load()
+    userconfig.load()
 
     # autosave: persist the session to <name>.flow on every conversation
     # mutation, driven solely by hooks - AFTER_RUN (the final answer landed) and
@@ -1117,13 +1117,11 @@ def run(*,
     autosave_hooks.append((HookEvent.AFTER_RUN, _autosave))
     autosave_hooks.append((HookEvent.MESSAGES_MUTATED, _autosave))
 
-    agent_hooks = autosave_hooks + user_config.extensions.hooks
-
     agent = Agent(model=model,
                   system_prompt=system_prompt,
                   tools=tools or [],
                   skills=skills or [],
-                  hooks=agent_hooks,
+                  hooks=autosave_hooks,
                   reasoning_effort=reasoning_effort,
                   temperature=temperature,
                   max_steps=max_steps)
@@ -1138,7 +1136,7 @@ def run(*,
     stop = threading.Event()
 
     palette = list(_PALETTE_COMMANDS)
-    commands = user_config.extensions.commands
+    commands = CommandsRegistry.commands()
     for name in sorted(commands):
         palette.append((name, commands[name].help))
     completions = {}
@@ -1222,7 +1220,7 @@ def run(*,
             if screen._command_result is not None:
                 cmd = screen._command_result
                 screen._command_result = None
-                if _handle_command(screen, client, status, registry, jobs, user_config.extensions, cmd):
+                if _handle_command(screen, client, status, registry, jobs, cmd):
                     break
                 continue
             # '!text' steers the in-flight run; with nothing running it is just

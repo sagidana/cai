@@ -20,7 +20,8 @@ logging.basicConfig(
 )
 
 from cai.events import Event, EventType
-from cai.hooks import HookContext, HookEvent, HooksRegistry, ToolCall
+from cai.hooks import HookContext, HookEvent, HooksRegistry, ToolCall, hook
+from cai.commands import Command, CommandContext, CommandsRegistry, command
 from cai.llm import LLMError, MaxStepsReached, call_llm
 
 __all__ = [
@@ -30,6 +31,11 @@ __all__ = [
     "HookEvent",
     "HooksRegistry",
     "ToolCall",
+    "hook",
+    "Command",
+    "CommandContext",
+    "CommandsRegistry",
+    "command",
     "LLMError",
     "MaxStepsReached",
     "call_llm",

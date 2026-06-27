@@ -301,7 +301,7 @@ def main(argv=None):
         parser.error("no prompt: pass -p/--prompt, a prompt after '--', --file, or piped stdin")
 
     model = args.model or cfg.model
-    user_config = userconfig.load()
+    userconfig.load()
 
     run = Run(messages,
               model,
@@ -309,7 +309,6 @@ def main(argv=None):
               system_prompt=system_prompt,
               tools=args.tool,
               skills=args.skill,
-              hooks=user_config.extensions.hooks,
               ui=TerminalUI(),
               interrupt=threading.Event(),
               reasoning_effort=args.reasoning_effort,
