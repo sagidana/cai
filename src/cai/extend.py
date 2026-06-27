@@ -1,7 +1,8 @@
 """extend: the `cai extend` subcommand - manage extension bundles.
 
 An extension bundle is a self-contained directory carrying any of skills/*.md,
-tools/*.py, init.py, hooks/init.py, commands/init.py and an optional README.md.
+tools/*.py (function tools), mcps/*.py (MCP servers), init.py, hooks/init.py,
+commands/init.py and an optional README.md.
 Installing one means dropping the whole directory under
 ~/.config/cai/extensions/<name>/, where UserConfig.load() discovers it. This is
 the inverse of the legacy `cai extension`, which flattened skills/ and mcps/ into
@@ -24,7 +25,7 @@ from cai.userconfig import UserConfig
 
 # the files/dirs that mark a directory as a real bundle. used both to validate a
 # source and to descend through a single wrapper folder a zip often introduces.
-BUNDLE_MARKERS = ("skills", "tools", "init.py", "hooks", "commands", "README.md")
+BUNDLE_MARKERS = ("skills", "tools", "mcps", "init.py", "hooks", "commands", "README.md")
 
 
 def _extension_completer(prefix, **kwargs):
@@ -209,6 +210,8 @@ def _components(extension):
         parts.append("skills")
     if os.path.isdir(extension.tools_dir):
         parts.append("tools")
+    if os.path.isdir(extension.mcps_dir):
+        parts.append("mcps")
     if os.path.isfile(extension.init_file):
         parts.append("init")
     if os.path.isfile(extension.hooks_file):

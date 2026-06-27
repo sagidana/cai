@@ -10,7 +10,7 @@ import threading
 import pytest
 
 from cai.agent import Agent
-from cai.tools import ToolRegistry
+from cai.tools import ToolsRegistry
 from cai.skills import SkillsRegistry
 from cai.subagent import _inherit_tools
 from cai.subagent import _inherit_skills
@@ -98,7 +98,7 @@ def make_parent(api, tools=None, skills=None):
     for tool in (tools or []):
         if callable(tool):
             callables.append(tool)
-    parent.tools_registry = ToolRegistry.for_tools(callables)
+    parent.tools_registry = ToolsRegistry.for_tools(callables)
     parent.skills_registry = SkillsRegistry.for_skills([], tools_registry=parent.tools_registry)
     parent.skills_registry._names = list(skills or ["subagents"])
     parent._hooks = None

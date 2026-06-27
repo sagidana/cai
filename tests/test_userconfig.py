@@ -11,6 +11,7 @@ import pytest
 from cai.userconfig import UserConfig
 from cai.hooks import HooksRegistry
 from cai.commands import CommandsRegistry
+from cai.tools import ToolsRegistry
 
 
 @pytest.fixture(autouse=True)
@@ -34,9 +35,11 @@ def test_no_extensions_dir_registers_nothing():
     assert UserConfig.list_extensions() == []
     assert UserConfig.skill_dirs() == []
     assert UserConfig.tool_dirs() == []
+    assert UserConfig.mcp_dirs() == []
     UserConfig.load()
     assert HooksRegistry.registered() == []
     assert CommandsRegistry.commands() == {}
+    assert ToolsRegistry.registered() == {}
 
 
 def test_extensions_sorted_and_resource_dirs():
@@ -52,6 +55,8 @@ def test_extensions_sorted_and_resource_dirs():
                                        os.path.join(root, "bbb", "skills")]
     assert UserConfig.tool_dirs() == [os.path.join(root, "aaa", "tools"),
                                       os.path.join(root, "bbb", "tools")]
+    assert UserConfig.mcp_dirs() == [os.path.join(root, "aaa", "mcps"),
+                                     os.path.join(root, "bbb", "mcps")]
 
 
 def test_files_that_are_not_dirs_are_ignored():
@@ -84,6 +89,37 @@ def test_load_registers_hooks_and_commands_globally():
 
     assert "fs" in CommandsRegistry.commands()
     assert CommandsRegistry.commands()["fs"].help == "files"
+
+
+def test_load_registers_function_tools_globally_with_attribution():
+    path = _ext("calc")
+    _write(os.path.join(path, "tools", "math.py"), """
+        import cai
+        @cai.tool
+        def add(a: int, b: int) -> int:
+            \"\"\"Add two numbers.\"\"\"
+            return a + b
+    """)
+    UserConfig.load()
+
+    fn = ToolsRegistry.global_function("add")
+    assert fn is not None
+    assert fn(2, 3) == 5
+    _other, origin = ToolsRegistry.registered()["add"]
+    assert UserConfig.extension_for(origin) == "calc"
+
+
+def test_tools_underscore_files_are_not_imported():
+    path = _ext("calc")
+    _write(os.path.join(path, "tools", "_helper.py"), """
+        import cai
+        @cai.tool
+        def hidden() -> str:
+            \"\"\"Hidden.\"\"\"
+            return "x"
+    """)
+    UserConfig.load()
+    assert ToolsRegistry.global_function("hidden") is None
 
 
 def test_registered_hook_is_baked_into_new_registries():

@@ -1,5 +1,5 @@
 """skills: load skill files into a SkillsRegistry that layers prompt fragments
-and tools onto an existing ToolRegistry.
+and tools onto an existing ToolsRegistry.
 
 A skill is a markdown file <name>.md, resolved from each extension's skills/
 dir (see cai.userconfig) first, then the builtins shipped with cai
@@ -11,7 +11,7 @@ fields:
   tools:  <tool>, <tool>, ...      MCP tool refs to expose ('<mcp>__<tool>')
   skills: <skill>, <skill>, ...    other skills to activate first (recursive)
 
-Activating a skill unions its tools into the ToolRegistry it was built against
+Activating a skill unions its tools into the ToolsRegistry it was built against
 and appends its prompt body to the combined system prompt. `skills:` are
 activated first (foundation-first), and each skill loads at most once."""
 from __future__ import annotations
@@ -105,8 +105,8 @@ def _read_skill(name):
 
 class SkillsRegistry:
     """The skills activated for an Agent/Run: their combined prompt plus the
-    tools they pull into the ToolRegistry they were built against. Like
-    ToolRegistry, but it always works on a ToolRegistry passed in - activating a
+    tools they pull into the ToolsRegistry they were built against. Like
+    ToolsRegistry, but it always works on a ToolsRegistry passed in - activating a
     skill extends that same registry object in place."""
 
     def __init__(self, tools_registry):

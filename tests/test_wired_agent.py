@@ -17,7 +17,7 @@ from cai.agent import Agent
 from cai.hooks import HookEvent
 from cai.llm import SteerQueue
 from cai.skills import SkillsRegistry
-from cai.tools import ToolRegistry
+from cai.tools import ToolsRegistry
 from cai.wire import Wire
 from cai.wired_agent import UnixWiredAgent, WiredAgent, WireUI, _tool_names
 
@@ -100,7 +100,7 @@ def make_agent(tools=None, skills=None, hooks=None, api=None):
     agent.model = "m"
     agent.api = api or FakeApi()
     agent._system_prompt = None
-    agent.tools_registry = ToolRegistry.for_tools([])
+    agent.tools_registry = ToolsRegistry.for_tools([])
     _fake_register(agent.tools_registry, tools)
     agent.skills_registry = SkillsRegistry.for_skills([], tools_registry=agent.tools_registry)
     agent.skills_registry._names = list(skills or [])

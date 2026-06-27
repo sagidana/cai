@@ -31,6 +31,7 @@ from cai.llm import LLMError, MaxStepsReached, call_llm
 # without paying the import.
 if TYPE_CHECKING:
     from cai.agent import Agent, Run
+    from cai.tools import ToolsRegistry, tool
 
 __all__ = [
     "Event",
@@ -44,6 +45,8 @@ __all__ = [
     "CommandContext",
     "CommandsRegistry",
     "command",
+    "ToolsRegistry",
+    "tool",
     "LLMError",
     "MaxStepsReached",
     "call_llm",
@@ -60,4 +63,12 @@ def __getattr__(name):
     if name == "Run":
         from cai.agent import Run
         return Run
+    # tools pulls config/userconfig, so keep it lazy too - cai.tool resolves
+    # here the first time an extension's tools/*.py decorates a function.
+    if name == "tool":
+        from cai.tools import tool
+        return tool
+    if name == "ToolsRegistry":
+        from cai.tools import ToolsRegistry
+        return ToolsRegistry
     raise AttributeError(f"module 'cai' has no attribute {name!r}")

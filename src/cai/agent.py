@@ -33,7 +33,7 @@ from cai import config
 from cai.api import OpenAiApi
 from cai.events import Event, EventType
 from cai.llm import call_llm, SteerQueue
-from cai.tools import ToolRegistry
+from cai.tools import ToolsRegistry
 from cai.skills import SkillsRegistry
 from cai.hooks import HookContext, HookEvent, HooksRegistry
 
@@ -164,7 +164,7 @@ class Agent:
         self._running = threading.Event()
         self.messages = []
         self.children = []   # ids of the sub-agents launched this session
-        self.tools_registry = ToolRegistry()
+        self.tools_registry = ToolsRegistry()
 
         # registers subagents tools (lazy import: subagent imports Agent in turn).
         # override=True so these bind to *this* agent even if a tool of the same
@@ -203,7 +203,7 @@ class Agent:
     def get_available_tools(self):
         """every tool the agent could select: the install-wide catalogue plus the
         tools already registered on this agent (its own function tools included)."""
-        names = set(ToolRegistry.available_tools())
+        names = set(ToolsRegistry.available_tools())
         for name in self.tools_registry.names():
             names.add(name)
         return sorted(names)

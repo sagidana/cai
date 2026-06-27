@@ -1,11 +1,12 @@
-"""Tests for the process-global hook/command registries and the cai.hook /
-cai.command decorators that feed them. The conftest fixture resets both around
-every test, so each starts from empty."""
+"""Tests for the process-global hook/command/tool registries and the cai.hook /
+cai.command / cai.tool decorators that feed them. The conftest fixture resets
+them around every test, so each starts from empty."""
 import pytest
 
 import cai
 from cai.hooks import HooksRegistry
 from cai.commands import CommandsRegistry
+from cai.tools import ToolsRegistry
 
 
 def test_cai_hook_registers_and_bakes_into_new_registry():
@@ -63,6 +64,55 @@ def test_later_command_of_same_name_wins():
     assert CommandsRegistry.commands()["dup"].help == "second"
 
 
+def test_cai_tool_registers_globally():
+    @cai.tool
+    def add(a: int, b: int) -> int:
+        """Add two numbers."""
+        return a + b
+
+    registered = ToolsRegistry.registered()
+    assert "add" in registered
+    fn, origin = registered["add"]
+    assert fn is add
+    assert origin == add.__code__.co_filename
+    assert ToolsRegistry.global_function("add") is add
+
+
+def test_cai_tool_listed_in_available_tools():
+    @cai.tool
+    def greet(name: str) -> str:
+        """Greet someone."""
+        return "hi " + name
+
+    assert "greet" in ToolsRegistry.available_tools()
+
+
+def test_agent_registry_selects_function_tool_by_name():
+    @cai.tool
+    def ping() -> str:
+        """Ping."""
+        return "pong"
+
+    registry = ToolsRegistry()
+    registry.select("ping")
+    assert "ping" in registry.selected()
+    assert registry.dispatch("ping", {}) == "pong"
+
+
+def test_later_tool_of_same_name_wins():
+    @cai.tool
+    def dup() -> str:
+        """first."""
+        return "first"
+
+    @cai.tool
+    def dup() -> str:  # noqa: F811
+        """second."""
+        return "second"
+
+    assert ToolsRegistry.global_function("dup")() == "second"
+
+
 def test_reset_global_clears_both():
     @cai.hook("after_run")
     def h(ctx):
@@ -72,7 +122,14 @@ def test_reset_global_clears_both():
     def c(ctx):
         pass
 
+    @cai.tool
+    def t() -> str:
+        """t."""
+        return "t"
+
     HooksRegistry.reset_global()
     CommandsRegistry.reset_global()
+    ToolsRegistry.reset_global()
     assert HooksRegistry.registered() == []
     assert CommandsRegistry.commands() == {}
+    assert ToolsRegistry.registered() == {}

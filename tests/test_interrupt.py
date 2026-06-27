@@ -9,7 +9,7 @@ import threading
 from cai.agent import Agent
 from cai.llm import call_llm, SteerQueue
 from cai.skills import SkillsRegistry
-from cai.tools import ToolRegistry
+from cai.tools import ToolsRegistry
 
 
 # --------------------------------------------------------------------------
@@ -146,7 +146,7 @@ def test_no_interrupt_event_runs_normally():
 # --------------------------------------------------------------------------
 
 def test_stop_before_iterating_returns_empty():
-    agent = bare_agent(ToolRegistry.for_tools([]), CountApi(chunks=["hello"]))
+    agent = bare_agent(ToolsRegistry.for_tools([]), CountApi(chunks=["hello"]))
     run = agent.run("hi")
     agent.stop()
     run.wait()
@@ -160,7 +160,7 @@ def test_stop_from_a_tool_halts_further_turns():
         holder["agent"].stop()
         return "killed from inside the tool"
 
-    agent = bare_agent(ToolRegistry.for_tools([killer]), ToolThenTextApi())
+    agent = bare_agent(ToolsRegistry.for_tools([killer]), ToolThenTextApi())
     holder["agent"] = agent
     run = agent.run("go")
     run.wait()
@@ -170,7 +170,7 @@ def test_stop_from_a_tool_halts_further_turns():
 
 
 def test_run_clears_a_stale_interrupt():
-    agent = bare_agent(ToolRegistry.for_tools([]), CountApi(chunks=["hello"]))
+    agent = bare_agent(ToolsRegistry.for_tools([]), CountApi(chunks=["hello"]))
     agent.stop()                                 # left set from a prior (killed) run
     run = agent.run("hi")                        # run() should clear it
     run.wait()
@@ -188,7 +188,7 @@ def test_kill_from_a_tool_halts_run_and_retires_agent():
         holder["agent"].kill()
         return "killed from inside the tool"
 
-    agent = bare_agent(ToolRegistry.for_tools([killer]), ToolThenTextApi())
+    agent = bare_agent(ToolsRegistry.for_tools([killer]), ToolThenTextApi())
     holder["agent"] = agent
     run = agent.run("go")
     run.wait()
@@ -198,7 +198,7 @@ def test_kill_from_a_tool_halts_run_and_retires_agent():
 
 
 def test_killed_agent_refuses_further_runs():
-    agent = bare_agent(ToolRegistry.for_tools([]), CountApi(chunks=["hello"]))
+    agent = bare_agent(ToolsRegistry.for_tools([]), CountApi(chunks=["hello"]))
     agent.kill()
     run = agent.run("hi")                        # killed -> aborts at once
     run.wait()

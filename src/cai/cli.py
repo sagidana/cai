@@ -65,10 +65,10 @@ def _skill_completer(prefix, **kwargs):
 
 
 def _tool_completer(prefix, **kwargs):
-    from cai.tools import ToolRegistry
+    from cai.tools import ToolsRegistry
 
     matching = []
-    for name in ToolRegistry.available_tools():
+    for name in ToolsRegistry.available_tools():
         if not name.startswith(prefix): continue
         matching.append(name)
     return matching

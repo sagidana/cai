@@ -9,7 +9,7 @@ import threading
 from cai.agent import Agent
 from cai.llm import call_llm, SteerQueue
 from cai.skills import SkillsRegistry
-from cai.tools import ToolRegistry
+from cai.tools import ToolsRegistry
 
 
 # --------------------------------------------------------------------------
@@ -155,7 +155,7 @@ def test_agent_steer_from_a_tool_reaches_the_next_turn():
         holder["agent"].steer("also consider Y")
         return "poked"
 
-    agent = bare_agent(ToolRegistry.for_tools([poke]), ToolThenTextApi())
+    agent = bare_agent(ToolsRegistry.for_tools([poke]), ToolThenTextApi())
     holder["agent"] = agent
     run = agent.run("do X")
     run.wait()
@@ -180,7 +180,7 @@ def test_agent_steer_while_idle_runs_a_turn_at_once():
                 yield ("done", None, None, {})
             return gen()
 
-    agent = bare_agent(ToolRegistry.for_tools([]), OneTurnApi())
+    agent = bare_agent(ToolsRegistry.for_tools([]), OneTurnApi())
     assert agent.steer("seeded steer") is True   # idle + default run_on_idle
     seen = []
     for m in agent.messages:
@@ -192,7 +192,7 @@ def test_agent_steer_while_idle_runs_a_turn_at_once():
 def test_agent_steer_run_on_idle_false_is_a_noop_when_idle():
     # an idle agent with run_on_idle=False does nothing and returns False, leaving
     # the caller to drive the turn its own way.
-    agent = bare_agent(ToolRegistry.for_tools([]), ToolThenTextApi())
+    agent = bare_agent(ToolsRegistry.for_tools([]), ToolThenTextApi())
     assert agent.steer("x", run_on_idle=False) is False
     assert agent.messages == []                  # nothing ran
     assert agent._steer.drain() == []            # nothing queued
@@ -201,7 +201,7 @@ def test_agent_steer_run_on_idle_false_is_a_noop_when_idle():
 def test_agent_steer_while_running_queues_and_returns_true():
     # a run in flight: steer always queues (run_on_idle is irrelevant) and reports
     # True - the in-flight run folds it in at its next boundary.
-    agent = bare_agent(ToolRegistry.for_tools([]), ToolThenTextApi())
+    agent = bare_agent(ToolsRegistry.for_tools([]), ToolThenTextApi())
     agent._running.set()                         # pretend a run is streaming
     assert agent.steer("later", run_on_idle=False) is True
     assert agent._steer.drain() == ["later"]
