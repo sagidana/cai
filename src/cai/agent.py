@@ -70,6 +70,20 @@ def _new_name():
     return name
 
 
+def _trim_dispatch(dispatch, limit):
+    """wrap a tool dispatcher so any result longer than `limit` chars is trimmed
+    to it, with a marker noting how much was dropped, before it reaches the model
+    or the conversation. keeps oversized tool output from swamping the context."""
+    def trimmed(name, args):
+        result = dispatch(name, args)
+        text = str(result)
+        if len(text) > limit:
+            dropped = len(text) - limit
+            return text[:limit] + f"\n…[trimmed {dropped} chars]"
+        return result
+    return trimmed
+
+
 def _tool_name(tool):
     """the exposed name of a tools= item: a callable's __name__, else the string
     (an MCP tool ref) itself."""
@@ -140,6 +154,7 @@ class Agent:
                  reasoning_effort=None,
                  temperature=None,
                  max_steps=None,
+                 tool_result_max_chars=None,
                  stream=True):
         # only read config/key for a default the caller didn't supply - a child
         # agent given both a model and an api never touches the disk.
@@ -159,6 +174,11 @@ class Agent:
         self.reasoning_effort = reasoning_effort
         self.temperature = temperature
         self.max_steps = max_steps
+        # cap on a single tool result's length; oversized output is trimmed to it
+        # before the model (and the conversation) sees it. None disables the cap.
+        # an explicit param, not an ambient read - the CLI sources it from
+        # cai.settings, an SDK caller passes its own (or leaves it off).
+        self.tool_result_max_chars = tool_result_max_chars
         self.stream = stream
         if interrupt is None: interrupt = threading.Event()
         self.interrupt = interrupt
@@ -446,6 +466,8 @@ class Agent:
             system_prompt = _combine_prompts(self._system_prompt, skills_prompt)
             schemas = self.tools_registry.tools
             dispatch = self.tools_registry.dispatch
+            if self.tool_result_max_chars:
+                dispatch = _trim_dispatch(dispatch, self.tool_result_max_chars)
             # the one place the public [(event, fn), ...] list becomes the internal
             # HooksRegistry that call_llm wants.
             hooks_registry = HooksRegistry.from_list(self._hooks)
@@ -573,6 +595,7 @@ class Run(RunHandle):
                  reasoning_effort=None,
                  temperature=None,
                  max_steps=None,
+                 tool_result_max_chars=None,
                  stream=True,
                  strict_format=None):
         agent = Agent(model=model,
@@ -586,6 +609,7 @@ class Run(RunHandle):
                       reasoning_effort=reasoning_effort,
                       temperature=temperature,
                       max_steps=max_steps,
+                      tool_result_max_chars=tool_result_max_chars,
                       stream=stream)
         agent.set_messages(messages)
         # no prompt to fold in: `messages` is already the complete conversation,

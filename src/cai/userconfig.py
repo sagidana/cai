@@ -21,6 +21,7 @@ import hashlib
 import logging
 import importlib.util
 from dataclasses import dataclass
+from dataclasses import field
 
 from cai import config
 
@@ -76,10 +77,47 @@ class ExtensionsRegistry:
 class UserConfig:
     """the loaded ~/.config/cai (the discovered extensions plus the user-level
     settings) and the namespace for the operations that produce it - load(), the
-    dir helpers, and extension_for, all static methods on this class."""
+    dir helpers, and extension_for.
+
+    the settings fields below are the live session config: load() makes one
+    instance the process-global current() and exposes it as cai.settings, so an
+    extension/init.py tunes them by attribute (cai.settings.show_reasoning =
+    False) and the :config overlay edits the same object in place. the skills /
+    tools lists are auto-activated on every CLI run and merged into --skill /
+    --tool by merge_activations; an SDK run builds Agent/Run directly and never
+    passes through that merge, so they apply to the CLI only."""
 
     extensions: ExtensionsRegistry
     show_reasoning: bool = True
+    tool_result_max_chars: int = 40_000
+    auto_save_sessions: bool = True
+    max_sessions_mb: int = 500
+    skills: list = field(default_factory=list)
+    tools: list = field(default_factory=list)
+
+    # the live instance behind current() / cai.settings. not annotated, so the
+    # dataclass does not treat it as a field.
+    _current = None
+
+    @classmethod
+    def current(cls):
+        """the live settings instance (cai.settings). created lazily with the
+        defaults on first access; load() replaces it with one carrying the
+        freshly-discovered extensions."""
+        if cls._current is None:
+            cls._current = cls(extensions=ExtensionsRegistry([]))
+        return cls._current
+
+    @staticmethod
+    def merge_activations(selected, configured):
+        """CLI helper: the --skill / --tool names plus the cai.settings ones,
+        de-duplicated, the explicit names first. an SDK run builds Agent/Run
+        directly and never reaches here, so the settings lists are CLI-only."""
+        merged = list(selected or [])
+        for name in (configured or []):
+            if name not in merged:
+                merged.append(name)
+        return merged
 
     @staticmethod
     def extensions_dir():
@@ -146,21 +184,26 @@ class UserConfig:
             return "user"
         return None
 
-    @staticmethod
-    def load():
+    @classmethod
+    def load(cls):
         """import every extension's Python (alphabetical) then the user's
         top-level init.py, so their cai.hook / cai.command / cai.tool decorators
         register into the global HooksRegistry / CommandsRegistry / ToolsRegistry.
         returns the discovered extensions and user settings; the hooks, commands
-        and function tools live in those registries."""
-        extensions = UserConfig.list_extensions()
+        and function tools live in those registries.
+
+        the returned instance is published as current() / cai.settings before the
+        imports run, so an extension/init.py tuning cai.settings mutates the very
+        object this returns (and the :config overlay later edits)."""
+        extensions = cls.list_extensions()
+        cls._current = cls(extensions=ExtensionsRegistry(extensions))
         for extension in extensions:
-            UserConfig._import_file(extension.init_file)
-            UserConfig._import_file(extension.hooks_file)
-            UserConfig._import_file(extension.commands_file)
-            UserConfig._import_tools(extension)
-        UserConfig._import_file(UserConfig.init_path())
-        return UserConfig(extensions=ExtensionsRegistry(extensions))
+            cls._import_file(extension.init_file)
+            cls._import_file(extension.hooks_file)
+            cls._import_file(extension.commands_file)
+            cls._import_tools(extension)
+        cls._import_file(cls.init_path())
+        return cls._current
 
     @staticmethod
     def _import_tools(extension):

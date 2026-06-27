@@ -366,19 +366,24 @@ def main(argv=None):
         parser.error("no prompt: pass -p/--prompt, a prompt after '--', --file, or piped stdin")
 
     model = args.model or cfg.model
-    UserConfig.load()
+    user_config = UserConfig.load()
+    # the cai.settings skills / tools are auto-activated on every CLI run, merged
+    # in on top of any --skill / --tool the user passed.
+    tools = UserConfig.merge_activations(args.tool, user_config.tools)
+    skills = UserConfig.merge_activations(args.skill, user_config.skills)
 
     run = Run(messages,
               model,
               OpenAiApi(cfg.base_url, api_key),
               system_prompt=system_prompt,
-              tools=args.tool,
-              skills=args.skill,
+              tools=tools,
+              skills=skills,
               ui=TerminalUI(),
               interrupt=threading.Event(),
               reasoning_effort=args.reasoning_effort,
               temperature=args.temperature,
               max_steps=args.max_steps,
+              tool_result_max_chars=user_config.tool_result_max_chars,
               stream=not args.non_streaming,
               strict_format=args.strict_format)
 

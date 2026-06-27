@@ -63,6 +63,28 @@ class SessionsRegistry:
         return os.path.join(SessionsRegistry.sessions_dir(), f"{name}.flow")
 
     @staticmethod
+    def prune(max_mb):
+        """delete the oldest .flow files until the sessions dir is at or under
+        max_mb. a non-positive cap disables pruning; the newest sessions are
+        always kept, so the session that just saved survives."""
+        if not max_mb or max_mb <= 0:
+            return
+        cap = max_mb * 1024 * 1024
+        total = 0
+        for path in SessionsRegistry.list_sessions():
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                continue
+            total += size
+            if total <= cap:
+                continue
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+    @staticmethod
     def has_real_messages(messages):
         """True when messages holds anything worth saving (a non-system turn)."""
         for message in messages:

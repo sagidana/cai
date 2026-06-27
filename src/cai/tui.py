@@ -32,8 +32,11 @@ from cai.channel import connect
 from cai.commands import CommandContext, CommandsRegistry
 from cai.events import EventType
 from cai.screen import Screen
+from cai.screen.overlays import config as overlay_config
+from cai.screen.overlays.config import Setting
 from cai.session import SessionsRegistry
 from cai.ui import BaseUI
+from cai.userconfig import UserConfig
 from cai.wire import Wire
 
 
@@ -54,6 +57,7 @@ _PALETTE_COMMANDS = [
     ("continue", "continue the conversation without a new prompt"),
     ("agents", "live view of sub-agents"),
     ("sessions", "load a saved session"),
+    ("config", "edit the live session settings"),
     ("save", "save the session (optional path)"),
     ("load", "load a session file (path)"),
     ("clear", "clear the conversation view"),
@@ -105,6 +109,8 @@ def _write_event(screen, event):
         screen.write(event.text or "", kind=Screen.LLM)
         return
     if event.type == EventType.REASONING:
+        if not UserConfig.current().show_reasoning:
+            return
         screen.write(event.text or "", kind=Screen.REASONING)
         return
     if event.type == EventType.USER:
@@ -791,6 +797,68 @@ def _open_sessions(screen, client, status):
         return
 
 
+def _bool_setting(label, obj, attr):
+    return Setting(label=label,
+                   kind=overlay_config.BOOL,
+                   get=lambda: getattr(obj, attr),
+                   set=lambda v: setattr(obj, attr, bool(v)))
+
+
+def _int_setting(label, obj, attr):
+    """an integer field. empty input clears to 0; non-numbers report an error
+    the overlay shows instead of writing. the overlay's undo replays the native
+    int through set(), which str()/int() round-trips cleanly."""
+    def write(value):
+        text = str(value).strip()
+        if text == "":
+            setattr(obj, attr, 0)
+            return None
+        try:
+            setattr(obj, attr, int(text))
+        except ValueError:
+            return "not a number"
+        return None
+    return Setting(label=label,
+                   kind=overlay_config.INT,
+                   get=lambda: getattr(obj, attr),
+                   set=write)
+
+
+def _list_setting(label, obj, attr):
+    """a list of names edited as a comma-separated string. set() accepts either
+    the edited text or a native list (the overlay's undo replays the displayed
+    string, which splits back to the same list)."""
+    def write(value):
+        if isinstance(value, (list, tuple)):
+            setattr(obj, attr, list(value))
+            return None
+        names = []
+        for part in str(value).split(","):
+            part = part.strip()
+            if part:
+                names.append(part)
+        setattr(obj, attr, names)
+        return None
+    return Setting(label=label,
+                   kind=overlay_config.STRING,
+                   get=lambda: ", ".join(getattr(obj, attr) or []),
+                   set=write)
+
+
+def _open_config(screen):
+    """the :config overlay - edit the live session settings (cai.settings) in
+    place. edits apply to this session only; permanent config lives in init.py."""
+    cfg = UserConfig.current()
+    settings = []
+    settings.append(_bool_setting("show reasoning", cfg, "show_reasoning"))
+    settings.append(_int_setting("tool result max chars", cfg, "tool_result_max_chars"))
+    settings.append(_bool_setting("auto save sessions", cfg, "auto_save_sessions"))
+    settings.append(_int_setting("max sessions mb", cfg, "max_sessions_mb"))
+    settings.append(_list_setting("skills", cfg, "skills"))
+    settings.append(_list_setting("tools", cfg, "tools"))
+    screen.prompt_config_overlay(settings)
+
+
 def _save_session(screen, client, path):
     """save the agent (over the wire) to path, or its default <name>.flow when
     path is empty. the written path comes back from the control op."""
@@ -798,6 +866,7 @@ def _save_session(screen, client, path):
     if written is None:
         screen.write("[save error]\n", kind=Screen.ERROR)
         return
+    SessionsRegistry.prune(UserConfig.current().max_sessions_mb)
     screen.write(f"[saved {written}]\n", kind=Screen.META)
 
 
@@ -1013,6 +1082,9 @@ def _handle_command(screen, client, status, registry, jobs, cmd):
     if head == "models":
         _open_models(screen, client, status, registry)
         return False
+    if head == "config":
+        _open_config(screen)
+        return False
     if head == "tools":
         if screen._busy:
             screen.write("[busy — open :tools when idle]\n", kind=Screen.META)
@@ -1085,12 +1157,15 @@ def run(*,
     opens the :sessions picker at startup (--sessions). either resumes the chosen
     session in place, so autosave writes back to it."""
     from cai import config
-    from cai.userconfig import UserConfig
     from cai.agent import Agent
     from cai.hooks import HookEvent
     from cai.models import ModelsRegistry
 
-    UserConfig.load()
+    user_config = UserConfig.load()
+    # the cai.settings skills / tools are auto-activated on every CLI run, merged
+    # in on top of any --skill / --tool the user passed.
+    skills = UserConfig.merge_activations(skills, user_config.skills)
+    tools = UserConfig.merge_activations(tools, user_config.tools)
 
     # autosave: persist the session to <name>.flow on every conversation
     # mutation, driven solely by hooks - AFTER_RUN (the final answer landed) and
@@ -1103,6 +1178,7 @@ def run(*,
     # runs on the worker thread mid-run, so it sees a consistent conversation and
     # never races the main thread.
     def _autosave(ctx):
+        if not UserConfig.current().auto_save_sessions: return
         saved = (ctx.data or {}).get("agent")
 
         if saved is None: return
@@ -1110,6 +1186,7 @@ def run(*,
 
         try:
             saved.save()
+            SessionsRegistry.prune(UserConfig.current().max_sessions_mb)
         except OSError:
             pass
 
@@ -1124,7 +1201,8 @@ def run(*,
                   hooks=autosave_hooks,
                   reasoning_effort=reasoning_effort,
                   temperature=temperature,
-                  max_steps=max_steps)
+                  max_steps=max_steps,
+                  tool_result_max_chars=user_config.tool_result_max_chars)
 
     from cai.wired_agent import UnixWiredAgent
     server = UnixWiredAgent(agent)

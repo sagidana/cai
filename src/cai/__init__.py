@@ -53,6 +53,7 @@ __all__ = [
     "call_llm",
     "Agent",
     "Run",
+    "settings",
 ]
 
 
@@ -75,4 +76,9 @@ def __getattr__(name):
     if name == "ToolsRegistry":
         from cai.tools import ToolsRegistry
         return ToolsRegistry
+    # cai.settings: the live UserConfig the CLI runs on (the :config overlay edits
+    # it, an init.py tunes it). lazy so `import cai` doesn't pull userconfig/config.
+    if name == "settings":
+        from cai.userconfig import UserConfig
+        return UserConfig.current()
     raise AttributeError(f"module 'cai' has no attribute {name!r}")
