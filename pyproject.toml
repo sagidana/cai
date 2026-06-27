@@ -25,4 +25,4 @@ where = ["src"]
 # (*.md). they live beside the package but are not importable modules, so they
 # must be declared as package data or a non-editable install drops them.
 [tool.setuptools.package-data]
-cai = ["builtins/tools/*.py", "builtins/skills/*.md"]
+cai = ["builtins/tools/*.py", "builtins/skills/*.md", "py.typed"]

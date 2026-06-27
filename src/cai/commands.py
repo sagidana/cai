@@ -8,6 +8,11 @@ client, and the screen to write back to."""
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from cai.screen import Screen
+    from cai.tui import AgentClient
 
 
 @dataclass
@@ -57,14 +62,15 @@ def command(fn=None, *, name=None, help=""):
     return decorator
 
 
+@dataclass
 class CommandContext:
     """what a command's fn receives: the text after the command name, the agent
-    client to drive, and the screen to write back to."""
-
-    def __init__(self, args, client, screen):
-        self.args = args
-        self.client = client
-        self.screen = screen
+    client to drive (get_messages / set_messages / get_info / submit / steer),
+    and the screen to write back to. the typed fields let an extension author's
+    editor jump from ctx.client.<method> into its definition."""
+    args: str
+    client: AgentClient
+    screen: Screen
 
     def write(self, text):
         from cai.screen import Screen
