@@ -74,6 +74,54 @@ def _tool_completer(prefix, **kwargs):
     return matching
 
 
+def _path_completer(prefix, **kwargs):
+    """filesystem-path completer for `cai extend <source>`."""
+    directory = os.path.dirname(prefix) or "."
+    matching = []
+    try:
+        entries = os.listdir(directory)
+    except OSError:
+        return matching
+    for name in entries:
+        full = os.path.join(directory, name)
+        if not full.startswith(prefix): continue
+        if os.path.isdir(full):
+            full = full + os.sep
+        matching.append(full)
+    return matching
+
+
+def _add_extend_subparser(sub):
+    """`cai extend` - install / list / remove extension bundles. a first-class
+    subcommand so it shows in `cai --help` and tab-completes; its handler lives
+    in cai.extend, dispatched from main() before the heavy LLM imports."""
+    from cai.extend import _extension_completer
+
+    extend_parser = sub.add_parser(
+        "extend",
+        help="install, list, or remove extension bundles, then exit.",
+        description="manage cai extension bundles under ~/.config/cai/extensions/. "
+                    "install a folder, .zip file, or http(s) URL; or --list / "
+                    "--remove the installed ones.")
+    source_arg = extend_parser.add_argument(
+        "source",
+        nargs="?",
+        metavar="PATH_OR_URL",
+        help="folder, .zip file, or http(s) URL of the bundle to install.")
+    source_arg.completer = _path_completer
+    extend_parser.add_argument("--replace",
+                               action="store_true",
+                               help="overwrite the extension if it is already installed.")
+    extend_parser.add_argument("--list",
+                               action="store_true",
+                               help="list the installed extensions and exit.")
+    remove_arg = extend_parser.add_argument("--remove",
+                                            default=None,
+                                            metavar="NAME",
+                                            help="uninstall the named extension and exit.")
+    remove_arg.completer = _extension_completer
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="cai",
@@ -128,6 +176,11 @@ def build_parser():
                         type=int,
                         default=None,
                         help="max agentic turns before giving up")
+
+    # subcommands. the prompt is pulled out before argparse (see _split_dashdash)
+    # so the top level keeps no free positional that would clash with these.
+    sub = parser.add_subparsers(dest="command")
+    _add_extend_subparser(sub)
     return parser
 
 
@@ -237,6 +290,13 @@ def main(argv=None):
     if argcomplete is not None:
         argcomplete.autocomplete(parser)
     args = parser.parse_args(argv)
+
+    # subcommands run before the heavy LLM bootstrap (they need neither config
+    # nor an API key) and after argcomplete so a completion request never runs
+    # them.
+    if args.command == "extend":
+        from cai import extend
+        return extend.run(args, parser)
 
     # heavy imports happen only here - after argcomplete has short-circuited, so
     # tab completion never pays for them.
