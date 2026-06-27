@@ -21,9 +21,11 @@ A ToolsRegistry instance exposes the two things the agentic loop needs:
   registry.dispatch(name, args) - run a tool by name, returns its text result
                               (call_llm tools_dispatch=)
 
-Minimal by design: blocking line-by-line JSON-RPC (no timeouts/retries/threads),
-stderr discarded, local stdio servers only - no remote servers, images, or
-user-only display blocks. Those are later layers."""
+Minimal by design: blocking JSON-RPC (no timeouts/retries/threads), one
+request/response at a time; a stdio server's stderr is discarded. Local stdio
+servers (a command, run as a subprocess) and remote servers (a URL, spoken to
+over Streamable HTTP) sit side by side; images and user-only display blocks are
+still later layers."""
 from __future__ import annotations
 
 import os
@@ -34,6 +36,8 @@ import atexit
 import inspect
 import logging
 import subprocess
+
+import requests
 
 from cai import config
 from cai.userconfig import UserConfig
@@ -49,16 +53,22 @@ class LocalMCPServer:
     The loop runs tools one at a time, so this stays single-threaded: write a
     request, read stdout lines until the matching id comes back."""
 
-    def __init__(self, command, label):
+    def __init__(self, command, label, env=None, cwd=None):
         self.label = label
         self._command = command
         self._req_id = 0
+        popen_env = None
+        if env is not None:
+            popen_env = dict(os.environ)
+            popen_env.update(env)
         self._process = subprocess.Popen(command,
                                          stdin=subprocess.PIPE,
                                          stdout=subprocess.PIPE,
                                          stderr=subprocess.DEVNULL,
                                          text=True,
-                                         bufsize=1)
+                                         bufsize=1,
+                                         env=popen_env,
+                                         cwd=cwd)
         atexit.register(self.close)
         self._handshake()
 
@@ -110,24 +120,126 @@ class LocalMCPServer:
 
     def list_tools(self):
         response = self._request("tools/list", {})
-        return response.get("result", {}).get("tools", [])
+        return _tools_from_response(response)
 
     def call_tool(self, name, arguments):
         response = self._request("tools/call", {"name": name, "arguments": arguments or {}})
-        if response.get("error") is not None:
-            return f"Error: {response['error']}"
-        blocks = response.get("result", {}).get("content", [])
-        texts = []
-        for block in blocks:
-            if block.get("type") != "text": continue
-            if block.get("text") is None: continue
-            texts.append(block["text"])
-        return "\n".join(texts)
+        return _text_from_response(response)
 
     def close(self):
         if self._process is None: return
         if self._process.poll() is not None: return
         self._process.terminate()
+
+
+class RemoteMCPServer:
+    """One remote MCP server reached over Streamable HTTP - the remote
+    counterpart to LocalMCPServer, same list_tools / call_tool / close surface.
+    Each JSON-RPC request is one POST to the server URL; the reply is either a
+    JSON body or an SSE stream, from which the response matching the request id
+    is read (any notifications ahead of it are skipped). A session id handed back
+    on initialize (the Mcp-Session-Id header) is echoed on later requests. One
+    request/response at a time, matching the loop - no retries or timeouts."""
+
+    def __init__(self, url, label, headers=None):
+        self.label = label
+        self._url = url
+        self._req_id = 0
+        self._session_id = None
+        self._headers = {}
+        if headers is not None:
+            self._headers = dict(headers)
+        self._handshake()
+
+    def _handshake(self):
+        params = {}
+        params["protocolVersion"] = MCP_PROTOCOL_VERSION
+        params["capabilities"] = {}
+        params["clientInfo"] = {"name": "cai", "version": "1.0"}
+        self._request("initialize", params)
+        self._notify("notifications/initialized")
+        log.info("MCP server %r started", self.label)
+
+    def _post(self, message, expect_reply):
+        headers = dict(self._headers)
+        headers["Content-Type"] = "application/json"
+        headers["Accept"] = "application/json, text/event-stream"
+        if self._session_id is not None:
+            headers["Mcp-Session-Id"] = self._session_id
+        response = requests.post(self._url, json=message, headers=headers, stream=expect_reply)
+        session_id = response.headers.get("Mcp-Session-Id")
+        if session_id:
+            self._session_id = session_id
+        return response
+
+    def _notify(self, method):
+        message = {}
+        message["jsonrpc"] = "2.0"
+        message["method"] = method
+        self._post(message, False)
+
+    def _request(self, method, params):
+        self._req_id += 1
+        req_id = self._req_id
+        message = {}
+        message["jsonrpc"] = "2.0"
+        message["id"] = req_id
+        message["method"] = method
+        message["params"] = params
+        response = self._post(message, True)
+        return self._read_reply(response, req_id)
+
+    def _read_reply(self, response, req_id):
+        """the JSON-RPC response dict matching req_id, from either a JSON body or
+        an SSE stream of `data:` lines (notifications before it are skipped)."""
+        content_type = response.headers.get("Content-Type", "")
+        if "text/event-stream" not in content_type:
+            return response.json()
+        for raw in response.iter_lines():
+            if not raw: continue
+            line = raw.decode("utf-8").strip()
+            if not line.startswith("data:"): continue
+            payload = line[len("data:"):].strip()
+            if not payload: continue
+            try:
+                message = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(message, dict): continue
+            if message.get("id") != req_id: continue
+            return message
+        raise ConnectionError(f"MCP server {self.label!r} closed the stream during request {req_id}")
+
+    def list_tools(self):
+        response = self._request("tools/list", {})
+        return _tools_from_response(response)
+
+    def call_tool(self, name, arguments):
+        response = self._request("tools/call", {"name": name, "arguments": arguments or {}})
+        return _text_from_response(response)
+
+    def close(self):
+        pass
+
+
+def _tools_from_response(response):
+    """the tool definitions out of a tools/list response (the shared shape both
+    a local and a remote server return)."""
+    return response.get("result", {}).get("tools", [])
+
+
+def _text_from_response(response):
+    """the joined text blocks out of a tools/call response, or an Error: line
+    when the server reported one."""
+    if response.get("error") is not None:
+        return f"Error: {response['error']}"
+    blocks = response.get("result", {}).get("content", [])
+    texts = []
+    for block in blocks:
+        if block.get("type") != "text": continue
+        if block.get("text") is None: continue
+        texts.append(block["text"])
+    return "\n".join(texts)
 
 
 _PY_TO_JSON_TYPE = {
@@ -234,8 +346,16 @@ class ToolsRegistry:
     # ToolsRegistry built afterward can resolve these by name, and
     # available_tools lists them. populated by register_global, cleared by
     # reset_global - the function-tool half of the install-wide catalogue, whose
-    # other half is the MCP servers discovered on disk.
+    # other half is the MCP servers (on disk, plus the declared ones below).
     _registered = {}
+
+    # process-global MCP servers declared via cai.mcp_server (init.py), as
+    # name -> spec dict: {"command": [...], "env": {...}, "cwd": ...} for a stdio
+    # server or {"url": ..., "headers": {...}} for a remote one. the programmatic
+    # twin of dropping a <name>.py into an mcps/ dir, and consulted ahead of it -
+    # so a declared server shadows an on-disk one of the same name. populated by
+    # register_server, cleared by reset_global.
+    _declared_servers = {}
 
     @classmethod
     def register_global(cls, fn):
@@ -264,9 +384,55 @@ class ToolsRegistry:
         return entry[0]
 
     @classmethod
+    def register_server(cls, name, command=None, url=None, env=None, headers=None, cwd=None):
+        """declare a named MCP server in the process-global store (cai.mcp_server's
+        backing), the programmatic counterpart to dropping a <name>.py into an
+        mcps/ dir. exactly one of `command` (a stdio server: an argv list, with
+        optional env/cwd) or `url` (a remote Streamable-HTTP server, with optional
+        headers) must be given. its tools surface namespaced '<name>__<tool>' like
+        any MCP server's. a later declaration of the same name wins."""
+        if command is None and url is None:
+            raise ValueError(f"MCP server {name!r}: give command= or url=")
+        if command is not None and url is not None:
+            raise ValueError(f"MCP server {name!r}: give command= or url=, not both")
+        if url is not None and (env is not None or cwd is not None):
+            raise ValueError(f"MCP server {name!r}: env/cwd apply to a command server, not a url")
+        if command is not None and headers is not None:
+            raise ValueError(f"MCP server {name!r}: headers apply to a url server, not a command")
+        spec = {}
+        if command is not None:
+            if isinstance(command, str):
+                raise ValueError(f"MCP server {name!r}: command must be an argv list, not a string")
+            spec["command"] = list(command)
+            if env is not None:
+                spec["env"] = dict(env)
+            if cwd is not None:
+                spec["cwd"] = cwd
+        else:
+            spec["url"] = url
+            if headers is not None:
+                spec["headers"] = dict(headers)
+        cls._declared_servers[name] = spec
+
+    @classmethod
+    def declared_servers(cls):
+        """the programmatically-declared MCP servers as name -> spec dict."""
+        return dict(cls._declared_servers)
+
+    @staticmethod
+    def _server_from_spec(name, spec):
+        """build a live MCP server connection from a declared spec - a
+        RemoteMCPServer for a url spec, a LocalMCPServer for a command one."""
+        if "url" in spec:
+            return RemoteMCPServer(spec["url"], name, headers=spec.get("headers"))
+        return LocalMCPServer(spec["command"], name, env=spec.get("env"), cwd=spec.get("cwd"))
+
+    @classmethod
     def reset_global(cls):
-        """drop every globally-registered function tool (test isolation)."""
+        """drop every globally-registered function tool and declared MCP server
+        (test isolation)."""
         cls._registered = {}
+        cls._declared_servers = {}
 
     def __init__(self):
         self._functions = {}     # name -> callable
@@ -274,9 +440,9 @@ class ToolsRegistry:
         self._schemas = {}       # exposed_name -> schema (eager, or resolved lazily)
         self._order = []         # exposed names, registration order
         self._selected = []      # exposed names that are active (sent to the model)
-        # mcp_name -> LocalMCPServer: both the spawned-once cache and the set of
-        # servers to close.
-        self._local_mcp_servers = {}
+        # mcp_name -> LocalMCPServer/RemoteMCPServer: both the connected-once
+        # cache and the set of servers to close.
+        self._mcp_servers = {}
 
     @classmethod
     def for_tools(cls, tools):
@@ -295,12 +461,26 @@ class ToolsRegistry:
         """every tool the install offers, as a flat list of names in the form
         `tools=` / for_tools accept: the function tools registered via cai.tool
         (their bare names) followed by every MCP tool ('<mcp_name>__<tool_name>')
-        exposed by the servers across the extension mcps/ dirs and the builtins.
-        each MCP server is spawned briefly to list its tools and then closed -
-        nothing is left running. a user file shadows a builtin of the same name;
-        a server that fails to start is logged and skipped."""
+        exposed by the servers - declared via cai.mcp_server first, then across
+        the extension mcps/ dirs and the builtins. each MCP server is spawned (or,
+        when remote, contacted) briefly to list its tools and then closed -
+        nothing is left running. a declared server shadows an on-disk one of the
+        same name, and a user file shadows a builtin; a server that fails to start
+        is logged and skipped."""
         names = list(cls._registered.keys())
         seen_labels = set()
+        for label in sorted(cls._declared_servers.keys()):
+            seen_labels.add(label)
+            server = None
+            try:
+                server = cls._server_from_spec(label, cls._declared_servers[label])
+                for tool in server.list_tools():
+                    names.append(f"{label}__{tool['name']}")
+            except Exception as e:
+                log.error("available_tools: declared server %r failed: %s", label, e)
+            finally:
+                if server is not None:
+                    server.close()
         for directory in _mcp_search_dirs():
             if not os.path.isdir(directory): continue
             for filename in sorted(os.listdir(directory)):
@@ -476,18 +656,23 @@ class ToolsRegistry:
             return f"Error: tool '{name}' failed: {e}"
 
     def _load_server(self, mcp_name):
-        """the LocalMCPServer for mcp_name, spawned (once) from its source file
-        and cached in this registry. the file is resolved from the extension
-        mcps dirs first, then the builtins shipped with cai."""
-        server = self._local_mcp_servers.get(mcp_name)
+        """the live server for mcp_name, connected once and cached in this
+        registry. a server declared via cai.mcp_server wins; otherwise its source
+        file is resolved from the extension mcps dirs first, then the builtins
+        shipped with cai, and spawned as a stdio subprocess."""
+        server = self._mcp_servers.get(mcp_name)
         if server is not None:
             return server
-        path = _mcp_server_path(mcp_name)
-        if path is None:
-            raise FileNotFoundError(
-                f"no MCP server {mcp_name!r} in any extension mcps dir or builtins")
-        server = LocalMCPServer([sys.executable, path], mcp_name)
-        self._local_mcp_servers[mcp_name] = server
+        spec = ToolsRegistry._declared_servers.get(mcp_name)
+        if spec is not None:
+            server = ToolsRegistry._server_from_spec(mcp_name, spec)
+        else:
+            path = _mcp_server_path(mcp_name)
+            if path is None:
+                raise FileNotFoundError(
+                    f"no MCP server {mcp_name!r} declared, or in any extension mcps dir or builtins")
+            server = LocalMCPServer([sys.executable, path], mcp_name)
+        self._mcp_servers[mcp_name] = server
         return server
 
     def _call_function(self, name, arguments):
@@ -505,7 +690,7 @@ class ToolsRegistry:
         return str(result)
 
     def close(self):
-        for server in self._local_mcp_servers.values():
+        for server in self._mcp_servers.values():
             try:
                 server.close()
             except Exception:
@@ -551,3 +736,25 @@ def tool(fn):
     extensions every agent can select it by name. see ToolsRegistry."""
     ToolsRegistry.register_global(fn)
     return fn
+
+
+def mcp_server(name, command=None, url=None, env=None, headers=None, cwd=None):
+    """declare an MCP server from init.py, the programmatic counterpart to
+    dropping a <name>.py into ~/.config/cai/mcps/. give exactly one of:
+
+        cai.mcp_server("github",
+                       command=["npx", "-y", "@modelcontextprotocol/server-github"],
+                       env={"GITHUB_TOKEN": "..."})        # local stdio server
+
+        cai.mcp_server("linear",
+                       url="https://mcp.linear.app/mcp",
+                       headers={"Authorization": "Bearer ..."})   # remote server
+
+    its tools surface namespaced '<name>__<tool>'; Harness callers still list
+    them in tools=[...] to expose them for a run. see ToolsRegistry."""
+    ToolsRegistry.register_server(name,
+                                  command=command,
+                                  url=url,
+                                  env=env,
+                                  headers=headers,
+                                  cwd=cwd)

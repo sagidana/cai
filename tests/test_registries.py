@@ -113,6 +113,48 @@ def test_later_tool_of_same_name_wins():
     assert ToolsRegistry.global_function("dup")() == "second"
 
 
+def test_cai_mcp_server_declares_local():
+    cai.mcp_server("github",
+                   command=["npx", "-y", "@modelcontextprotocol/server-github"],
+                   env={"GITHUB_TOKEN": "x"},
+                   cwd="/tmp")
+
+    declared = ToolsRegistry.declared_servers()
+    assert declared["github"]["command"] == ["npx", "-y", "@modelcontextprotocol/server-github"]
+    assert declared["github"]["env"] == {"GITHUB_TOKEN": "x"}
+    assert declared["github"]["cwd"] == "/tmp"
+
+
+def test_cai_mcp_server_declares_remote():
+    cai.mcp_server("linear",
+                   url="https://mcp.linear.app/mcp",
+                   headers={"Authorization": "Bearer t"})
+
+    declared = ToolsRegistry.declared_servers()
+    assert declared["linear"] == {"url": "https://mcp.linear.app/mcp",
+                                  "headers": {"Authorization": "Bearer t"}}
+
+
+def test_cai_mcp_server_rejects_bad_specs():
+    with pytest.raises(ValueError):
+        cai.mcp_server("x")                                   # neither command nor url
+    with pytest.raises(ValueError):
+        cai.mcp_server("x", command=["c"], url="http://y")    # both
+    with pytest.raises(ValueError):
+        cai.mcp_server("x", command="c")                      # string, not argv list
+    with pytest.raises(ValueError):
+        cai.mcp_server("x", url="http://y", env={"A": "1"})   # env on a url server
+    with pytest.raises(ValueError):
+        cai.mcp_server("x", command=["c"], headers={"A": "1"})  # headers on a command server
+
+
+def test_later_mcp_server_of_same_name_wins():
+    cai.mcp_server("dup", command=["first"])
+    cai.mcp_server("dup", url="http://second")
+
+    assert ToolsRegistry.declared_servers()["dup"] == {"url": "http://second"}
+
+
 def test_reset_global_clears_both():
     @cai.hook("after_run")
     def h(ctx):
@@ -127,9 +169,12 @@ def test_reset_global_clears_both():
         """t."""
         return "t"
 
+    cai.mcp_server("srv", command=["c"])
+
     HooksRegistry.reset_global()
     CommandsRegistry.reset_global()
     ToolsRegistry.reset_global()
     assert HooksRegistry.registered() == []
     assert CommandsRegistry.commands() == {}
     assert ToolsRegistry.registered() == {}
+    assert ToolsRegistry.declared_servers() == {}

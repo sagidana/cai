@@ -31,7 +31,7 @@ from cai.llm import LLMError, MaxStepsReached, call_llm
 # without paying the import.
 if TYPE_CHECKING:
     from cai.agent import Agent, Run
-    from cai.tools import ToolsRegistry, tool
+    from cai.tools import ToolsRegistry, tool, mcp_server
 
 __all__ = [
     "Event",
@@ -47,6 +47,7 @@ __all__ = [
     "command",
     "ToolsRegistry",
     "tool",
+    "mcp_server",
     "LLMError",
     "MaxStepsReached",
     "call_llm",
@@ -68,6 +69,9 @@ def __getattr__(name):
     if name == "tool":
         from cai.tools import tool
         return tool
+    if name == "mcp_server":
+        from cai.tools import mcp_server
+        return mcp_server
     if name == "ToolsRegistry":
         from cai.tools import ToolsRegistry
         return ToolsRegistry
