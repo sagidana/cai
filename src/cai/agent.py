@@ -85,10 +85,11 @@ def _trim_dispatch(dispatch, limit):
 
 
 def _tool_name(tool):
-    """the exposed name of a tools= item: a callable's __name__, else the string
-    (an MCP tool ref) itself."""
+    """the exposed name of a tools= item: a callable's exposed name (the
+    namespaced '<extension>__<name>' stamped by cai.tool, else its __name__),
+    or the string (an MCP tool ref) itself."""
     if callable(tool):
-        return tool.__name__
+        return getattr(tool, "_cai_tool_name", tool.__name__)
     return tool
 
 

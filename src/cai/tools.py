@@ -252,6 +252,27 @@ _PY_TO_JSON_TYPE = {
 }
 
 
+def _namespaced_tool_name(name, origin):
+    """the exposed name for a function tool defined in `origin`: namespaced
+    '<extension>__<name>' (mirroring MCP tools) when origin sits inside an
+    extension's dir, else the bare name for user-level and plain-SDK tools. the
+    UserConfig import is local to avoid a tools<->userconfig import cycle."""
+    from cai.userconfig import UserConfig
+    extension = UserConfig.extension_for(origin)
+    if extension is None:
+        return name
+    if extension == "user":
+        return name
+    return f"{extension}__{name}"
+
+
+def _function_tool_name(fn):
+    """the exposed name of a function tool: the '<extension>__<name>' stamped on
+    it by ToolsRegistry.register_global, or the bare __name__ for a callable that
+    was never registered globally (a direct tools= callable, user/SDK tool)."""
+    return getattr(fn, "_cai_tool_name", fn.__name__)
+
+
 def schema_from_function(fn):
     """build an OpenAI tool schema from a Python callable. param types come from
     annotations (unannotated default to string; unsupported types raise
@@ -302,7 +323,7 @@ def schema_from_function(fn):
     parameters["required"] = required
 
     function = {}
-    function["name"] = fn.__name__
+    function["name"] = _function_tool_name(fn)
     function["description"] = description
     function["parameters"] = parameters
 
@@ -360,14 +381,19 @@ class ToolsRegistry:
     @classmethod
     def register_global(cls, fn):
         """record a function tool in the process-global store (cai.tool's
-        backing), keyed by its __name__. a later registration of the same name
-        wins (the user's init runs last). the origin file is captured from fn so
-        UserConfig.extension_for can attribute it later."""
+        backing), keyed by its exposed name. a tool defined in an extension's
+        tools/ dir is namespaced '<extension>__<name>' (mirroring MCP tools);
+        user-level and plain-SDK tools keep their bare __name__. the exposed name
+        is stamped on fn so the schema, dispatch key and selection all agree on
+        it. a later registration of the same name wins (the user's init runs
+        last). the origin file is captured from fn so UserConfig.extension_for
+        can attribute it later."""
         origin = None
         code = getattr(fn, "__code__", None)
         if code is not None:
             origin = code.co_filename
-        cls._registered[fn.__name__] = (fn, origin)
+        fn._cai_tool_name = _namespaced_tool_name(fn.__name__, origin)
+        cls._registered[fn._cai_tool_name] = (fn, origin)
 
     @classmethod
     def registered(cls):
@@ -505,8 +531,9 @@ class ToolsRegistry:
     def register_function(self, fn):
         """expose a Python callable as a tool. its schema is derived from the
         signature + docstring, and a call runs it in-process. the tool name is
-        the function's __name__; a duplicate name raises ValueError."""
-        name = fn.__name__
+        the function's exposed name (namespaced '<extension>__<name>' for an
+        extension tool, else its __name__); a duplicate name raises ValueError."""
+        name = _function_tool_name(fn)
         self._is_name_free(name)
         self._functions[name] = fn
         self._dispatch[name] = ("function", name)
@@ -550,7 +577,7 @@ class ToolsRegistry:
         replaces the existing registration with this tool - e.g. to bind an
         inherited tool name to this agent's own tool. like any fresh
         registration, the replacement is left unselected."""
-        name = tool.__name__ if callable(tool) else tool
+        name = _function_tool_name(tool) if callable(tool) else tool
         if self.has(name):
             if not override: return
             self.remove(name)
@@ -574,7 +601,7 @@ class ToolsRegistry:
         is left unselected, so registering and selecting stay fully separate."""
         if auto_register:
             self.register(tool)
-        name = tool.__name__ if callable(tool) else tool
+        name = _function_tool_name(tool) if callable(tool) else tool
         if not self.has(name): return
         if name in self._selected: return
         self._selected.append(name)

@@ -102,11 +102,49 @@ def test_load_registers_function_tools_globally_with_attribution():
     """)
     UserConfig.load()
 
-    fn = ToolsRegistry.global_function("add")
+    fn = ToolsRegistry.global_function("calc__add")
     assert fn is not None
     assert fn(2, 3) == 5
-    _other, origin = ToolsRegistry.registered()["add"]
+    _other, origin = ToolsRegistry.registered()["calc__add"]
     assert UserConfig.extension_for(origin) == "calc"
+
+
+def test_extension_function_tool_is_namespaced_by_extension():
+    path = _ext("web")
+    _write(os.path.join(path, "tools", "net.py"), """
+        import cai
+        @cai.tool
+        def fetch_url(url: str) -> str:
+            \"\"\"Fetch a URL.\"\"\"
+            return url
+    """)
+    UserConfig.load()
+
+    # the tool surfaces as '<extension>__<name>', mirroring MCP tools, in the
+    # global store, the available list, and the schema sent to the model.
+    assert "web__fetch_url" in ToolsRegistry.available_tools()
+    assert "fetch_url" not in ToolsRegistry.available_tools()
+    registry = ToolsRegistry.for_tools(["web__fetch_url"])
+    assert registry.selected() == ["web__fetch_url"]
+    schema = registry.tools[0]
+    assert schema["function"]["name"] == "web__fetch_url"
+
+
+def test_top_level_user_function_tool_keeps_its_bare_name():
+    # a tool defined in the top-level ~/.config/cai/init.py is attributed to
+    # "user", which is not an extension, so it is not namespaced.
+    _write(UserConfig.init_path(), """
+        import cai
+        @cai.tool
+        def now() -> str:
+            \"\"\"The time.\"\"\"
+            return "now"
+    """)
+    UserConfig.load()
+
+    assert "now" in ToolsRegistry.available_tools()
+    _fn, origin = ToolsRegistry.registered()["now"]
+    assert UserConfig.extension_for(origin) == "user"
 
 
 def test_tools_underscore_files_are_not_imported():
