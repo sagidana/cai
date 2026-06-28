@@ -102,6 +102,9 @@ def make_parent(api, tools=None, skills=None):
     parent.skills_registry = SkillsRegistry.for_skills([], tools_registry=parent.tools_registry)
     parent.skills_registry._names = list(skills or ["subagents"])
     parent._hooks = None
+    # run() reads this when wrapping the tool dispatcher; __init__ sets it, so a
+    # helper that bypasses __init__ must too, or run() hits AttributeError.
+    parent.tool_result_max_chars = None
     parent.children = []
     return parent
 

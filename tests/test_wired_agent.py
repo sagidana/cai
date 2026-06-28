@@ -109,6 +109,9 @@ def make_agent(tools=None, skills=None, hooks=None, api=None):
     agent.reasoning_effort = None
     agent.temperature = None
     agent.max_steps = None
+    # run() reads this when wrapping the tool dispatcher; __init__ sets it, so a
+    # helper that bypasses __init__ must too, or run() hits AttributeError.
+    agent.tool_result_max_chars = None
     agent.stream = True
     agent.interrupt = threading.Event()
     agent._killed = threading.Event()
