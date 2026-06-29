@@ -60,6 +60,13 @@ class ContentBuffer:
     def line_count(self):
         return len(self._lines)
 
+    def ends_blank(self):
+        """True when the buffer ends on a blank display line - a write that
+        wants one blank line of separation needs to add none."""
+        if not self._lines: return False
+        if self._partial: return False
+        return ansi_strip(self._lines[-1]) == ''
+
     def get_lines(self, start, count):
         """return a slice of display lines for viewport rendering."""
         start = max(0, start)

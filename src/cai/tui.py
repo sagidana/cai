@@ -104,30 +104,55 @@ def _status_text(model, state):
     return " | ".join(parts)
 
 
-def _write_event(screen, event):
-    """render one agent event into the conversation viewport, by kind."""
-    if event.type == EventType.CONTENT:
-        screen.write(event.text or "", kind=Screen.LLM)
-        return
-    if event.type == EventType.REASONING:
-        if not UserConfig.current().show_reasoning:
+class _Transcript:
+    """renders agent events into the conversation viewport with uniform
+    spacing: exactly one blank line between logical blocks.
+
+    a block is a user prompt, an assistant message, a reasoning trace, a tool
+    call, a tool result, or a one-off note. consecutive CONTENT (or REASONING)
+    chunks stream into one block - only a change of unit asks the screen for a
+    separator (block=True), so the model's own paragraph breaks survive while
+    the gaps between blocks no longer depend on whatever newlines each event
+    happened to carry."""
+
+    def __init__(self, screen):
+        self._screen = screen
+        self._streaming = None   # the open streaming unit: "content"/"reasoning"/None
+
+    def event(self, event):
+        if event.type == EventType.CONTENT:
+            self._stream(event.text or "", "content", Screen.LLM)
             return
-        screen.write(event.text or "", kind=Screen.REASONING)
-        return
-    if event.type == EventType.USER:
-        screen.write(f"\n> {event.text or ''}\n\n", kind=Screen.USER)
-        return
-    if event.type == EventType.TOOL_CALL:
-        line = f"\n-> {event.tool_name}({_short_args(event.tool_args)})\n"
-        screen.write(line, kind=Screen.TOOL)
-        return
-    if event.type == EventType.TOOL_RESULT:
-        kind = Screen.TOOL
-        if event.is_error:
-            kind = Screen.ERROR
-        result = event.tool_result or ""
-        screen.write(f"<- {event.tool_name}: {len(result)} chars\n", kind=kind)
-        return
+        if event.type == EventType.REASONING:
+            if not UserConfig.current().show_reasoning:
+                return
+            self._stream(event.text or "", "reasoning", Screen.REASONING)
+            return
+        if event.type == EventType.USER:
+            self.note(f"> {event.text or ''}\n", Screen.USER)
+            return
+        if event.type == EventType.TOOL_CALL:
+            self.note(f"-> {event.tool_name}({_short_args(event.tool_args)})\n", Screen.TOOL)
+            return
+        if event.type == EventType.TOOL_RESULT:
+            kind = Screen.TOOL
+            if event.is_error:
+                kind = Screen.ERROR
+            result = event.tool_result or ""
+            self.note(f"<- {event.tool_name}: {len(result)} chars\n", kind)
+            return
+
+    def _stream(self, text, unit, kind):
+        # a fresh unit starts a new block; the same unit continues the open one.
+        block = unit != self._streaming
+        self._streaming = unit
+        self._screen.write(text, kind=kind, block=block)
+
+    def note(self, text, kind):
+        """write a self-contained block (a prompt, a tool line, a notice),
+        always separated from what precedes it by one blank line."""
+        self._streaming = None
+        self._screen.write(text, kind=kind, block=True)
 
 
 class _Status:
@@ -394,9 +419,10 @@ class ScreenUI(BaseUI):
     running the matching overlay and handing back the human's answer; a closed
     screen / no UI yields the headless default."""
 
-    def __init__(self, screen, status):
+    def __init__(self, screen, status, transcript):
         self._screen = screen
         self._status = status
+        self._transcript = transcript
 
     def confirm(self, message, *, default=False, detail=""):
         request = {}
@@ -431,7 +457,7 @@ class ScreenUI(BaseUI):
         kind = Screen.META
         if level == "error":
             kind = Screen.ERROR
-        self._screen.write(f"[{level}] {message}\n", kind=kind)
+        self._transcript.note(f"[{level}] {message}\n", kind)
 
     def status(self, message):
         self._status.set_note(message)
@@ -453,7 +479,8 @@ class _Worker(threading.Thread):
         self._jobs = jobs
         self._stop_event = stop
         self._status = status
-        self._ui = ScreenUI(screen, status)
+        self._transcript = _Transcript(screen)
+        self._ui = ScreenUI(screen, status, self._transcript)
         self._sample_tokens = 0
         self._sample_chars = 0
         self._interrupted = False
@@ -523,19 +550,18 @@ class _Worker(threading.Thread):
                     kind = msg.get("type")
                     if kind == Wire.EVENT:
                         event = Wire.event_from_dict(msg["event"])
-                        _write_event(self._screen, event)
+                        self._transcript.event(event)
                         self._update_status(event)
                         continue
                     if kind == Wire.RESULT:
                         result = msg.get("text")
                         break
             if result and result.startswith("Error:"):
-                self._screen.write(f"\n[{result}]\n", kind=Screen.ERROR)
+                self._transcript.note(f"[{result}]\n", Screen.ERROR)
             if self._interrupted:
-                self._screen.write("\n[interrupted]\n", kind=Screen.META)
-            self._screen.write("\n", kind=Screen.DEFAULT)
+                self._transcript.note("[interrupted]\n", Screen.META)
         except OSError as e:
-            self._screen.write(f"\n[error: {e}]\n", kind=Screen.ERROR)
+            self._transcript.note(f"[error: {e}]\n", Screen.ERROR)
         finally:
             self._screen.set_busy(False)
             self._status.idle()
@@ -547,7 +573,7 @@ def _open_messages(screen, client, status):
     back any edits, both over the wire."""
     msgs = client.get_messages()
     if not msgs:
-        screen.write("[no messages yet]\n", kind=Screen.META)
+        screen.write("[no messages yet]\n", kind=Screen.META, block=True)
         return
     context_size, prompt_tokens, sample_chars = status.ctx_snapshot()
     edited, _estimate, modified = screen.prompt_messages_overlay(
@@ -601,7 +627,7 @@ def _open_history(screen, client, status, jobs):
 
     msgs = client.get_messages()
     if not msgs:
-        screen.write("[no history yet]\n", kind=Screen.META)
+        screen.write("[no history yet]\n", kind=Screen.META, block=True)
         return
     tree = screen._convo_history_tree
     if tree is None:
@@ -609,7 +635,7 @@ def _open_history(screen, client, status, jobs):
         screen._convo_history_tree = tree
     tree.ingest(msgs)
     if not tree.nodes():
-        screen.write("[no history yet]\n", kind=Screen.META)
+        screen.write("[no history yet]\n", kind=Screen.META, block=True)
         return
 
     def _preview(node, width, max_lines):
@@ -643,7 +669,7 @@ def _open_models(screen, client, status, registry):
     registry."""
     ids = registry.model_ids()
     if not ids:
-        screen.write("[no models available]\n", kind=Screen.META)
+        screen.write("[no models available]\n", kind=Screen.META, block=True)
         return
     picked = screen.prompt_model_overlay(ids, prices=registry.prices(), favorites=True)
     if picked:
@@ -660,9 +686,9 @@ def _replay_messages(screen, messages):
         if not isinstance(content, str):
             content = str(content)
         if role == "user":
-            screen.write(f"> {content}\n\n", kind=Screen.USER)
+            screen.write(f"> {content}\n", kind=Screen.USER, block=True)
         elif role == "assistant":
-            screen.write(content + "\n\n", kind=Screen.LLM)
+            screen.write(content + "\n", kind=Screen.LLM, block=True)
 
 
 def _session_preview(path, width, max_lines):
@@ -696,12 +722,12 @@ def _load_session(screen, client, status, path):
     viewport, replay the conversation, and follow the restored model. shared by
     :load, the :sessions picker, and the --continue/--sessions resume flags."""
     if not client.load(path):
-        screen.write(f"[load error] {path}\n", kind=Screen.ERROR)
+        screen.write(f"[load error] {path}\n", kind=Screen.ERROR, block=True)
         return
     status.set_model(client.get_info().get("model", ""))
     screen.clear_buffer()
     _replay_messages(screen, client.get_messages())
-    screen.write(f"[loaded {os.path.basename(path)}]\n", kind=Screen.META)
+    screen.write(f"[loaded {os.path.basename(path)}]\n", kind=Screen.META, block=True)
 
 
 def _session_tree_nodes():
@@ -751,7 +777,7 @@ def _open_sessions(screen, client, status):
     from cai.screen.ansi import SGR_DIM_GRAY, SGR_RESET
 
     if not SessionsRegistry.list_sessions():
-        screen.write("[no saved sessions]\n", kind=Screen.META)
+        screen.write("[no saved sessions]\n", kind=Screen.META, block=True)
         return
 
     def _label(node):
@@ -868,10 +894,10 @@ def _save_session(screen, client, path):
     path is empty. the written path comes back from the control op."""
     written = client.save(path or None)
     if written is None:
-        screen.write("[save error]\n", kind=Screen.ERROR)
+        screen.write("[save error]\n", kind=Screen.ERROR, block=True)
         return
     SessionsRegistry.prune(UserConfig.current().max_sessions_mb)
-    screen.write(f"[saved {written}]\n", kind=Screen.META)
+    screen.write(f"[saved {written}]\n", kind=Screen.META, block=True)
 
 
 def _agent_control(name, op):
@@ -1006,7 +1032,7 @@ def _open_agents(screen, client):
         return
     messages = _messages_for(chosen)
     if messages is None:
-        screen.write("[no transcript for this agent]\n", kind=Screen.META)
+        screen.write("[no transcript for this agent]\n", kind=Screen.META, block=True)
         return
     screen.prompt_messages_overlay(messages)
 
@@ -1026,7 +1052,7 @@ def _open_tools(screen, client):
     active = set(client.get_selected_tools())
     available = set(client.get_available_tools())
     if not available:
-        screen.write("[no tools available]\n", kind=Screen.META)
+        screen.write("[no tools available]\n", kind=Screen.META, block=True)
         return
     entries = []
     for name in sorted(available):
@@ -1040,7 +1066,7 @@ def _open_skills(screen, client):
     available = set(client.get_available_skills())
     active = set(client.get_selected_skills())
     if not available:
-        screen.write("[no skills available]\n", kind=Screen.META)
+        screen.write("[no skills available]\n", kind=Screen.META, block=True)
         return
     new_active = screen.prompt_skills_overlay(sorted(available), active)
     client.set_selected_skills(sorted(new_active))
@@ -1106,7 +1132,7 @@ def _open_system(screen, client):
             return
         if sel == "readonly":
             if not composed:
-                screen.write("[no system prompt set]\n", kind=Screen.META)
+                screen.write("[no system prompt set]\n", kind=Screen.META, block=True)
                 continue
             screen.view_in_editor(composed, suffix='.md')
             continue
@@ -1138,7 +1164,7 @@ def _handle_command(screen, client, status, registry, jobs, cmd):
         arg = parts[1].strip()
     if head == "clear":
         if screen._busy:
-            screen.write("[busy — :clear when idle]\n", kind=Screen.META)
+            screen.write("[busy — :clear when idle]\n", kind=Screen.META, block=True)
             return False
         client.set_messages([])
         screen.clear_buffer()
@@ -1151,10 +1177,10 @@ def _handle_command(screen, client, status, registry, jobs, cmd):
         return False
     if head == "load":
         if screen._busy:
-            screen.write("[busy — :load when idle]\n", kind=Screen.META)
+            screen.write("[busy — :load when idle]\n", kind=Screen.META, block=True)
             return False
         if not arg:
-            screen.write("[usage: :load <path>]\n", kind=Screen.META)
+            screen.write("[usage: :load <path>]\n", kind=Screen.META, block=True)
             return False
         _load_session(screen, client, status, os.path.expanduser(arg))
         return False
@@ -1166,34 +1192,34 @@ def _handle_command(screen, client, status, registry, jobs, cmd):
         return False
     if head == "tools":
         if screen._busy:
-            screen.write("[busy — open :tools when idle]\n", kind=Screen.META)
+            screen.write("[busy — open :tools when idle]\n", kind=Screen.META, block=True)
             return False
         _open_tools(screen, client)
         return False
     if head == "skills":
         if screen._busy:
-            screen.write("[busy — open :skills when idle]\n", kind=Screen.META)
+            screen.write("[busy — open :skills when idle]\n", kind=Screen.META, block=True)
             return False
         _open_skills(screen, client)
         return False
     if head == "messages":
         if screen._busy:
-            screen.write("[busy — open :messages when idle]\n", kind=Screen.META)
+            screen.write("[busy — open :messages when idle]\n", kind=Screen.META, block=True)
             return False
         _open_messages(screen, client, status)
         return False
     if head == "history":
         if screen._busy:
-            screen.write("[busy — open :history when idle]\n", kind=Screen.META)
+            screen.write("[busy — open :history when idle]\n", kind=Screen.META, block=True)
             return False
         _open_history(screen, client, status, jobs)
         return False
     if head == "continue":
         if screen._busy:
-            screen.write("[busy — :continue when idle]\n", kind=Screen.META)
+            screen.write("[busy — :continue when idle]\n", kind=Screen.META, block=True)
             return False
         if not client.get_messages():
-            screen.write("[nothing to continue]\n", kind=Screen.META)
+            screen.write("[nothing to continue]\n", kind=Screen.META, block=True)
             return False
         jobs.put(_CONTINUE)
         return False
@@ -1202,13 +1228,13 @@ def _handle_command(screen, client, status, registry, jobs, cmd):
         return False
     if head == "system":
         if screen._busy:
-            screen.write("[busy — open :system when idle]\n", kind=Screen.META)
+            screen.write("[busy — open :system when idle]\n", kind=Screen.META, block=True)
             return False
         _open_system(screen, client)
         return False
     if head == "sessions":
         if screen._busy:
-            screen.write("[busy — open :sessions when idle]\n", kind=Screen.META)
+            screen.write("[busy — open :sessions when idle]\n", kind=Screen.META, block=True)
             return False
         _open_sessions(screen, client, status)
         return False
@@ -1219,9 +1245,9 @@ def _handle_command(screen, client, status, registry, jobs, cmd):
             command.fn(ctx)
         except Exception:
             log.exception("command :%s raised", head)
-            screen.write(f"[command :{head} failed]\n", kind=Screen.META)
+            screen.write(f"[command :{head} failed]\n", kind=Screen.META, block=True)
         return False
-    screen.write(f"[unknown command: :{head}]\n", kind=Screen.META)
+    screen.write(f"[unknown command: :{head}]\n", kind=Screen.META, block=True)
     return False
 
 
@@ -1371,8 +1397,8 @@ def run(*,
     status_loop = _StatusLoop(status, stop)
     status_loop.start()
 
-    screen.write(f"cai — model {model}. type to chat; :q to quit.\n\n",
-                 kind=Screen.META)
+    screen.write(f"cai — model {model}. type to chat; :q to quit.\n",
+                 kind=Screen.META, block=True)
 
     # resume at startup: --continue loads the resolved session directly;
     # --sessions opens the picker. nothing is running yet, so no idle gate.

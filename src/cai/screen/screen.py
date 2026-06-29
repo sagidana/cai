@@ -216,7 +216,7 @@ class Screen:
         except OSError:
             pass
 
-    def write(self, text, kind=None):
+    def write(self, text, kind=None, block=False):
         """append text to the content buffer and refresh the viewport.
 
         when kind is one of the class kind constants (USER, LLM, ...), the
@@ -226,16 +226,28 @@ class Screen:
         happen to break on '\\n' keep their color.
 
         kind=None means the caller manages styling itself (raw ANSI in
-        text); the screen leaves _current_kind untouched."""
+        text); the screen leaves _current_kind untouched.
+
+        block=True marks the start of a new logical block (a user prompt, an
+        assistant message, a tool call, a notice): the screen lays down
+        exactly one blank line between it and whatever is already on screen,
+        so block separation is owned here rather than summed from per-caller
+        newlines. streamed continuation chunks pass block=False."""
         if not text: return
-        if kind is not None:
-            text = self._apply_kind(text, kind)
 
         with self._render_lock:
             # handle resize that may have occurred outside the prompt loop
             if self._resize_pending:
                 self._resize_pending = False
                 self._handle_resize()
+
+            sep = ''
+            if block:
+                sep = self._block_separator()
+            if kind is not None:
+                text = self._apply_kind(text, kind, separated=bool(sep))
+            if sep:
+                text = sep + text
 
             self._buffer.append_text(text)
             total = self._buffer.line_count()
@@ -282,7 +294,7 @@ class Screen:
             else:
                 self._write_pending = True
 
-    def _apply_kind(self, text, kind):
+    def _apply_kind(self, text, kind, separated=False):
         """derive the SGR/newline prefix required to render text as kind.
 
         three things the state transition takes care of:
@@ -292,23 +304,41 @@ class Screen:
              new one.
           3. same kind but last write ended with '\\n' - wrap_ansi resets
              style tracking per segment, so re-open the style or the new
-             segment would render in default color."""
+             segment would render in default color.
+
+        separated=True means a block separator already terminated the line,
+        so the mid-line '\\n' is not needed - the line is treated as already
+        ended for the prefix decision."""
         style = self._KIND_STYLES.get(kind, '')
         prev = self._current_kind
+        partial = self._buffer._partial and not separated
         prefix = ''
         if kind != prev:
-            if self._buffer._partial:
+            if partial:
                 prefix += '\n'
             if prev is not None and self._KIND_STYLES.get(prev):
                 prefix += SGR_RESET
             if style:
                 prefix += style
-        elif not self._buffer._partial and style:
+        elif not partial and style:
             prefix += style
         self._current_kind = kind
         if not prefix:
             return text
         return prefix + text
+
+    def _block_separator(self):
+        """leading whitespace that leaves exactly one blank line before the
+        next block. nothing when the buffer is empty or already ends on a
+        blank line; a single '\\n' after a finished, non-blank line; '\\n\\n'
+        to terminate a partial line and then drop one blank line."""
+        if self._buffer.line_count() == 0:
+            return ''
+        if self._buffer._partial:
+            return '\n\n'
+        if self._buffer.ends_blank():
+            return ''
+        return '\n'
 
     def set_status(self, text, right=''):
         """update status bar text and refresh. right is rendered flush against
