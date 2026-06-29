@@ -512,12 +512,17 @@ class WiredAgent:
         if op == "set_model":
             agent.set_model(value)
             return True, None, None
+        if op == "set_system_prompt_base":
+            agent.set_system_prompt_base(value)
+            return True, None, None
         if op == "get_info":
             children = list(agent.children)
             value = {}
             value["name"] = agent.name
             value["model"] = agent.model
             value["children"] = children
+            value["system_prompt"] = agent.system_prompt
+            value["system_prompt_base"] = agent._system_prompt
             return True, value, None
         if op == "save":
             # value is the target path, or None for a default timestamped file;

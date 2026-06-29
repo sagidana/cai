@@ -308,6 +308,12 @@ class Agent:
         self.messages = messages
         self._fire_messages_event(HookEvent.MESSAGES_MUTATED)
 
+    def set_system_prompt_base(self, base):
+        """replace the base system prompt in memory; the system_prompt property
+        recomposes it with the active skills on the next read, so this is all the
+        live agent needs. the change is never written to disk."""
+        self._system_prompt = base
+
     def clone(self, name=None, ui=None):
         """build a new Agent carrying this one's state - a deep copy of the
         conversation plus the model, base prompt, active tools and skills, hooks,

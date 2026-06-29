@@ -56,6 +56,7 @@ _PALETTE_COMMANDS = [
     ("history", "fork back to an earlier point in this conversation"),
     ("continue", "continue the conversation without a new prompt"),
     ("agents", "live view of sub-agents"),
+    ("system", "view / edit the system prompt"),
     ("sessions", "load a saved session"),
     ("config", "edit the live session settings"),
     ("save", "save the session (optional path)"),
@@ -359,6 +360,9 @@ class AgentClient:
 
     def set_model(self, model):
         self._call("set_model", model)
+
+    def set_system_prompt_base(self, base):
+        self._call("set_system_prompt_base", base)
 
     def save(self, path):
         return self._call("save", path)
@@ -1042,6 +1046,81 @@ def _open_skills(screen, client):
     client.set_selected_skills(sorted(new_active))
 
 
+def _system_prompt_nodes(composed, base):
+    nodes = []
+
+    readonly = {}
+    readonly["id"] = "readonly"
+    readonly["parent"] = None
+    readonly["label"] = "full prompt (read-only)"
+    readonly["text"] = composed
+    readonly["empty"] = "(no system prompt set)"
+    nodes.append(readonly)
+
+    edit = {}
+    edit["id"] = "base"
+    edit["parent"] = None
+    edit["label"] = "base (edit — in memory)"
+    edit["text"] = base
+    edit["empty"] = "(empty)"
+    nodes.append(edit)
+
+    return nodes
+
+
+def _system_preview(node, width, max_lines):
+    from cai.screen.ansi import wrap_ansi, SGR_RESET, SGR_DIM_GRAY
+
+    text = node["text"]
+    if not text:
+        return [f"{SGR_DIM_GRAY}{node['empty']}{SGR_RESET}"]
+    return wrap_ansi(text, width)[:max_lines]
+
+
+def _open_system(screen, client):
+    """`:system` overlay. two options: the full composed prompt (read-only), and
+    the agent's system-prompt base, editable in nvim. saving the base pushes it
+    to the live agent (which recomposes the prompt with the current skills); the
+    change is in memory only and never touches disk."""
+    info = client.get_info()
+    composed = info.get("system_prompt") or ""
+    base = info.get("system_prompt_base") or ""
+    nodes = _system_prompt_nodes(composed, base)
+
+    def _fetch():
+        return nodes
+
+    def _label(node):
+        return node["label"]
+
+    # loop so closing the editor returns to the system view, not the main
+    # conversation; only ESC at the overlay exits.
+    while True:
+        sel = screen.prompt_tree_overlay(
+            _fetch,
+            label_fn=_label,
+            preview_fn=_system_preview,
+            title="system prompt",
+            hints='  j/k ↵:open ESC:cancel')
+        if sel is None:
+            return
+        if sel == "readonly":
+            if not composed:
+                screen.write("[no system prompt set]\n", kind=Screen.META)
+                continue
+            screen.view_in_editor(composed, suffix='.md')
+            continue
+        edited = screen.edit_in_editor(base, suffix='.md')
+        if edited is None:
+            continue
+        client.set_system_prompt_base(edited)
+        base = edited
+        info = client.get_info()
+        composed = info.get("system_prompt") or ""
+        base = info.get("system_prompt_base") or ""
+        nodes = _system_prompt_nodes(composed, base)
+
+
 def _handle_command(screen, client, status, registry, jobs, cmd):
     """dispatch a `:`-command. returns True to quit the loop, else False.
 
@@ -1120,6 +1199,12 @@ def _handle_command(screen, client, status, registry, jobs, cmd):
         return False
     if head == "agents":
         _open_agents(screen, client)
+        return False
+    if head == "system":
+        if screen._busy:
+            screen.write("[busy — open :system when idle]\n", kind=Screen.META)
+            return False
+        _open_system(screen, client)
         return False
     if head == "sessions":
         if screen._busy:
