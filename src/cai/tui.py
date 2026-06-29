@@ -1149,13 +1149,17 @@ def run(*,
         temperature=None,
         max_steps=None,
         resume_path=None,
-        pick_session=False):
+        pick_session=False,
+        initial_prompt=None):
     """launch the interactive TUI around a fresh in-process Agent. blocks until
     the user quits (:q, Ctrl-C, or EOF). returns the process exit code.
 
     resume_path loads that saved session at startup (--continue); pick_session
     opens the :sessions picker at startup (--sessions). either resumes the chosen
-    session in place, so autosave writes back to it."""
+    session in place, so autosave writes back to it.
+
+    initial_prompt, when given, is submitted as the first user turn at startup
+    (e.g. `cai -i -- hello`) - the TUI comes up, runs it, then takes over input."""
     from cai import config
     from cai.agent import Agent
     from cai.hooks import HookEvent
@@ -1291,6 +1295,12 @@ def run(*,
         _load_session(screen, client, status, resume_path)
     elif pick_session:
         _open_sessions(screen, client, status)
+
+    # a prompt passed on the command line with -i: hand it to the worker as the
+    # first turn. the worker echoes the USER event and streams the answer just
+    # as if the user had typed it, then the input loop below takes over.
+    if initial_prompt and initial_prompt.strip():
+        jobs.put(initial_prompt)
 
     try:
         while not stop.is_set():

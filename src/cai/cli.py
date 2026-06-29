@@ -359,7 +359,8 @@ def main(argv=None):
                        temperature=args.temperature,
                        max_steps=args.max_steps,
                        resume_path=resume_path,
-                       pick_session=pick_session)
+                       pick_session=pick_session,
+                       initial_prompt=prompt)
 
     messages = _build_messages(args, prompt, parser)
     if not messages:
