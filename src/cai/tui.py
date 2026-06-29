@@ -1226,7 +1226,9 @@ def run(*,
     from cai.api import OpenAiApi
     cfg = config.load_config()
     fallback_limit = int(config.load_optional("default_context_size", _DEFAULT_CONTEXT_SIZE))
-    registry = ModelsRegistry(OpenAiApi(cfg.base_url, config.load_api_key()))
+    registry = ModelsRegistry(OpenAiApi(cfg.base_url,
+                                        config.load_api_key(),
+                                        ssl_verify=config.load_optional("ssl_verify", True)))
     model = client.get_info().get("model", "")
     status = _Status(screen, model, registry, fallback_limit)
     status.refresh()   # initial idle paint, before the status thread takes over

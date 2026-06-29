@@ -6,7 +6,11 @@ Two files under ~/.config/cai/:
 
 config.json is parsed into a Config dataclass so its fields are typed and
 discoverable (cfg.base_url, cfg.model) rather than string dict keys. Nothing is
-defaulted: a missing or incomplete config stops cai with a clear message."""
+defaulted: a missing or incomplete config stops cai with a clear message.
+
+Optional keys (read via load_optional, never required) may also appear:
+  ssl_verify - false to skip TLS certificate verification on the api layer,
+               for self-signed/internal endpoints; defaults to true."""
 import os
 import json
 import logging

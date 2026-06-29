@@ -374,7 +374,9 @@ def main(argv=None):
 
     run = Run(messages,
               model,
-              OpenAiApi(cfg.base_url, api_key),
+              OpenAiApi(cfg.base_url,
+                        api_key,
+                        ssl_verify=config.load_optional("ssl_verify", True)),
               system_prompt=system_prompt,
               tools=tools,
               skills=skills,

@@ -164,7 +164,10 @@ class Agent:
             cfg = config.load_config()
         if model is None: model = cfg.model
         if name is None: name = _new_name()
-        if api is None: api = OpenAiApi(cfg.base_url, config.load_api_key())
+        if api is None:
+            api = OpenAiApi(cfg.base_url,
+                            config.load_api_key(),
+                            ssl_verify=config.load_optional("ssl_verify", True))
 
         self.name = name
         self.model = model
