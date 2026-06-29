@@ -17,6 +17,7 @@ stdin/stdout behaviour:
 - when stdout is a TTY the answer streams there live; when stdout is piped, dim
   progress goes to stderr and the clean answer is printed to stdout once at the
   end - so `cai ... | tool` gets exactly the result."""
+import os
 import argparse
 import sys
 
@@ -158,6 +159,11 @@ def build_parser():
                         default=None,
                         metavar="PATH",
                         help="include a file's contents as context")
+    parser.add_argument("--cwd",
+                        default=None,
+                        metavar="DIR",
+                        help="run from this directory, so --file, tools and the LLM "
+                             "see paths relative to it")
     parser.add_argument("--model",
                         default=None,
                         help="model id (default: the `model` field in config.json)")
@@ -302,6 +308,16 @@ def main(argv=None):
     if args.command == "extend":
         from cai import extend
         return extend.run(args, parser)
+
+    # --cwd: move the whole process before any config/file/tool work, so --file,
+    # the fs tool sandbox (which resolves against os.getcwd()) and every other
+    # tool see paths relative to the requested directory.
+    if args.cwd is not None:
+        try:
+            os.chdir(args.cwd)
+        except OSError as e:
+            print(f"cannot change to --cwd {args.cwd!r}: {e}", file=sys.stderr)
+            return 1
 
     # heavy imports happen only here - after argcomplete has short-circuited, so
     # tab completion never pays for them.
