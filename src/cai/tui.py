@@ -176,7 +176,7 @@ class _Status:
         self._phase = None         # None | "tool" | "waiting"
         self._stream_kind = None   # None | "responding" | "reasoning"
         self._last_char = 0.0      # time.monotonic() of the last streamed token
-        self._tokens = 0           # estimated tokens in the conversation so far
+        self._tokens = 0           # exact tokens from the api's usage channel (0 until a sample)
         self._context_limit = fallback_limit
         self._limit_model = None   # the model _context_limit was resolved for
         self._resolve_limit()
@@ -219,8 +219,8 @@ class _Status:
             self._stream_kind = None
 
     def set_tokens(self, tokens):
-        # the conversation's estimated token count, computed by the worker (it
-        # owns the agent's messages); we only format it into the ctx readout.
+        # the exact token count from the api's usage channel, pushed by the
+        # worker when a real sample arrives; we only format it into the readout.
         with self._lock:
             self._tokens = tokens
 
@@ -518,21 +518,18 @@ class _Worker(threading.Thread):
         if not tokens:
             tokens = report.get("prompt_tokens", 0) + report.get("completion_tokens", 0)
         if not tokens: return
-        self._sample_tokens = tokens
-        self._sample_chars = usage.message_chars(self._client.get_messages())
-        self._status.set_sample(self._sample_tokens, self._sample_chars)
-
-    def _push_tokens(self):
-        tokens = usage.estimate_tokens(self._client.get_messages(),
-                                       self._sample_tokens,
-                                       self._sample_chars)
+        # the api's exact count - the official readout. also kept as the
+        # calibration sample the :messages overlay uses for its per-message math.
+        messages = self._client.get_messages()
         self._status.set_tokens(tokens)
+        self._sample_tokens = tokens
+        self._sample_chars = usage.message_chars(messages)
+        self._status.set_sample(self._sample_tokens, self._sample_chars)
 
     def _run_one(self, text):
         self._interrupted = False
         self._screen.set_busy(True)
         self._status.busy()
-        self._push_tokens()
         ui = self._ui
         try:
             if text is _CONTINUE:
@@ -565,7 +562,6 @@ class _Worker(threading.Thread):
         finally:
             self._screen.set_busy(False)
             self._status.idle()
-            self._push_tokens()
 
 
 def _open_messages(screen, client, status):
@@ -1147,6 +1143,13 @@ def _open_system(screen, client):
         nodes = _system_prompt_nodes(composed, base)
 
 
+def _refresh_tokens(status):
+    # resync the ctx readout after a client-side message change (e.g. :clear) the
+    # worker is not in the loop for: the official count drops to '?' since no api
+    # sample covers the new messages until the next turn produces one.
+    status.set_tokens(0)
+
+
 def _handle_command(screen, client, status, registry, jobs, cmd):
     """dispatch a `:`-command. returns True to quit the loop, else False.
 
@@ -1168,6 +1171,7 @@ def _handle_command(screen, client, status, registry, jobs, cmd):
             return False
         client.set_messages([])
         screen.clear_buffer()
+        _refresh_tokens(status)
         return False
     if head == "save":
         path = ""

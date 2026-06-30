@@ -48,8 +48,11 @@ def fmt_ktok(n):
 
 
 def format_ctx(tokens, context_limit):
-    """the status-line context string, e.g. 'ctx 45% (12kb/200kb)'."""
+    """the status-line context string, e.g. 'ctx 5% (5kb/256kb)'.
+
+    tokens is the exact count from the api's usage channel - it only refreshes
+    when a real sample arrives, so it reads '?' until the first one."""
     pct = "?"
-    if context_limit:
+    if context_limit and tokens:
         pct = f"{tokens / context_limit:.0%}"
     return f"ctx {pct} ({fmt_ktok(tokens)}/{fmt_ktok(context_limit)})"
