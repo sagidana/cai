@@ -118,7 +118,7 @@ def make_agent(tools=None, skills=None, hooks=None, api=None):
     agent.interrupt = threading.Event()
     agent._killed = threading.Event()
     agent._steer = SteerQueue()
-    agent._running = threading.Event()
+    agent._run_lock = threading.Lock()
     agent.messages = []
     agent.children = []
     return agent
@@ -337,6 +337,39 @@ def test_read_control_answered_during_a_running_turn(serve):
     ok, info, error = wire.control("get_info")
     assert ok is True
     release.set()
+
+
+def test_mutating_control_defers_until_the_turn_ends(serve):
+    # a state-mutating op sent mid-run is queued to the worker: its answer must
+    # arrive only after the turn's RESULT, and the change must have applied.
+    started = threading.Event()
+    release = threading.Event()
+
+    class BlockApi:
+        def chat(self, messages, model, **kwargs):
+            started.set()
+            def gen():
+                release.wait(2)
+                yield ("done", None, None, {})
+            return gen()
+
+    agent = make_agent(api=BlockApi())
+    wire = serve(agent)
+    wire.send_submit("hi")
+    assert started.wait(2)
+    wire.send_control("set_system_prompt_base", "NEW BASE")
+    release.set()
+
+    kinds = []
+    answered = False
+    while not answered:
+        for msg in wire.recv():
+            kinds.append(msg["type"])
+            if msg["type"] != Wire.CONTROL_RESULT: continue
+            assert msg["ok"] is True
+            answered = True
+    assert kinds.index(Wire.RESULT) < kinds.index(Wire.CONTROL_RESULT)
+    assert agent.system_prompt_base == "NEW BASE"
 
 
 def test_control_unknown_op_errs(serve):
@@ -734,10 +767,11 @@ def test_steer_over_wire_folds_in_mid_run(serve):
     assert ("user", "also consider Y") in seen   # folded in after the tool, before turn 2
 
 
-def test_idle_steer_over_wire_runs_as_a_submit(serve):
-    # with no run in flight, the reader's steer() returns False, so the STEER is
-    # queued as a normal submit on the worker - it streams a RESULT back to the
-    # client (it does not run silently on the reader thread).
+def test_idle_steer_over_wire_runs_as_a_drain_turn(serve):
+    # with no run in flight, the reader's steer() queues the text and returns
+    # False, so a drain-run is queued to the worker - it delivers the text as a
+    # user turn and streams a RESULT back to the client (it does not run
+    # silently on the reader thread).
     agent = make_agent(api=FakeApi(chunks=["reacted"]))
     wire = serve(agent)
     wire.send_steer("a sub-agent finished: here is its result")

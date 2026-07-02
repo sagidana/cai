@@ -78,6 +78,11 @@ class SteerQueue:
             self._messages = []
         return messages
 
+    def pending(self):
+        """whether any steered texts are queued (a drain would return some)."""
+        with self._lock:
+            return len(self._messages) > 0
+
 
 def _parse_args(arguments):
     """parse a tool call's raw argument blob into a dict. returns (ok, args): ok

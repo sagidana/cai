@@ -32,7 +32,7 @@ from cai.llm import LLMError, MaxStepsReached, call_llm
 # only - it never runs - so an editor resolves cai.Agent / cai.Run to their real
 # definitions (go-to-def) without paying the import.
 if TYPE_CHECKING:
-    from cai.agent import Agent, Run
+    from cai.agent import Agent, Run, RunInFlight
     from cai.api import ApiError
     from cai.environment import Environment
     from cai.tools import ToolsRegistry, tool, mcp_server
@@ -57,6 +57,7 @@ __all__ = [
     "call_llm",
     "Agent",
     "Run",
+    "RunInFlight",
     "Environment",
     "settings",
 ]
@@ -70,6 +71,9 @@ def __getattr__(name):
     if name == "Run":
         from cai.agent import Run
         return Run
+    if name == "RunInFlight":
+        from cai.agent import RunInFlight
+        return RunInFlight
     if name == "Environment":
         from cai.environment import Environment
         return Environment

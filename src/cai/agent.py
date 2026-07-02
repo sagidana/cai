@@ -45,6 +45,13 @@ from cai.hooks import HookContext, HookEvent, HooksRegistry
 log = logging.getLogger("cai")
 
 
+class RunInFlight(RuntimeError):
+    """a second run was started while one is consuming the conversation - the
+    agent serializes runs, so iterate one handle to completion (or wait() it)
+    before starting the next. raised at iteration time, when the losing run
+    would first touch the conversation."""
+
+
 def _combine_prompts(base, skills_prompt):
     """join the base system prompt with the activated skills' prompt (base
     first, skills after), or None when both are empty."""
@@ -194,10 +201,12 @@ class Agent:
         self.interrupt = interrupt
         self._killed = threading.Event()
         self._steer = SteerQueue()
-        # set while a run is being streamed (see _stream). steer() reads it to
-        # tell a steer that must fold into the in-flight run from one that has to
-        # start a fresh run because the agent is idle.
-        self._running = threading.Event()
+        # held while a run streams (see _stream): the one conversation is only
+        # ever consumed by one run at a time. a second concurrent run raises
+        # RunInFlight; steer() reads locked() to tell an in-flight run (which
+        # drains the steer queue on its own) from an idle agent (which needs a
+        # fresh run started).
+        self._run_lock = threading.Lock()
         self.messages = []
         self.children = []   # ids of the sub-agents launched this session
         self.tools_registry = ToolsRegistry(self.env)
@@ -470,42 +479,69 @@ class Agent:
         return self._killed.is_set()
 
     def steer(self, text, run_on_idle=True):
-        """fold `text` into the conversation as a user turn; return whether it was
-        handled here.
+        """queue `text` for the conversation; return whether its delivery is
+        arranged here.
 
-        while a run is in flight, always queue it (call_llm drains it at the next
-        turn boundary) and return True.
+        the text always goes onto the steer queue - the one path a steer takes
+        into the conversation. call_llm drains the queue at every turn boundary
+        (the first included), so:
 
-        while idle there is no run to fold into: with run_on_idle True, behave like
-        a submit and run the turn here, returning True; with run_on_idle False, do
-        nothing and return False, so the caller (e.g. a serving WiredAgent) can
-        drive the turn its own way - as a normal submit on its worker thread, not on
-        the thread that happened to call steer.
+        - while a run is consuming, it folds the text in at its next boundary;
+          returns True.
+        - while idle with run_on_idle True, a fresh run(None) is driven here (on
+          the calling thread) and drains it as its first turn; returns True. if
+          another run wins the race to start, that run delivers it instead -
+          the push-then-check order is what closes the window in which two
+          idle steers could each start a run of their own.
+        - while idle with run_on_idle False, nothing is started; returns False
+          so the caller (a serving WiredAgent) can drive the turn its own way -
+          the text stays queued for whichever run comes next.
 
-        safe to call from another thread."""
-        if self._running.is_set():
-            self._steer.push(text)
+        a text pushed after a run's final drain point stays queued and is
+        delivered at the next run's first turn boundary. safe to call from any
+        thread."""
+        self._steer.push(text)
+        if self._run_lock.locked():
             return True
         if not run_on_idle:
             return False
-        self.run(text).wait()
+        try:
+            self.run(None).wait()
+        except RunInFlight:
+            # another run won the start race; it drains the queue for us.
+            pass
         return True
+
+    def steer_pending(self):
+        """whether steered texts are queued with no run consuming them - i.e. a
+        run(None) is needed for them to be delivered. a serving WiredAgent reads
+        this to skip a queued drain-run another run already covered."""
+        if self._run_lock.locked():
+            return False
+        return self._steer.pending()
 
     def _stream(self, stream, prompt=None, strict_format=None):
         """the orchestration: stream one call_llm turn over the live conversation.
         yields Event objects and returns the final answer text. combines the
         system prompt and translates the hooks list here (not at construction) so
-        skills and hooks added since are reflected. marks the agent running for the
-        life of the stream, so a concurrent steer folds in rather than starting a
-        second run (cleared in finally, however the stream ends).
+        skills and hooks added since are reflected. holds the run lock for the
+        life of the stream - the conversation is only ever consumed by one run,
+        so a concurrent one raises RunInFlight (loudly, where today's silent
+        interleaving would corrupt the messages) and a concurrent steer folds in
+        rather than starting a second run (released in finally, however the
+        stream ends).
 
         strict_format, when set, wraps the run in cai.strict: the answer is
         validated and the turn reissued until it matches. enforcement pins
         temperature to 0 and forces non-streaming (validation needs the whole
         answer before it can pass judgement)."""
-        self._running.set()
+        if not self._run_lock.acquire(blocking=False):
+            raise RunInFlight(f"agent {self.name!r}: a run is already consuming the conversation")
         try:
+            # the prompt lands only under the lock: a run that loses the race
+            # raises above without leaving its user turn in the conversation.
             if prompt is not None:
+                self.messages.append({"role": "user", "content": prompt})
                 yield Event(type=EventType.USER, text=prompt)
             skills_prompt = self.skills_registry.system_prompt
             system_prompt = _combine_prompts(self._system_prompt, skills_prompt)
@@ -556,12 +592,15 @@ class Agent:
                                        hooks_data={"agent": self})
             return text
         finally:
-            self._running.clear()
+            self._run_lock.release()
 
     def run(self, prompt=None, *, strict_format=None):
-        """append `prompt` as a user turn (if given) and return a handle over the
-        agent's live conversation. Iterate it to stream events; `messages`
-        keeps growing, so the next run continues this conversation.
+        """return a handle over the agent's live conversation; iterating it
+        appends `prompt` as a user turn (if given) and streams events. the
+        append happens at iteration, under the run lock (see _stream), so a run
+        that loses to a concurrent one raises RunInFlight without touching the
+        conversation. `messages` keeps growing, so the next run continues this
+        conversation.
 
         strict_format is a per-run flag (not agent state): it constrains only this
         answer's shape - 'json', 'regex:<pat>' or 'regex-each-line:<pat>'."""
@@ -570,8 +609,6 @@ class Agent:
             # a killed agent never runs again: re-arm the interrupt so the run
             # winds down at once instead of calling the model.
             self.interrupt.set()
-        if prompt is not None:
-            self.messages.append({"role": "user", "content": prompt})
         return RunHandle(self, self.stream, prompt, strict_format=strict_format)
 
     def gate(self, options, prompt, *, system_prompt=None):

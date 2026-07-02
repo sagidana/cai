@@ -53,11 +53,17 @@ from cai.wire import Wire
 
 log = logging.getLogger("cai")
 
-# control ops that mutate the live conversation: these are queued to the worker so
-# they apply between turns and never race the run loop. every other control op
-# (reads, and atomic config writes like set_model / set_selected_*) is answered
-# inline on the reader thread, so a poll is served even while a turn is running.
-_DEFERRED_OPS = ("set_messages", "load")
+# control ops that mutate live agent state a run reads - the conversation, the
+# tool/skill registries, the base prompt: these are queued to the worker so they
+# apply between turns and never race the run loop. every other control op (reads
+# - get_messages serves an atomic list() snapshot - and set_model, a single
+# attribute assignment) is answered inline on the reader thread, so a poll is
+# served even while a turn is running.
+_DEFERRED_OPS = ("set_messages",
+                 "load",
+                 "set_selected_tools",
+                 "set_selected_skills",
+                 "set_system_prompt_base")
 
 
 def _tool_names(tools):
@@ -212,8 +218,9 @@ class WiredAgent:
     a time, so the agent's one conversation is only ever touched serially:
 
       reader (select): SUBMIT/CONTROL -> worker queue  (touch agent state serially)
-                       STEER -> agent.steer            (folds into a running turn;
-                                                        when idle, queued as a submit)
+                       STEER -> agent.steer            (queued; a running turn
+                                                        drains it, else the worker
+                                                        runs a drain-turn)
                        INTERRUPT -> agent.stop          (mid-run, thread-safe)
                        REPLY -> WireUI.resolve          (first answer wins)
       worker:          runs each queued turn / control op. a turn's EVENTs and
@@ -343,12 +350,12 @@ class WiredAgent:
 
     def _dispatch(self, wire, msg):
         """route one inbound message from `wire`. steer / interrupt / reply run
-        here on the reader thread, as do read and atomic-config control ops -
+        here on the reader thread, as do the read control ops and set_model -
         answered inline via _run_control so a poll is served even while a turn
-        runs. only a turn and the conversation-mutating control ops (_DEFERRED_OPS)
-        are queued to the worker, which applies them serially. kill bites the run
-        now and is also queued so it acks and ends serving. a control op carries
-        its origin wire so its reply is unicast back."""
+        runs. a turn and the state-mutating control ops (_DEFERRED_OPS) are
+        queued to the worker, which applies them serially, between turns. kill
+        bites the run now and is also queued so it acks and ends serving. a
+        control op carries its origin wire so its reply is unicast back."""
         kind = msg.get("type")
         if kind == Wire.SUBMIT:
             # a None text is a continue: _run_turn -> agent.run(None) re-enters
@@ -369,13 +376,13 @@ class WiredAgent:
             self._run_control(op, msg.get("value"), wire)
             return
         if kind == Wire.STEER:
-            # while a run is in flight steer() queues the text (folded in at the next
-            # boundary) and returns True. while idle it returns False without acting,
-            # so we run it as a normal submit on the worker - which broadcasts to
-            # every client - instead of on this reader thread.
+            # steer() always queues the text; True means a run in flight drains
+            # it at its next boundary. False means nothing is consuming - queue
+            # a drain-run so the worker (never this reader thread) delivers it,
+            # broadcasting to every client like any other turn.
             text = msg.get("text") or ""
             if not self.agent.steer(text, run_on_idle=False):
-                self._work.put(("submit", text))
+                self._work.put(("steer-run",))
             return
         if kind == Wire.INTERRUPT:
             self.agent.stop()
@@ -394,6 +401,11 @@ class WiredAgent:
             try:
                 if kind == "submit":
                     self._run_turn(item[1])
+                elif kind == "steer-run":
+                    # drain queued steer texts as a fresh turn - unless a run
+                    # that started in the meantime already delivered them.
+                    if self.agent.steer_pending():
+                        self._run_turn(None)
                 elif kind == "control":
                     self._run_control(item[1], item[2], item[3])
                     if item[1] == "kill":
@@ -491,7 +503,11 @@ class WiredAgent:
             agent.kill()
             return True, None, None
         if op == "get_messages":
-            return True, agent.get_messages(), None
+            # a snapshot: list() of a list is one atomic C-level copy under the
+            # GIL, so a turn mutating - or strict.py shrinking - the live list
+            # on the worker can never tear this reply mid-serialization.
+            # message dicts are never mutated after append, so shallow is enough.
+            return True, list(agent.get_messages()), None
         if op == "set_messages":
             agent.set_messages(value)
             return True, None, None
@@ -525,9 +541,10 @@ class WiredAgent:
             value["system_prompt_base"] = agent.system_prompt_base
             return True, value, None
         if op == "save":
-            # value is the target path, or None for a default timestamped file;
-            # the path written comes back to the client. control ops run on the
-            # worker thread between turns, so this never races a live run.
+            # value is the target path, or None for the agent's own <name>.flow;
+            # the path written comes back to the client. answered inline, even
+            # mid-run: save() snapshots the conversation via list(self.messages)
+            # (the same atomic-copy argument as get_messages above).
             return True, agent.save(value), None
         if op == "load":
             agent.load(value)

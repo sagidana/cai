@@ -6,7 +6,9 @@ given turn, so the injected user turn can be observed. No network, no config.
 """
 import threading
 
-from cai.agent import Agent
+import pytest
+
+from cai.agent import Agent, RunInFlight
 from cai.environment import Environment
 from cai.llm import call_llm, SteerQueue
 from cai.skills import SkillsRegistry
@@ -70,7 +72,7 @@ def bare_agent(tools_registry, api):
     agent.interrupt = threading.Event()
     agent._killed = threading.Event()
     agent._steer = SteerQueue()
-    agent._running = threading.Event()
+    agent._run_lock = threading.Lock()
     agent.messages = []
     agent.children = []
     return agent
@@ -194,19 +196,115 @@ def test_agent_steer_while_idle_runs_a_turn_at_once():
     assert ("assistant", "done") in seen
 
 
-def test_agent_steer_run_on_idle_false_is_a_noop_when_idle():
-    # an idle agent with run_on_idle=False does nothing and returns False, leaving
-    # the caller to drive the turn its own way.
+def test_agent_steer_run_on_idle_false_queues_without_running():
+    # an idle agent with run_on_idle=False queues the text and returns False,
+    # leaving the caller to drive the turn its own way - whichever run comes
+    # next drains the queued text at its first boundary.
     agent = bare_agent(ToolsRegistry.for_tools([]), ToolThenTextApi())
     assert agent.steer("x", run_on_idle=False) is False
     assert agent.messages == []                  # nothing ran
-    assert agent._steer.drain() == []            # nothing queued
+    assert agent.steer_pending() is True
+    assert agent._steer.drain() == ["x"]         # queued for the next run
 
 
 def test_agent_steer_while_running_queues_and_returns_true():
     # a run in flight: steer always queues (run_on_idle is irrelevant) and reports
     # True - the in-flight run folds it in at its next boundary.
     agent = bare_agent(ToolsRegistry.for_tools([]), ToolThenTextApi())
-    agent._running.set()                         # pretend a run is streaming
+    agent._run_lock.acquire()                    # pretend a run is streaming
     assert agent.steer("later", run_on_idle=False) is True
+    assert agent.steer_pending() is False        # the "run" will drain it
     assert agent._steer.drain() == ["later"]
+
+
+# --------------------------------------------------------------------------
+# run serialization (RunInFlight)
+# --------------------------------------------------------------------------
+
+def test_concurrent_run_raises_run_in_flight():
+    started = threading.Event()
+    release = threading.Event()
+
+    class BlockApi:
+        def chat(self, messages, model, **kwargs):
+            def gen():
+                started.set()
+                release.wait(2)
+                yield ("done", None, None, {})
+            return gen()
+
+    agent = bare_agent(ToolsRegistry.for_tools([]), BlockApi())
+    first = agent.run("hi")
+    thread = threading.Thread(target=first.wait, daemon=True)
+    thread.start()
+    assert started.wait(2)
+    with pytest.raises(RunInFlight):
+        agent.run("again").wait()
+    release.set()
+    thread.join(2)
+    assert first.text == "done"
+
+
+def test_losing_run_leaves_no_user_turn_behind():
+    # the prompt is appended under the run lock, at iteration: a run that loses
+    # the race raises without polluting the conversation with its user turn.
+    started = threading.Event()
+    release = threading.Event()
+
+    class BlockApi:
+        def chat(self, messages, model, **kwargs):
+            def gen():
+                started.set()
+                release.wait(2)
+                yield ("done", None, None, {})
+            return gen()
+
+    agent = bare_agent(ToolsRegistry.for_tools([]), BlockApi())
+    first = agent.run("winner")
+    thread = threading.Thread(target=first.wait, daemon=True)
+    thread.start()
+    assert started.wait(2)
+    with pytest.raises(RunInFlight):
+        agent.run("loser").wait()
+    release.set()
+    thread.join(2)
+    contents = []
+    for m in agent.messages:
+        if m["role"] != "user": continue
+        contents.append(m["content"])
+    assert contents == ["winner"]
+
+
+def test_concurrent_idle_steers_deliver_every_text_exactly_once():
+    # the TOCTOU hammer: many threads steer an idle agent at once. whichever
+    # run wins the lock drains the queue; the losers' texts ride along (or stay
+    # queued for the final drain-run). every text lands exactly once.
+    class EchoApi:
+        def chat(self, messages, model, **kwargs):
+            def gen():
+                yield ("ok", None, None, {})
+            return gen()
+
+    agent = bare_agent(ToolsRegistry.for_tools([]), EchoApi())
+    threads = []
+    for i in range(8):
+        def _steer(n=i):
+            agent.steer(f"steer-{n}")
+        threads.append(threading.Thread(target=_steer))
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(2)
+    # a text pushed after the winning run's last drain stays queued; one final
+    # drain-run delivers the tail.
+    if agent.steer_pending():
+        agent.run(None).wait()
+
+    contents = []
+    for m in agent.messages:
+        if m["role"] != "user": continue
+        contents.append(m["content"])
+    expected = []
+    for i in range(8):
+        expected.append(f"steer-{i}")
+    assert sorted(contents) == sorted(expected)
