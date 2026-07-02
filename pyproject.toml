@@ -2,10 +2,11 @@
 name = "cai"
 version = "0.1.0"
 description = "A small LLM agent, built from scratch layer by layer."
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "requests",
     "urllib3",
+    "mcp",
 ]
 
 [project.optional-dependencies]
