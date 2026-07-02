@@ -14,6 +14,7 @@ import pytest
 
 from cai import channel
 from cai.agent import Agent
+from cai.environment import Environment
 from cai.hooks import HookEvent
 from cai.llm import SteerQueue
 from cai.skills import SkillsRegistry
@@ -99,6 +100,7 @@ def make_agent(tools=None, skills=None, hooks=None, api=None):
     agent.name = "test"
     agent.model = "m"
     agent.api = api or FakeApi()
+    agent.env = Environment()
     agent._system_prompt = None
     agent.tools_registry = ToolsRegistry.for_tools([])
     _fake_register(agent.tools_registry, tools)

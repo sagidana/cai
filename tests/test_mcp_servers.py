@@ -2,13 +2,15 @@
 command, spawned as a subprocess) and a remote server (a URL, spoken to over
 Streamable HTTP). The local case really spawns the bundled fs server; the remote
 case runs against a stub HTTP server in a background thread - no network either
-way. The conftest fixture resets the declared-server store around every test."""
+way. The conftest fixture gives every test a fresh default Environment, so the
+declared servers never leak between tests."""
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import cai
-from cai.tools import ToolsRegistry, RemoteMCPServer, builtin_mcp_dir
+from cai.environment import Environment, builtin_mcp_dir
+from cai.tools import ToolsRegistry, RemoteMCPServer
 
 
 def _tool_names(server):
@@ -29,7 +31,7 @@ def test_declared_local_command_server_lists_and_dispatches(tmp_path):
     cai.mcp_server("myfs", command=[sys.executable, fs], cwd=str(tmp_path))
 
     # discovery surfaces its tools namespaced under the declared name
-    available = ToolsRegistry.available_tools()
+    available = Environment.default().available_tools()
     assert "myfs__list_files" in available
 
     # selecting + dispatching routes through the declared server (run in cwd)
@@ -52,7 +54,7 @@ def test_declared_server_shadows_on_disk_of_same_name():
     registry = ToolsRegistry()
     server = registry._load_server("fs")
     try:
-        spec = ToolsRegistry.declared_servers()["fs"]
+        spec = Environment.default().server_spec("fs")
         assert spec["command"] == [sys.executable, fs]
         assert "list_files" in _tool_names(server)
     finally:

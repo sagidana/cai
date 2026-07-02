@@ -4,7 +4,7 @@ An extension bundle is a self-contained directory carrying any of skills/*.md,
 tools/*.py (function tools), mcps/*.py (MCP servers), init.py, hooks/init.py,
 commands/init.py and an optional README.md.
 Installing one means dropping the whole directory under
-~/.config/cai/extensions/<name>/, where UserConfig.load() discovers it. This is
+~/.config/cai/extensions/<name>/, where Environment.load() discovers it. This is
 the inverse of the legacy `cai extension`, which flattened skills/ and mcps/ into
 shared dirs; here the bundle stays whole so the new loader can attribute hooks
 and commands back to it.
@@ -20,7 +20,7 @@ import shutil
 import zipfile
 import tempfile
 
-from cai.userconfig import UserConfig
+from cai.environment import extensions_dir, list_extensions
 
 
 # the files/dirs that mark a directory as a real bundle. used both to validate a
@@ -31,7 +31,7 @@ BUNDLE_MARKERS = ("skills", "tools", "mcps", "init.py", "hooks", "commands", "RE
 def _extension_completer(prefix, **kwargs):
     """tab completion for `--remove <name>`: the installed extension names."""
     matching = []
-    for extension in UserConfig.list_extensions():
+    for extension in list_extensions():
         if not extension.name.startswith(prefix): continue
         matching.append(extension.name)
     return matching
@@ -165,7 +165,7 @@ def _cmd_install(source, replace):
                   "hooks/ or commands/ found.")
             return 1
 
-        dest = os.path.join(UserConfig.extensions_dir(), name)
+        dest = os.path.join(extensions_dir(), name)
         if os.path.exists(dest):
             if not replace:
                 print(f"[!] extend: extension '{name}' is already installed at {dest}")
@@ -173,7 +173,7 @@ def _cmd_install(source, replace):
                 return 1
             shutil.rmtree(dest)
 
-        os.makedirs(UserConfig.extensions_dir(), exist_ok=True)
+        os.makedirs(extensions_dir(), exist_ok=True)
         ignore = shutil.ignore_patterns("__pycache__", "*.pyc")
         shutil.copytree(bundle, dest, ignore=ignore)
         print(f"[*] installed extension '{name}' into {dest}")
@@ -194,9 +194,9 @@ def _print_readme(dest):
 
 def _cmd_list():
     """list installed extensions, each with the components it carries."""
-    extensions = UserConfig.list_extensions()
+    extensions = list_extensions()
     if not extensions:
-        print(f"no extensions installed under {UserConfig.extensions_dir()}")
+        print(f"no extensions installed under {extensions_dir()}")
         return 0
     for extension in extensions:
         print(f"{extension.name}  ({', '.join(_components(extension))})")
@@ -225,9 +225,9 @@ def _components(extension):
 
 def _cmd_remove(name):
     """uninstall an extension by deleting its directory."""
-    dest = os.path.join(UserConfig.extensions_dir(), name)
+    dest = os.path.join(extensions_dir(), name)
     if not os.path.isdir(dest):
-        print(f"[!] extend: no extension named '{name}' under {UserConfig.extensions_dir()}")
+        print(f"[!] extend: no extension named '{name}' under {extensions_dir()}")
         return 1
     shutil.rmtree(dest)
     print(f"[*] removed extension '{name}'")

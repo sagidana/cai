@@ -33,6 +33,7 @@ import threading
 
 from cai import config
 from cai.api import OpenAiApi
+from cai.environment import Environment
 from cai.events import Event, EventType
 from cai.llm import call_llm, SteerQueue
 from cai.strict import enforce_strict_format
@@ -146,6 +147,7 @@ class Agent:
                  name=None,
                  model=None,
                  api=None,
+                 env=None,
                  system_prompt=None,
                  tools=None,
                  skills=None,
@@ -172,6 +174,10 @@ class Agent:
         self.name = name
         self.model = model
         self.api = api
+        # the install catalogue this agent resolves tools/skills/hooks against:
+        # the caller's env, else the process default (empty until a frontend
+        # loads it). a sub-agent / clone inherits its parent's explicitly.
+        self.env = env or Environment.default()
         self._system_prompt = system_prompt   # base; combined with skills on demand
         self._hooks = hooks   # [(event, fn), ...] or None; turned into a HooksRegistry per run
         self._ui = ui         # UI hooks prompt through; None -> NULL_UI in call_llm
@@ -194,7 +200,7 @@ class Agent:
         self._running = threading.Event()
         self.messages = []
         self.children = []   # ids of the sub-agents launched this session
-        self.tools_registry = ToolsRegistry()
+        self.tools_registry = ToolsRegistry(self.env)
 
         # registers subagents tools (lazy import: subagent imports Agent in turn).
         # override=True so these bind to *this* agent even if a tool of the same
@@ -206,7 +212,9 @@ class Agent:
 
         for tool in (tools or []): self.tools_registry.select(tool)
 
-        self.skills_registry = SkillsRegistry.for_skills(skills, tools_registry=self.tools_registry)
+        self.skills_registry = SkillsRegistry.for_skills(skills,
+                                                         tools_registry=self.tools_registry,
+                                                         env=self.env)
 
     @property
     def system_prompt(self):
@@ -230,10 +238,18 @@ class Agent:
         """the active (selected) tool names - what set_selected_tools controls."""
         return self.tools
 
+    def _hooks_registry(self):
+        """the registry a run fires: the env's hooks (cai.hook, extensions)
+        first, then this agent's own hooks= list on top, composed fresh per use
+        so hooks added since bootstrap are reflected."""
+        hooks = list(self.env.hooks())
+        hooks.extend(self._hooks or [])
+        return HooksRegistry.from_list(hooks)
+
     def get_available_tools(self):
-        """every tool the agent could select: the install-wide catalogue plus the
+        """every tool the agent could select: the env's catalogue plus the
         tools already registered on this agent (its own function tools included)."""
-        names = set(ToolsRegistry.available_tools())
+        names = set(self.env.available_tools())
         for name in self.tools_registry.names():
             names.add(name)
         return sorted(names)
@@ -259,9 +275,9 @@ class Agent:
         return self.skills
 
     def get_available_skills(self):
-        """every skill the agent could activate: the install-wide catalogue plus
-        the ones already active on this agent."""
-        names = set(SkillsRegistry.available_skills())
+        """every skill the agent could activate: the env's catalogue plus the
+        ones already active on this agent."""
+        names = set(self.env.available_skills())
         for name in self.skills_registry.names():
             names.add(name)
         return sorted(names)
@@ -294,7 +310,7 @@ class Agent:
         - whose messages came straight off disk - apart from an edit and not write
         it back. the agent rides in ctx.data the way call_llm passes it via
         hooks_data, so a hook reaches it uniformly however it was triggered."""
-        hooks = HooksRegistry.from_list(self._hooks)
+        hooks = self._hooks_registry()
         ctx = HookContext(event=event,
                           messages=self.messages,
                           model=self.model,
@@ -343,6 +359,7 @@ class Agent:
         clone = Agent(name=name,
                       model=self.model,
                       api=self.api,
+                      env=self.env,
                       system_prompt=self._system_prompt,
                       tools=tools,
                       skills=self.skills_registry.names(),
@@ -478,9 +495,9 @@ class Agent:
             dispatch = self.tools_registry.dispatch
             if self.tool_result_max_chars:
                 dispatch = _trim_dispatch(dispatch, self.tool_result_max_chars)
-            # the one place the public [(event, fn), ...] list becomes the internal
-            # HooksRegistry that call_llm wants.
-            hooks_registry = HooksRegistry.from_list(self._hooks)
+            # the one place the env hooks and the public [(event, fn), ...] list
+            # become the internal HooksRegistry that call_llm wants.
+            hooks_registry = self._hooks_registry()
             if strict_format:
                 def make_stream(strict_system_prompt):
                     return call_llm(self.messages,
@@ -561,6 +578,7 @@ class Agent:
         run = Run(messages,
                   self.model,
                   self.api,
+                  env=self.env,
                   system_prompt=system_prompt,
                   strict_format=f"regex:^({pattern})$")
         try:
@@ -596,6 +614,7 @@ class Run(RunHandle):
                  model=None,
                  api=None,
                  *,
+                 env=None,
                  system_prompt=None,
                  tools=None,
                  skills=None,
@@ -610,6 +629,7 @@ class Run(RunHandle):
                  strict_format=None):
         agent = Agent(model=model,
                       api=api,
+                      env=env,
                       system_prompt=system_prompt,
                       tools=tools,
                       skills=skills,

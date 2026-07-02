@@ -56,20 +56,22 @@ def _stream_out(chunk):
 
 
 def _skill_completer(prefix, **kwargs):
-    from cai.skills import SkillsRegistry
+    # the on-disk view without importing any extension Python - a completion
+    # request should stay cheap.
+    from cai.environment import Environment, list_extensions
 
     matching = []
-    for name in SkillsRegistry.available_skills():
+    for name in Environment(list_extensions()).available_skills():
         if not name.startswith(prefix): continue
         matching.append(name)
     return matching
 
 
 def _tool_completer(prefix, **kwargs):
-    from cai.tools import ToolsRegistry
+    from cai.environment import Environment, list_extensions
 
     matching = []
-    for name in ToolsRegistry.available_tools():
+    for name in Environment(list_extensions()).available_tools():
         if not name.startswith(prefix): continue
         matching.append(name)
     return matching
@@ -324,7 +326,7 @@ def main(argv=None):
     import threading
 
     from cai import config
-    from cai.userconfig import UserConfig
+    from cai.environment import Environment
     from cai.agent import Run
     from cai.api import OpenAiApi
     from cai.ui import TerminalUI
@@ -383,17 +385,18 @@ def main(argv=None):
         parser.error("no prompt: pass -p/--prompt, a prompt after '--', --file, or piped stdin")
 
     model = args.model or cfg.model
-    user_config = UserConfig.load()
+    env = Environment.default().load()
     # the cai.settings skills / tools are auto-activated on every CLI run, merged
     # in on top of any --skill / --tool the user passed.
-    tools = UserConfig.merge_activations(args.tool, user_config.tools)
-    skills = UserConfig.merge_activations(args.skill, user_config.skills)
+    tools = Environment.merge_activations(args.tool, env.settings.tools)
+    skills = Environment.merge_activations(args.skill, env.settings.skills)
 
     run = Run(messages,
               model,
               OpenAiApi(cfg.base_url,
                         api_key,
                         ssl_verify=config.load_optional("ssl_verify", True)),
+              env=env,
               system_prompt=system_prompt,
               tools=tools,
               skills=skills,
@@ -402,7 +405,7 @@ def main(argv=None):
               reasoning_effort=args.reasoning_effort,
               temperature=args.temperature,
               max_steps=args.max_steps,
-              tool_result_max_chars=user_config.tool_result_max_chars,
+              tool_result_max_chars=env.settings.tool_result_max_chars,
               stream=not args.non_streaming,
               strict_format=args.strict_format)
 

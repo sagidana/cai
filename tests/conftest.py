@@ -1,20 +1,14 @@
-"""Shared fixtures. cai.hook / cai.command / cai.tool register into process-global
-stores on HooksRegistry / CommandsRegistry / ToolsRegistry; reset them around every
-test so a hook, command or function tool registered by one test never leaks into
+"""Shared fixtures. cai.hook / cai.command / cai.tool / cai.mcp_server register
+into the process-default Environment when no load() is running; start every test
+from a fresh default so a registration made by one test never leaks into
 another."""
 import pytest
 
-from cai.hooks import HooksRegistry
-from cai.commands import CommandsRegistry
-from cai.tools import ToolsRegistry
+from cai.environment import Environment
 
 
 @pytest.fixture(autouse=True)
-def _reset_global_registries():
-    HooksRegistry.reset_global()
-    CommandsRegistry.reset_global()
-    ToolsRegistry.reset_global()
+def _fresh_default_environment():
+    Environment._default = None
     yield
-    HooksRegistry.reset_global()
-    CommandsRegistry.reset_global()
-    ToolsRegistry.reset_global()
+    Environment._default = None

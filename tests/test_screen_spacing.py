@@ -4,6 +4,7 @@ probe, and the _Transcript state machine that streams CONTENT/REASONING into
 one block while making every other event its own block."""
 from cai.screen.screen import Screen
 from cai.screen.buffer import ContentBuffer
+from cai.environment import Settings
 from cai.tui import _Transcript
 from cai.events import EventType
 
@@ -75,7 +76,7 @@ def _blocks(screen):
 
 def test_consecutive_content_chunks_stream_into_one_block():
     screen = _RecordingScreen()
-    t = _Transcript(screen)
+    t = _Transcript(screen, Settings())
     t.event(_Event(EventType.CONTENT, text="hel"))
     t.event(_Event(EventType.CONTENT, text="lo"))
     # first chunk opens the block, the second continues it.
@@ -84,7 +85,7 @@ def test_consecutive_content_chunks_stream_into_one_block():
 
 def test_each_non_content_event_is_its_own_block():
     screen = _RecordingScreen()
-    t = _Transcript(screen)
+    t = _Transcript(screen, Settings())
     t.event(_Event(EventType.USER, text="hi"))
     t.event(_Event(EventType.CONTENT, text="think"))
     t.event(_Event(EventType.CONTENT, text="ing"))
@@ -98,7 +99,7 @@ def test_each_non_content_event_is_its_own_block():
 
 def test_two_tool_calls_in_a_row_are_separate_blocks():
     screen = _RecordingScreen()
-    t = _Transcript(screen)
+    t = _Transcript(screen, Settings())
     t.event(_Event(EventType.TOOL_CALL, tool_name="a"))
     t.event(_Event(EventType.TOOL_CALL, tool_name="b"))
     assert _blocks(screen) == [True, True]

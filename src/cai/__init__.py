@@ -5,8 +5,10 @@ Layer 1: cai.llm    - the core agentic loop (call_llm).
          cai.events - the Event value the loop yields, and EventType.
          cai.hooks  - the hook registry the loop fires.
 Layer 2: cai.agent  - Agent (persistent conversation) + Run (one-shot execution).
-Entry:   cai.config - bootstrap settings (API key, OpenRouter endpoint).
-         cai.cli    - the `cai` command: prompt in, streamed answer out.
+Entry:   cai.config      - bootstrap settings (API key, OpenRouter endpoint).
+         cai.environment - the loaded install catalogue (tools/hooks/commands/
+                           settings) an Agent resolves against.
+         cai.cli         - the `cai` command: prompt in, streamed answer out.
 """
 import logging
 from typing import TYPE_CHECKING
@@ -22,15 +24,16 @@ logging.basicConfig(
 
 from cai.events import Event, EventType
 from cai.hooks import HookContext, HookEvent, HooksRegistry, ToolCall, hook
-from cai.commands import Command, CommandContext, CommandsRegistry, command
+from cai.commands import Command, CommandContext, command
 from cai.llm import LLMError, MaxStepsReached, call_llm
 
-# Agent/Run stay lazy at runtime (see __getattr__ below) so `import cai` doesn't
-# pull agent + its config/api. this block is type-checker only - it never runs -
-# so an editor resolves cai.Agent / cai.Run to their real definitions (go-to-def)
-# without paying the import.
+# Agent/Run/Environment stay lazy at runtime (see __getattr__ below) so
+# `import cai` doesn't pull agent + its config/api. this block is type-checker
+# only - it never runs - so an editor resolves cai.Agent / cai.Run to their real
+# definitions (go-to-def) without paying the import.
 if TYPE_CHECKING:
     from cai.agent import Agent, Run
+    from cai.environment import Environment
     from cai.tools import ToolsRegistry, tool, mcp_server
 
 __all__ = [
@@ -43,7 +46,6 @@ __all__ = [
     "hook",
     "Command",
     "CommandContext",
-    "CommandsRegistry",
     "command",
     "ToolsRegistry",
     "tool",
@@ -53,6 +55,7 @@ __all__ = [
     "call_llm",
     "Agent",
     "Run",
+    "Environment",
     "settings",
 ]
 
@@ -65,7 +68,10 @@ def __getattr__(name):
     if name == "Run":
         from cai.agent import Run
         return Run
-    # tools pulls config/userconfig, so keep it lazy too - cai.tool resolves
+    if name == "Environment":
+        from cai.environment import Environment
+        return Environment
+    # tools pulls the environment, so keep it lazy too - cai.tool resolves
     # here the first time an extension's tools/*.py decorates a function.
     if name == "tool":
         from cai.tools import tool
@@ -76,9 +82,10 @@ def __getattr__(name):
     if name == "ToolsRegistry":
         from cai.tools import ToolsRegistry
         return ToolsRegistry
-    # cai.settings: the live UserConfig the CLI runs on (the :config overlay edits
-    # it, an init.py tunes it). lazy so `import cai` doesn't pull userconfig/config.
+    # cai.settings: the current Environment's live Settings - the env being
+    # load()ed when one is (so an extension/init.py tunes its own env), else the
+    # process default's (the one the :config overlay edits).
     if name == "settings":
-        from cai.userconfig import UserConfig
-        return UserConfig.current()
+        from cai.environment import Environment
+        return Environment.target().settings
     raise AttributeError(f"module 'cai' has no attribute {name!r}")

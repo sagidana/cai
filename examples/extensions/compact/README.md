@@ -21,9 +21,10 @@ compact/
 
 A cai extension is a self-contained bundle. cai imports the bundle's `init.py`
 (also `hooks/init.py` and `commands/init.py`) at startup; the `@cai.hook` and
-`@cai.command` decorators register into the global registries. The hook and
-command live in one `init.py` here because each loaded file is its own package —
-they could not share `_fold` across separate `hooks/` and `commands/` dirs.
+`@cai.command` decorators register onto the Environment being loaded. The hook
+and command live in one `init.py` here because each loaded file is its own
+package — they could not share `_fold` across separate `hooks/` and `commands/`
+dirs.
 
 ## Install
 
@@ -38,12 +39,10 @@ hook compacts on its own as the window fills.
 
 ```sh
 python3 -c "
-from cai.userconfig import UserConfig
-from cai.hooks import HooksRegistry
-from cai.commands import CommandsRegistry
-UserConfig.load()
-print('commands:', sorted(CommandsRegistry.commands()))
-print('hooks:', [(e, f.__name__) for e, f, _o in HooksRegistry.registered()])
+from cai.environment import Environment
+env = Environment().load()
+print('commands:', sorted(env.commands()))
+print('hooks:', [(e, f.__name__) for e, f in env.hooks()])
 "
 ```
 

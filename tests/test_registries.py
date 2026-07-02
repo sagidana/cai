@@ -1,27 +1,21 @@
-"""Tests for the process-global hook/command/tool registries and the cai.hook /
-cai.command / cai.tool decorators that feed them. The conftest fixture resets
-them around every test, so each starts from empty."""
+"""Tests for the cai.hook / cai.command / cai.tool / cai.mcp_server decorators
+and the Environment stores they register into. Outside a load() they target the
+process-default Environment; the conftest fixture makes that default fresh for
+every test."""
 import pytest
 
 import cai
-from cai.hooks import HooksRegistry
-from cai.commands import CommandsRegistry
+from cai.environment import Environment
 from cai.tools import ToolsRegistry
 
 
-def test_cai_hook_registers_and_bakes_into_new_registry():
+def test_cai_hook_registers_on_the_default_env():
     @cai.hook("after_turn")
     def h(ctx):
         return "x"
 
-    registered = HooksRegistry.registered()
-    assert len(registered) == 1
-    event, fn, origin = registered[0]
-    assert event == "after_turn"
-    assert fn is h
-    assert origin == h.__code__.co_filename
-
-    assert ("after_turn", h) in HooksRegistry().pairs()
+    hooks = Environment.default().hooks()
+    assert hooks == [("after_turn", h)]
 
 
 def test_cai_hook_rejects_unknown_event():
@@ -31,9 +25,12 @@ def test_cai_hook_rejects_unknown_event():
             pass
 
 
-def test_registries_start_empty_each_test():
-    assert HooksRegistry.registered() == []
-    assert CommandsRegistry.commands() == {}
+def test_default_env_starts_empty_each_test():
+    env = Environment.default()
+    assert env.hooks() == []
+    assert env.commands() == {}
+    assert env.function_tools() == {}
+    assert env.declared_servers() == {}
 
 
 def test_cai_command_bare_and_with_args():
@@ -45,7 +42,7 @@ def test_cai_command_bare_and_with_args():
     def beta(ctx):
         pass
 
-    commands = CommandsRegistry.commands()
+    commands = Environment.default().commands()
     assert "alpha" in commands
     assert commands["alpha"].fn is alpha
     assert commands["b"].help == "beta"
@@ -61,21 +58,18 @@ def test_later_command_of_same_name_wins():
     def second(ctx):
         pass
 
-    assert CommandsRegistry.commands()["dup"].help == "second"
+    assert Environment.default().commands()["dup"].help == "second"
 
 
-def test_cai_tool_registers_globally():
+def test_cai_tool_registers_on_the_default_env():
     @cai.tool
     def add(a: int, b: int) -> int:
         """Add two numbers."""
         return a + b
 
-    registered = ToolsRegistry.registered()
-    assert "add" in registered
-    fn, origin = registered["add"]
-    assert fn is add
-    assert origin == add.__code__.co_filename
-    assert ToolsRegistry.global_function("add") is add
+    env = Environment.default()
+    assert env.function_tool("add") is add
+    assert env.function_tools() == {"add": add}
 
 
 def test_cai_tool_listed_in_available_tools():
@@ -84,7 +78,7 @@ def test_cai_tool_listed_in_available_tools():
         """Greet someone."""
         return "hi " + name
 
-    assert "greet" in ToolsRegistry.available_tools()
+    assert "greet" in Environment.default().available_tools()
 
 
 def test_agent_registry_selects_function_tool_by_name():
@@ -110,7 +104,7 @@ def test_later_tool_of_same_name_wins():
         """second."""
         return "second"
 
-    assert ToolsRegistry.global_function("dup")() == "second"
+    assert Environment.default().function_tool("dup")() == "second"
 
 
 def test_cai_mcp_server_declares_local():
@@ -119,7 +113,7 @@ def test_cai_mcp_server_declares_local():
                    env={"GITHUB_TOKEN": "x"},
                    cwd="/tmp")
 
-    declared = ToolsRegistry.declared_servers()
+    declared = Environment.default().declared_servers()
     assert declared["github"]["command"] == ["npx", "-y", "@modelcontextprotocol/server-github"]
     assert declared["github"]["env"] == {"GITHUB_TOKEN": "x"}
     assert declared["github"]["cwd"] == "/tmp"
@@ -130,7 +124,7 @@ def test_cai_mcp_server_declares_remote():
                    url="https://mcp.linear.app/mcp",
                    headers={"Authorization": "Bearer t"})
 
-    declared = ToolsRegistry.declared_servers()
+    declared = Environment.default().declared_servers()
     assert declared["linear"] == {"url": "https://mcp.linear.app/mcp",
                                   "headers": {"Authorization": "Bearer t"}}
 
@@ -152,10 +146,10 @@ def test_later_mcp_server_of_same_name_wins():
     cai.mcp_server("dup", command=["first"])
     cai.mcp_server("dup", url="http://second")
 
-    assert ToolsRegistry.declared_servers()["dup"] == {"url": "http://second"}
+    assert Environment.default().declared_servers()["dup"] == {"url": "http://second"}
 
 
-def test_reset_global_clears_both():
+def test_private_env_is_isolated_from_the_default():
     @cai.hook("after_run")
     def h(ctx):
         pass
@@ -171,10 +165,32 @@ def test_reset_global_clears_both():
 
     cai.mcp_server("srv", command=["c"])
 
-    HooksRegistry.reset_global()
-    CommandsRegistry.reset_global()
-    ToolsRegistry.reset_global()
-    assert HooksRegistry.registered() == []
-    assert CommandsRegistry.commands() == {}
-    assert ToolsRegistry.registered() == {}
-    assert ToolsRegistry.declared_servers() == {}
+    private = Environment()
+    assert private.hooks() == []
+    assert private.commands() == {}
+    assert private.function_tools() == {}
+    assert private.declared_servers() == {}
+    assert Environment.default().hooks() != []
+
+
+def test_registry_resolves_names_against_its_own_env():
+    # two envs, two tools of the same name: each registry dispatches its own.
+    env_a = Environment()
+    env_b = Environment()
+
+    def greet() -> str:
+        """a."""
+        return "from a"
+    env_a.register_tool(greet)
+
+    def greet() -> str:  # noqa: F811
+        """b."""
+        return "from b"
+    env_b.register_tool(greet)
+
+    registry_a = ToolsRegistry(env_a)
+    registry_a.select("greet")
+    registry_b = ToolsRegistry(env_b)
+    registry_b.select("greet")
+    assert registry_a.dispatch("greet", {}) == "from a"
+    assert registry_b.dispatch("greet", {}) == "from b"

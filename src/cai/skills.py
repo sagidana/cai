@@ -1,9 +1,9 @@
 """skills: load skill files into a SkillsRegistry that layers prompt fragments
 and tools onto an existing ToolsRegistry.
 
-A skill is a markdown file <name>.md, resolved from each extension's skills/
-dir (see cai.userconfig) first, then the builtins shipped with cai
-(builtins/skills/ beside this module). Everything before the first '---' line is
+A skill is a markdown file <name>.md, resolved from the Environment's skill
+dirs - each extension's skills/ dir first, then the builtins shipped with cai
+(builtins/skills/ inside the package). Everything before the first '---' line is
 a header of 'key: value' lines; everything after is the prompt body. Header
 fields:
 
@@ -13,15 +13,16 @@ fields:
 
 Activating a skill unions its tools into the ToolsRegistry it was built against
 and appends its prompt body to the combined system prompt. `skills:` are
-activated first (foundation-first), and each skill loads at most once."""
+activated first (foundation-first), and each skill loads at most once. The
+install-wide catalogue (which skills exist) is the env's:
+env.available_skills() lists it."""
 from __future__ import annotations
 
 import os
 import logging
 from dataclasses import dataclass
 
-from cai import config
-from cai.userconfig import UserConfig
+from cai.environment import Environment
 
 
 log = logging.getLogger("cai")
@@ -35,25 +36,12 @@ class Skill:
     body: str
 
 
-def builtin_skills_dir():
-    """the skills shipped with cai by default, in builtins/skills/ beside this
-    module - searched after the extension skills dirs."""
-    return os.path.join(os.path.dirname(__file__), "builtins", "skills")
-
-
-def _search_dirs():
-    """the skill source dirs in resolution order: each extension's skills/ dir
-    (an earlier one shadows a later one) then the bundled builtins."""
-    dirs = list(UserConfig.skill_dirs())
-    dirs.append(builtin_skills_dir())
-    return dirs
-
-
-def _skill_path(name):
-    """resolve <name>.md to a source file, searching the extension skills dirs
-    first then the bundled builtins. None when neither has it."""
+def _skill_path(name, dirs):
+    """resolve <name>.md to a source file, searching `dirs` in order (the env's
+    skill dirs: extensions first, then the bundled builtins). None when no dir
+    has it."""
     filename = name + ".md"
-    for directory in _search_dirs():
+    for directory in dirs:
         path = os.path.join(directory, filename)
         if os.path.exists(path):
             return path
@@ -94,8 +82,8 @@ def _parse_skill(text):
                  body=body)
 
 
-def _read_skill(name):
-    path = _skill_path(name)
+def _read_skill(name, dirs):
+    path = _skill_path(name, dirs)
     if path is None:
         return None
     with open(path) as f:
@@ -107,9 +95,11 @@ class SkillsRegistry:
     """The skills activated for an Agent/Run: their combined prompt plus the
     tools they pull into the ToolsRegistry they were built against. Like
     ToolsRegistry, but it always works on a ToolsRegistry passed in - activating a
-    skill extends that same registry object in place."""
+    skill extends that same registry object in place. Skill files resolve
+    against the env's skill dirs."""
 
-    def __init__(self, tools_registry):
+    def __init__(self, tools_registry, env=None):
+        self.env = env or Environment.default()
         self.tools_registry = tools_registry
         # the active skill names, in activation order: this registry is the
         # single source of truth for which skills are on. dependency skills
@@ -122,29 +112,16 @@ class SkillsRegistry:
         self._skills = {}
 
     @classmethod
-    def for_skills(cls, skills=None, *, tools_registry):
+    def for_skills(cls, skills=None, *, tools_registry, env=None):
         """activate `skills` (recursively, via each skill's `skills:` header)
         against `tools_registry`, which is extended in place with every tool the
         skills declare. returns the SkillsRegistry holding the activated skills."""
-        registry = cls(tools_registry)
+        registry = cls(tools_registry, env)
         if not skills:
             return registry
         for name in skills:
             registry.add(name)
         return registry
-
-    @classmethod
-    def available_skills(cls):
-        """every skill name available to activate: the *.md stems across the
-        extension skills dirs and the builtins, deduped and sorted. a filesystem
-        scan only - no skill is loaded."""
-        names = set()
-        for directory in _search_dirs():
-            if not os.path.isdir(directory): continue
-            for filename in sorted(os.listdir(directory)):
-                if not filename.endswith(".md"): continue
-                names.add(filename[:-len(".md")])
-        return sorted(names)
 
     def names(self):
         """the active skill names, in activation order. includes dependency
@@ -164,7 +141,7 @@ class SkillsRegistry:
         """register a skill's tools and record its prompt, after first activating
         the skills it builds on. an unresolved name is warned and skipped, but
         stays in names() (mirroring set_skills's input)."""
-        skill = _read_skill(name)
+        skill = _read_skill(name, self.env.skill_dirs())
         if skill is None:
             log.warning("skill %r not found", name)
             return

@@ -1,6 +1,7 @@
 """Tests for tui.ScreenUI - the TUI client's UI that renders a served hook's
 prompts. The overlays themselves need a tty; here we cover the request the UI
 builds, how it maps the result back, and the one-way notify/status routing."""
+from cai.environment import Settings
 from cai.tui import ScreenUI, _Transcript
 from cai.screen import Screen
 
@@ -22,7 +23,7 @@ class FakeScreen:
 def _make_ui(screen, status=None):
     if status is None:
         status = FakeStatus()
-    return ScreenUI(screen, status, _Transcript(screen))
+    return ScreenUI(screen, status, _Transcript(screen, Settings()))
 
 
 class FakeStatus:

@@ -1,16 +1,14 @@
-"""tools: the ToolsRegistry - the install-wide catalogue of tools and the
-per-agent dispatch table, in one class.
-
-Two kinds of tool feed it:
+"""tools: the ToolsRegistry - one Agent's dispatch table over the two kinds of
+tool its Environment offers.
 
   - function tools: plain Python callables registered via the cai.tool
-    decorator (an extension's tools/*.py, imported by UserConfig.load). A
-    process-global store on ToolsRegistry holds them by name, the function-tool
-    counterpart to the MCP servers found on disk.
+    decorator (an extension's tools/*.py, imported by Environment.load). The
+    env holds them by exposed name; a registry resolves a bare name against it.
   - MCP tools: each *.py under an extension's mcps/ dir (or the builtins/mcps/
-    dir shipped with cai) is an MCP server (a FastMCP stdio program). This
-    module spawns each as a subprocess, speaks the MCP JSON-RPC handshake over
-    its stdin/stdout, and lists/calls its tools. MCP tool names are namespaced
+    dir shipped with cai) is an MCP server (a FastMCP stdio program), and
+    cai.mcp_server declares one programmatically into the env. This module
+    spawns each as a subprocess, speaks the MCP JSON-RPC handshake over its
+    stdin/stdout, and lists/calls its tools. MCP tool names are namespaced
     {label}__{name}, where label is the file's basename, so two servers can each
     expose a `search` without colliding.
 
@@ -20,6 +18,10 @@ A ToolsRegistry instance exposes the two things the agentic loop needs:
                               (call_llm tools=)
   registry.dispatch(name, args) - run a tool by name, returns its text result
                               (call_llm tools_dispatch=)
+
+The install-wide catalogue (which tools exist at all) is the Environment's:
+env.available_tools() lists it, and each registry keeps an env reference to
+resolve names and server specs against.
 
 Minimal by design: blocking JSON-RPC (no timeouts/retries/threads), one
 request/response at a time; a stdio server's stderr is discarded. Local stdio
@@ -39,8 +41,7 @@ import subprocess
 
 import requests
 
-from cai import config
-from cai.userconfig import UserConfig
+from cai.environment import Environment
 
 
 log = logging.getLogger("cai")
@@ -252,25 +253,19 @@ _PY_TO_JSON_TYPE = {
 }
 
 
-def _namespaced_tool_name(name, origin):
-    """the exposed name for a function tool defined in `origin`: namespaced
-    '<extension>__<name>' (mirroring MCP tools) when origin sits inside an
-    extension's dir, else the bare name for user-level and plain-SDK tools. the
-    UserConfig import is local to avoid a tools<->userconfig import cycle."""
-    from cai.userconfig import UserConfig
-    extension = UserConfig.extension_for(origin)
-    if extension is None:
-        return name
-    if extension == "user":
-        return name
-    return f"{extension}__{name}"
-
-
 def _function_tool_name(fn):
     """the exposed name of a function tool: the '<extension>__<name>' stamped on
-    it by ToolsRegistry.register_global, or the bare __name__ for a callable that
-    was never registered globally (a direct tools= callable, user/SDK tool)."""
+    it by Environment.register_tool, or the bare __name__ for a callable that was
+    never registered on an env (a direct tools= callable, user/SDK tool)."""
     return getattr(fn, "_cai_tool_name", fn.__name__)
+
+
+def server_from_spec(name, spec):
+    """build a live MCP server connection from a declared spec - a
+    RemoteMCPServer for a url spec, a LocalMCPServer for a command one."""
+    if "url" in spec:
+        return RemoteMCPServer(spec["url"], name, headers=spec.get("headers"))
+    return LocalMCPServer(spec["command"], name, env=spec.get("env"), cwd=spec.get("cwd"))
 
 
 def schema_from_function(fn):
@@ -352,115 +347,17 @@ class ToolsRegistry:
     can be available without being offered to the model (e.g. the sub-agent tools
     an Agent always registers but only sends once a skill or the user selects).
 
-    A bare tool name resolves against the process-global store of function tools
-    registered via cai.tool (see register_global / the cai.tool decorator below):
-    an Agent can select such a tool by name, since its callable is recoverable
-    from the catalogue.
+    A bare tool name resolves against the registry's Environment - the function
+    tools registered there via cai.tool: an Agent can select such a tool by
+    name, since its callable is recoverable from the env's catalogue.
 
     An MCP tool referenced by name ('<mcp_name>__<tool_name>') is lazy: the
-    server file <mcp_name>.py (under an extension's mcps/ dir) is spawned on
-    first use - when its schema is read for the model, or when the tool is
-    called - not before."""
+    server - declared on the env via cai.mcp_server, or the file <mcp_name>.py
+    under one of the env's mcp dirs - is spawned on first use, when its schema
+    is read for the model or when the tool is called, not before."""
 
-    # process-global function tools registered via cai.tool, as
-    # name -> (fn, origin) (origin is the file the tool was defined in). every
-    # ToolsRegistry built afterward can resolve these by name, and
-    # available_tools lists them. populated by register_global, cleared by
-    # reset_global - the function-tool half of the install-wide catalogue, whose
-    # other half is the MCP servers (on disk, plus the declared ones below).
-    _registered = {}
-
-    # process-global MCP servers declared via cai.mcp_server (init.py), as
-    # name -> spec dict: {"command": [...], "env": {...}, "cwd": ...} for a stdio
-    # server or {"url": ..., "headers": {...}} for a remote one. the programmatic
-    # twin of dropping a <name>.py into an mcps/ dir, and consulted ahead of it -
-    # so a declared server shadows an on-disk one of the same name. populated by
-    # register_server, cleared by reset_global.
-    _declared_servers = {}
-
-    @classmethod
-    def register_global(cls, fn):
-        """record a function tool in the process-global store (cai.tool's
-        backing), keyed by its exposed name. a tool defined in an extension's
-        tools/ dir is namespaced '<extension>__<name>' (mirroring MCP tools);
-        user-level and plain-SDK tools keep their bare __name__. the exposed name
-        is stamped on fn so the schema, dispatch key and selection all agree on
-        it. a later registration of the same name wins (the user's init runs
-        last). the origin file is captured from fn so UserConfig.extension_for
-        can attribute it later."""
-        origin = None
-        code = getattr(fn, "__code__", None)
-        if code is not None:
-            origin = code.co_filename
-        fn._cai_tool_name = _namespaced_tool_name(fn.__name__, origin)
-        cls._registered[fn._cai_tool_name] = (fn, origin)
-
-    @classmethod
-    def registered(cls):
-        """the globally-registered function tools as name -> (fn, origin)."""
-        return dict(cls._registered)
-
-    @classmethod
-    def global_function(cls, name):
-        """the callable registered globally under `name` via cai.tool, or None
-        when no function tool by that name is known."""
-        entry = cls._registered.get(name)
-        if entry is None:
-            return None
-        return entry[0]
-
-    @classmethod
-    def register_server(cls, name, command=None, url=None, env=None, headers=None, cwd=None):
-        """declare a named MCP server in the process-global store (cai.mcp_server's
-        backing), the programmatic counterpart to dropping a <name>.py into an
-        mcps/ dir. exactly one of `command` (a stdio server: an argv list, with
-        optional env/cwd) or `url` (a remote Streamable-HTTP server, with optional
-        headers) must be given. its tools surface namespaced '<name>__<tool>' like
-        any MCP server's. a later declaration of the same name wins."""
-        if command is None and url is None:
-            raise ValueError(f"MCP server {name!r}: give command= or url=")
-        if command is not None and url is not None:
-            raise ValueError(f"MCP server {name!r}: give command= or url=, not both")
-        if url is not None and (env is not None or cwd is not None):
-            raise ValueError(f"MCP server {name!r}: env/cwd apply to a command server, not a url")
-        if command is not None and headers is not None:
-            raise ValueError(f"MCP server {name!r}: headers apply to a url server, not a command")
-        spec = {}
-        if command is not None:
-            if isinstance(command, str):
-                raise ValueError(f"MCP server {name!r}: command must be an argv list, not a string")
-            spec["command"] = list(command)
-            if env is not None:
-                spec["env"] = dict(env)
-            if cwd is not None:
-                spec["cwd"] = cwd
-        else:
-            spec["url"] = url
-            if headers is not None:
-                spec["headers"] = dict(headers)
-        cls._declared_servers[name] = spec
-
-    @classmethod
-    def declared_servers(cls):
-        """the programmatically-declared MCP servers as name -> spec dict."""
-        return dict(cls._declared_servers)
-
-    @staticmethod
-    def _server_from_spec(name, spec):
-        """build a live MCP server connection from a declared spec - a
-        RemoteMCPServer for a url spec, a LocalMCPServer for a command one."""
-        if "url" in spec:
-            return RemoteMCPServer(spec["url"], name, headers=spec.get("headers"))
-        return LocalMCPServer(spec["command"], name, env=spec.get("env"), cwd=spec.get("cwd"))
-
-    @classmethod
-    def reset_global(cls):
-        """drop every globally-registered function tool and declared MCP server
-        (test isolation)."""
-        cls._registered = {}
-        cls._declared_servers = {}
-
-    def __init__(self):
+    def __init__(self, env=None):
+        self.env = env or Environment.default()
         self._functions = {}     # name -> callable
         self._dispatch = {}      # exposed_name -> tagged entry
         self._schemas = {}       # exposed_name -> schema (eager, or resolved lazily)
@@ -471,62 +368,16 @@ class ToolsRegistry:
         self._mcp_servers = {}
 
     @classmethod
-    def for_tools(cls, tools):
+    def for_tools(cls, tools, env=None):
         """build a registry from a mixed list, registering and selecting each: a
         callable becomes a Python function tool; a string is an MCP tool
         reference '<mcp>__<tool>'."""
-        registry = cls()
+        registry = cls(env)
         if not tools:
             return registry
         for item in tools:
             registry.select(item)
         return registry
-
-    @classmethod
-    def available_tools(cls):
-        """every tool the install offers, as a flat list of names in the form
-        `tools=` / for_tools accept: the function tools registered via cai.tool
-        (their bare names) followed by every MCP tool ('<mcp_name>__<tool_name>')
-        exposed by the servers - declared via cai.mcp_server first, then across
-        the extension mcps/ dirs and the builtins. each MCP server is spawned (or,
-        when remote, contacted) briefly to list its tools and then closed -
-        nothing is left running. a declared server shadows an on-disk one of the
-        same name, and a user file shadows a builtin; a server that fails to start
-        is logged and skipped."""
-        names = list(cls._registered.keys())
-        seen_labels = set()
-        for label in sorted(cls._declared_servers.keys()):
-            seen_labels.add(label)
-            server = None
-            try:
-                server = cls._server_from_spec(label, cls._declared_servers[label])
-                for tool in server.list_tools():
-                    names.append(f"{label}__{tool['name']}")
-            except Exception as e:
-                log.error("available_tools: declared server %r failed: %s", label, e)
-            finally:
-                if server is not None:
-                    server.close()
-        for directory in _mcp_search_dirs():
-            if not os.path.isdir(directory): continue
-            for filename in sorted(os.listdir(directory)):
-                if not filename.endswith(".py"): continue
-                if filename.startswith("_"): continue
-                label = filename[:-len(".py")]
-                if label in seen_labels: continue
-                seen_labels.add(label)
-                path = os.path.join(directory, filename)
-                server = None
-                try:
-                    server = LocalMCPServer([sys.executable, path], label)
-                    for tool in server.list_tools():
-                        names.append(f"{label}__{tool['name']}")
-                except Exception as e:
-                    log.error("available_tools: %r failed: %s", path, e)
-                finally:
-                    if server is not None:
-                        server.close()
-        return names
 
     def register_function(self, fn):
         """expose a Python callable as a tool. its schema is derived from the
@@ -571,8 +422,8 @@ class ToolsRegistry:
 
     def register(self, tool, override=False):
         """make one tool known (dispatchable) without selecting it. `tool` may be
-        a callable (a function tool), the name of a function tool registered
-        globally via cai.tool, or an MCP tool reference '<mcp>__<tool>'.
+        a callable (a function tool), the name of a function tool registered on
+        the env via cai.tool, or an MCP tool reference '<mcp>__<tool>'.
         a tool already registered is left as-is, unless override=True, which
         replaces the existing registration with this tool - e.g. to bind an
         inherited tool name to this agent's own tool. like any fresh
@@ -584,7 +435,7 @@ class ToolsRegistry:
         if callable(tool):
             self.register_function(tool)
             return
-        fn = ToolsRegistry.global_function(tool)
+        fn = self.env.function_tool(tool)
         if fn is not None:
             self.register_function(fn)
             return
@@ -684,17 +535,17 @@ class ToolsRegistry:
 
     def _load_server(self, mcp_name):
         """the live server for mcp_name, connected once and cached in this
-        registry. a server declared via cai.mcp_server wins; otherwise its source
-        file is resolved from the extension mcps dirs first, then the builtins
-        shipped with cai, and spawned as a stdio subprocess."""
+        registry. a server declared on the env via cai.mcp_server wins; otherwise
+        its source file is resolved from the env's mcp dirs (the extension dirs
+        first, then the builtins) and spawned as a stdio subprocess."""
         server = self._mcp_servers.get(mcp_name)
         if server is not None:
             return server
-        spec = ToolsRegistry._declared_servers.get(mcp_name)
+        spec = self.env.server_spec(mcp_name)
         if spec is not None:
-            server = ToolsRegistry._server_from_spec(mcp_name, spec)
+            server = server_from_spec(mcp_name, spec)
         else:
-            path = _mcp_server_path(mcp_name)
+            path = _mcp_server_path(mcp_name, self.env.mcp_dirs())
             if path is None:
                 raise FileNotFoundError(
                     f"no MCP server {mcp_name!r} declared, or in any extension mcps dir or builtins")
@@ -724,25 +575,12 @@ class ToolsRegistry:
                 log.exception("closing MCP server %r failed", server.label)
 
 
-def builtin_mcp_dir():
-    """the MCP servers shipped with cai by default, in builtins/mcps/ beside
-    this module - searched after the extension mcps/ dirs."""
-    return os.path.join(os.path.dirname(__file__), "builtins", "mcps")
-
-
-def _mcp_search_dirs():
-    """the MCP source dirs in resolution order: each extension's mcps/ dir (an
-    earlier one shadows a later one) then the bundled builtins."""
-    dirs = list(UserConfig.mcp_dirs())
-    dirs.append(builtin_mcp_dir())
-    return dirs
-
-
-def _mcp_server_path(mcp_name):
-    """resolve <mcp_name>.py to a source file, searching the extension mcps
-    dirs first then the bundled builtins. None when neither has it."""
+def _mcp_server_path(mcp_name, dirs):
+    """resolve <mcp_name>.py to a source file, searching `dirs` in order (the
+    env's mcp dirs: extensions first, then the bundled builtins). None when no
+    dir has it."""
     filename = mcp_name + ".py"
-    for directory in _mcp_search_dirs():
+    for directory in dirs:
         path = os.path.join(directory, filename)
         if os.path.exists(path):
             return path
@@ -750,18 +588,20 @@ def _mcp_server_path(mcp_name):
 
 
 def tool(fn):
-    """decorator: register a function as a global function tool, e.g.
+    """decorator: register a function tool on the current Environment, e.g.
 
         @cai.tool
         def add(a: int, b: int) -> int:
             \"\"\"Add two numbers.\"\"\"
             return a + b
 
-    the tool's name is the function's __name__; its schema comes from the
-    signature and the first docstring line (see schema_from_function). it is
-    baked into the process-global store, so once UserConfig.load() imports the
-    extensions every agent can select it by name. see ToolsRegistry."""
-    ToolsRegistry.register_global(fn)
+    the tool's name is the function's __name__ (namespaced
+    '<extension>__<name>' when an extension is being loaded); its schema comes
+    from the signature and the first docstring line (see schema_from_function).
+    it lands on the env being load()ed - else the process default - so once
+    Environment.load() imports the extensions every agent on that env can select
+    it by name. see Environment / ToolsRegistry."""
+    Environment.target().register_tool(fn)
     return fn
 
 
@@ -777,11 +617,12 @@ def mcp_server(name, command=None, url=None, env=None, headers=None, cwd=None):
                        url="https://mcp.linear.app/mcp",
                        headers={"Authorization": "Bearer ..."})   # remote server
 
-    its tools surface namespaced '<name>__<tool>'; Harness callers still list
-    them in tools=[...] to expose them for a run. see ToolsRegistry."""
-    ToolsRegistry.register_server(name,
-                                  command=command,
-                                  url=url,
-                                  env=env,
-                                  headers=headers,
-                                  cwd=cwd)
+    it lands on the env being load()ed - else the process default. its tools
+    surface namespaced '<name>__<tool>'; callers still list them in tools=[...]
+    to expose them for a run. see Environment / ToolsRegistry."""
+    Environment.target().register_server(name,
+                                         command=command,
+                                         url=url,
+                                         env=env,
+                                         headers=headers,
+                                         cwd=cwd)

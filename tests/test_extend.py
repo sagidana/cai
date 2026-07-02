@@ -9,7 +9,7 @@ import pytest
 
 from cai import cli
 from cai import extend
-from cai.userconfig import UserConfig
+from cai.environment import extensions_dir, list_extensions
 
 
 @pytest.fixture(autouse=True)
@@ -31,7 +31,7 @@ def _make_bundle(root, name, skill="hi"):
 
 
 def _installed_dir(name):
-    return os.path.join(UserConfig.extensions_dir(), name)
+    return os.path.join(extensions_dir(), name)
 
 
 def _run(argv):
@@ -46,7 +46,7 @@ def test_install_folder(tmp_path):
     installed = os.path.join(_installed_dir("demo"), "skills", "demo.md")
     assert os.path.isfile(installed)
     names = []
-    for extension in UserConfig.list_extensions():
+    for extension in list_extensions():
         names.append(extension.name)
     assert names == ["demo"]
 

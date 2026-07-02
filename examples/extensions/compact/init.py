@@ -8,7 +8,7 @@ folded span with one LLM call. Two entry points share the same _fold logic:
     context window passes COMPACT_AT.
   - @cai.command compact - runs on demand when you type :compact in the TUI.
 
-Both register the moment UserConfig.load() imports this file. The hook and
+Both register the moment Environment.load() imports this file. The hook and
 command live in one file because each loaded file is its own package, so they
 could not share a helper module across hooks/ and commands/ subdirs."""
 import json

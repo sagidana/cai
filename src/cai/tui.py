@@ -29,14 +29,14 @@ import time
 
 from cai import usage
 from cai.channel import connect
-from cai.commands import CommandContext, CommandsRegistry
+from cai.commands import CommandContext
+from cai.environment import Environment
 from cai.events import EventType
 from cai.screen import Screen
 from cai.screen.overlays import config as overlay_config
 from cai.screen.overlays.config import Setting
 from cai.session import SessionsRegistry
 from cai.ui import BaseUI
-from cai.userconfig import UserConfig
 from cai.wire import Wire
 
 
@@ -115,8 +115,9 @@ class _Transcript:
     the gaps between blocks no longer depend on whatever newlines each event
     happened to carry."""
 
-    def __init__(self, screen):
+    def __init__(self, screen, settings):
         self._screen = screen
+        self._settings = settings   # the live env Settings (:config edits it)
         self._streaming = None   # the open streaming unit: "content"/"reasoning"/None
 
     def event(self, event):
@@ -124,7 +125,7 @@ class _Transcript:
             self._stream(event.text or "", "content", Screen.LLM)
             return
         if event.type == EventType.REASONING:
-            if not UserConfig.current().show_reasoning:
+            if not self._settings.show_reasoning:
                 return
             self._stream(event.text or "", "reasoning", Screen.REASONING)
             return
@@ -472,14 +473,14 @@ class _Worker(threading.Thread):
     interrupt gate know a response is in flight; the _Status signals it updates
     drive the status line, painted by the status thread."""
 
-    def __init__(self, client, screen, jobs, stop, status):
+    def __init__(self, client, screen, jobs, stop, status, settings):
         super().__init__(daemon=True, name="cai-tui-worker")
         self._client = client
         self._screen = screen
         self._jobs = jobs
         self._stop_event = stop
         self._status = status
-        self._transcript = _Transcript(screen)
+        self._transcript = _Transcript(screen, settings)
         self._ui = ScreenUI(screen, status, self._transcript)
         self._sample_tokens = 0
         self._sample_chars = 0
@@ -871,10 +872,9 @@ def _list_setting(label, obj, attr):
                    set=write)
 
 
-def _open_config(screen):
-    """the :config overlay - edit the live session settings (cai.settings) in
+def _open_config(screen, cfg):
+    """the :config overlay - edit the env's live Settings (cai.settings) in
     place. edits apply to this session only; permanent config lives in init.py."""
-    cfg = UserConfig.current()
     settings = []
     settings.append(_bool_setting("show reasoning", cfg, "show_reasoning"))
     settings.append(_int_setting("tool result max chars", cfg, "tool_result_max_chars"))
@@ -885,14 +885,14 @@ def _open_config(screen):
     screen.prompt_config_overlay(settings)
 
 
-def _save_session(screen, client, path):
+def _save_session(screen, client, path, cfg):
     """save the agent (over the wire) to path, or its default <name>.flow when
     path is empty. the written path comes back from the control op."""
     written = client.save(path or None)
     if written is None:
         screen.write("[save error]\n", kind=Screen.ERROR, block=True)
         return
-    SessionsRegistry.prune(UserConfig.current().max_sessions_mb)
+    SessionsRegistry.prune(cfg.max_sessions_mb)
     screen.write(f"[saved {written}]\n", kind=Screen.META, block=True)
 
 
@@ -1150,12 +1150,12 @@ def _refresh_tokens(status):
     status.set_tokens(0)
 
 
-def _handle_command(screen, client, status, registry, jobs, cmd):
+def _handle_command(screen, client, status, registry, jobs, env, cmd):
     """dispatch a `:`-command. returns True to quit the loop, else False.
 
     cmd is the raw command string (the text after ':'); the first token is the
     command name. builtin names are handled here; an unrecognized one falls back
-    to a command registered through cai.command (CommandsRegistry). the idle
+    to a command registered through cai.command (env.commands()). the idle
     gates keep conversation-mutating commands off a live run; reads and config
     switches are allowed while busy."""
     if cmd == "q" or cmd == "quit":
@@ -1177,7 +1177,7 @@ def _handle_command(screen, client, status, registry, jobs, cmd):
         path = ""
         if arg:
             path = os.path.expanduser(arg)
-        _save_session(screen, client, path)
+        _save_session(screen, client, path, env.settings)
         return False
     if head == "load":
         if screen._busy:
@@ -1192,7 +1192,7 @@ def _handle_command(screen, client, status, registry, jobs, cmd):
         _open_models(screen, client, status, registry)
         return False
     if head == "config":
-        _open_config(screen)
+        _open_config(screen, env.settings)
         return False
     if head == "tools":
         if screen._busy:
@@ -1242,7 +1242,7 @@ def _handle_command(screen, client, status, registry, jobs, cmd):
             return False
         _open_sessions(screen, client, status)
         return False
-    command = CommandsRegistry.commands().get(head)
+    command = env.commands().get(head)
     if command is not None:
         ctx = CommandContext(arg, client, screen)
         try:
@@ -1280,11 +1280,11 @@ def run(*,
     from cai.hooks import HookEvent
     from cai.models import ModelsRegistry
 
-    user_config = UserConfig.load()
+    env = Environment.default().load()
     # the cai.settings skills / tools are auto-activated on every CLI run, merged
     # in on top of any --skill / --tool the user passed.
-    skills = UserConfig.merge_activations(skills, user_config.skills)
-    tools = UserConfig.merge_activations(tools, user_config.tools)
+    skills = Environment.merge_activations(skills, env.settings.skills)
+    tools = Environment.merge_activations(tools, env.settings.tools)
 
     # autosave: persist the session to <name>.flow on every conversation
     # mutation, driven solely by hooks - AFTER_RUN (the final answer landed) and
@@ -1297,7 +1297,7 @@ def run(*,
     # runs on the worker thread mid-run, so it sees a consistent conversation and
     # never races the main thread.
     def _autosave(ctx):
-        if not UserConfig.current().auto_save_sessions: return
+        if not env.settings.auto_save_sessions: return
         saved = (ctx.data or {}).get("agent")
 
         if saved is None: return
@@ -1305,7 +1305,7 @@ def run(*,
 
         try:
             saved.save()
-            SessionsRegistry.prune(UserConfig.current().max_sessions_mb)
+            SessionsRegistry.prune(env.settings.max_sessions_mb)
         except OSError:
             pass
 
@@ -1314,6 +1314,7 @@ def run(*,
     autosave_hooks.append((HookEvent.MESSAGES_MUTATED, _autosave))
 
     agent = Agent(model=model,
+                  env=env,
                   system_prompt=system_prompt,
                   tools=tools or [],
                   skills=skills or [],
@@ -1321,7 +1322,7 @@ def run(*,
                   reasoning_effort=reasoning_effort,
                   temperature=temperature,
                   max_steps=max_steps,
-                  tool_result_max_chars=user_config.tool_result_max_chars)
+                  tool_result_max_chars=env.settings.tool_result_max_chars)
 
     from cai.wired_agent import UnixWiredAgent
     server = UnixWiredAgent(agent)
@@ -1333,7 +1334,7 @@ def run(*,
     stop = threading.Event()
 
     palette = list(_PALETTE_COMMANDS)
-    commands = CommandsRegistry.commands()
+    commands = env.commands()
     for name in sorted(commands):
         palette.append((name, commands[name].help))
     completions = {}
@@ -1396,7 +1397,7 @@ def run(*,
 
     screen.set_recall_handler(_on_recall)
 
-    worker = _Worker(client, screen, jobs, stop, status)
+    worker = _Worker(client, screen, jobs, stop, status, env.settings)
     worker.start()
     status_loop = _StatusLoop(status, stop)
     status_loop.start()
@@ -1425,7 +1426,7 @@ def run(*,
             if screen._command_result is not None:
                 cmd = screen._command_result
                 screen._command_result = None
-                if _handle_command(screen, client, status, registry, jobs, cmd):
+                if _handle_command(screen, client, status, registry, jobs, env, cmd):
                     break
                 continue
             # '!text' steers the in-flight run; with nothing running it is just

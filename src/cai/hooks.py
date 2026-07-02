@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Mapping, Optional
 
+from cai.environment import Environment
 from cai.ui import UI, NULL_UI
 
 
@@ -70,44 +71,17 @@ class HookContext:
 
 
 class HooksRegistry:
-    # process-global hooks registered via cai.hook, as (event, fn, origin)
-    # triples (origin is the file the hook was defined in). every HooksRegistry
-    # built afterward bakes these in, so once extensions load every run fires
-    # them. populated by register_global, cleared by reset_global.
-    _registered = []
+    """a plain collection of (event, fn) pairs, fired in registration order.
+    the install-wide hooks live on the Environment (cai.hook registers there);
+    an Agent composes env hooks + its own hooks= list into one of these per
+    run."""
 
     def __init__(self):
         self._entries = []
-        for event, fn, _origin in HooksRegistry._registered:
-            self._entries.append((event, fn))
-
-    @classmethod
-    def register_global(cls, event, fn):
-        """record a hook in the process-global store (cai.hook's backing). it is
-        baked into every HooksRegistry created afterward. the origin file is
-        captured from fn so UserConfig.extension_for can attribute it later."""
-        if event not in VALID_HOOK_EVENTS:
-            raise ValueError(f"unknown hook event: {event!r}. valid: {VALID_HOOK_EVENTS}")
-        origin = None
-        code = getattr(fn, "__code__", None)
-        if code is not None:
-            origin = code.co_filename
-        cls._registered.append((event, fn, origin))
-
-    @classmethod
-    def registered(cls):
-        """the globally-registered hooks as (event, fn, origin) triples."""
-        return list(cls._registered)
-
-    @classmethod
-    def reset_global(cls):
-        """drop every globally-registered hook (test isolation)."""
-        cls._registered = []
 
     @classmethod
     def from_list(cls, hooks):
-        """build a registry (globals already baked in) and add a list of
-        (event, fn) pairs on top (None -> just the globals)."""
+        """build a registry from a list of (event, fn) pairs (None -> empty)."""
         registry = cls()
         if hooks is None:
             return registry
@@ -147,11 +121,14 @@ class HooksRegistry:
 
 
 def hook(event):
-    """decorator: register a function as a global hook for `event`, e.g.
-    @cai.hook("after_turn"). it is baked into every HooksRegistry built
-    afterward, so once UserConfig.load() imports the extensions every run
-    fires it. see HooksRegistry."""
+    """decorator: register a hook for `event` on the current Environment, e.g.
+    @cai.hook("after_turn"). it lands on the env being load()ed - else the
+    process default - so once Environment.load() imports the extensions every
+    run of an agent on that env fires it. see Environment / HooksRegistry."""
+    if event not in VALID_HOOK_EVENTS:
+        raise ValueError(f"unknown hook event: {event!r}. valid: {VALID_HOOK_EVENTS}")
+
     def decorator(fn):
-        HooksRegistry.register_global(event, fn)
+        Environment.target().register_hook(event, fn)
         return fn
     return decorator

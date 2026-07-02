@@ -7,6 +7,7 @@ given turn, so the injected user turn can be observed. No network, no config.
 import threading
 
 from cai.agent import Agent
+from cai.environment import Environment
 from cai.llm import call_llm, SteerQueue
 from cai.skills import SkillsRegistry
 from cai.tools import ToolsRegistry
@@ -53,6 +54,7 @@ def bare_agent(tools_registry, api):
     agent.name = "test"
     agent.model = "m"
     agent.api = api
+    agent.env = Environment()
     agent._system_prompt = None
     agent.tools_registry = tools_registry
     agent.skills_registry = SkillsRegistry.for_skills([], tools_registry=tools_registry)

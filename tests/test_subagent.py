@@ -10,6 +10,7 @@ import threading
 import pytest
 
 from cai.agent import Agent
+from cai.environment import Environment
 from cai.tools import ToolsRegistry
 from cai.skills import SkillsRegistry
 from cai.subagent import _inherit_tools
@@ -90,6 +91,7 @@ def make_parent(api, tools=None, skills=None):
     parent.name = "parent"
     parent.model = "m"
     parent.api = api
+    parent.env = Environment()
     parent._system_prompt = "PARENT PROMPT"
     # the registries are the agent's source of truth. callable tools register for
     # dispatch (so get_tools sees them); the skill names are set directly, without
