@@ -502,8 +502,9 @@ class Screen:
         """collect user input. blocking. raises KeyboardInterrupt / EOFError."""
         self._in_prompt = True
         self._current_prompt_msg = msg
-        self._input_buf = []
-        self._cursor_pos = 0
+        # the input buffer persists across prompt() calls: it is only emptied on
+        # submit (below) or Ctrl-C (see modes.py). so a ':' command that exits
+        # and re-enters prompt() keeps the half-typed input intact.
         self._history_idx = -1
         self._command_result = None
 
@@ -596,12 +597,13 @@ class Screen:
             self._command_result = cmd_result
             return ''
 
-        # clear the input area so the next prompt() call starts clean. the
-        # caller is responsible for echoing the submitted text into the
+        # clear the input area on submit so the next prompt() call starts clean.
+        # the caller is responsible for echoing the submitted text into the
         # content buffer at the right time - when prompts are queued the
         # echo should happen when the LLM actually starts processing it,
-        # not at submit time.
-        if result is not None and result.strip():
+        # not at submit time. a ':' command exits via the cmd_result path above,
+        # so it never reaches here and keeps the buffer.
+        if result is not None:
             self._input_buf = []
             self._cursor_pos = 0
             with self._render_lock:
