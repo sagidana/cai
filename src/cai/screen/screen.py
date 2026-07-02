@@ -28,6 +28,7 @@ from .ansi import (
     ERASE_SCREEN,
     ALT_ENTER, ALT_EXIT,
     MOUSE_ON, MOUSE_OFF,
+    BRACKET_PASTE_ON, BRACKET_PASTE_OFF,
 )
 from .state import Mode, TUIState, SubmitException, CommandException
 from .buffer import ContentBuffer
@@ -172,7 +173,7 @@ class Screen:
         self._modes = ModeHandler()
 
         # enter alternate screen
-        sys.stdout.write(ALT_ENTER + MOUSE_ON + ERASE_SCREEN + CUR_HIDE)
+        sys.stdout.write(ALT_ENTER + MOUSE_ON + BRACKET_PASTE_ON + ERASE_SCREEN + CUR_HIDE)
         sys.stdout.flush()
 
         signal.signal(signal.SIGWINCH, self._on_resize)
@@ -436,7 +437,7 @@ class Screen:
             self._req_pending = None
         if pend is not None:
             pend[1].set()
-        sys.stdout.write(f'{MOUSE_OFF}{ALT_EXIT}{CUR_SHOW}{CURSOR_RESET}{SGR_RESET}\n')
+        sys.stdout.write(f'{MOUSE_OFF}{BRACKET_PASTE_OFF}{ALT_EXIT}{CUR_SHOW}{CURSOR_RESET}{SGR_RESET}\n')
         sys.stdout.flush()
         signal.signal(signal.SIGWINCH, signal.SIG_DFL)
         try:
@@ -646,7 +647,7 @@ class Screen:
         content_rows = self._layout.content_rows
         if self._state.auto_scroll:
             self._state.viewport_offset = max(0, total - content_rows)
-        sys.stdout.write(ALT_ENTER + MOUSE_ON + ERASE_SCREEN)
+        sys.stdout.write(ALT_ENTER + MOUSE_ON + BRACKET_PASTE_ON + ERASE_SCREEN)
         self._refresh_all()
         sys.stdout.flush()
         self._write_pending = False

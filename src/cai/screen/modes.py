@@ -17,7 +17,7 @@ from .state import Mode, TUIState, SubmitException, CommandException
 from .input import (
     history_navigate,
     delete_word_before, open_in_vim, open_buffer_in_vim,
-    parse_mouse, input_pos_from_click,
+    parse_mouse, input_pos_from_click, PASTE,
 )
 
 def _is_word_char(ch):
@@ -253,6 +253,10 @@ class ModeHandler:
         internal state (input_buf, cursor_pos, etc.) and call its
         refresh methods.
         """
+        if isinstance(key, tuple) and len(key) == 2 and key[0] == PASTE:
+            self._handle_paste(key[1], state, screen)
+            return
+
         mouse = parse_mouse(key)
         if mouse is not None:
             self._handle_mouse(mouse, state, screen)
@@ -299,6 +303,36 @@ class ModeHandler:
         }
         handler = dispatch.get(state.mode, self._handle_normal)
         handler(key, state, screen)
+
+    def _handle_paste(self, text, state, screen):
+        """insert a bracketed-paste block literally. newlines become buffer
+        newlines (never a submit). the single-line command/search fields take the
+        text with newlines flattened to spaces; everywhere else it lands in the
+        input buffer, entering insert mode first if needed."""
+        text = text.replace('\r\n', '\n').replace('\r', '\n')
+        if state.mode == Mode.COMMAND:
+            flat = text.replace('\n', ' ')
+            for ch in flat:
+                state.command_buf.insert(state.command_cursor, ch)
+                state.command_cursor += 1
+            screen._refresh_all()
+            return
+        if state.mode == Mode.SEARCH:
+            flat = text.replace('\n', ' ')
+            for ch in flat:
+                state.search_buf.append(ch)
+            screen._refresh_all()
+            return
+        if state.mode != Mode.INSERT:
+            state.mode = Mode.INSERT
+            state.auto_scroll = True
+            total = screen._buffer.line_count()
+            content_rows = screen._layout.content_rows
+            state.viewport_offset = max(0, total - content_rows)
+        for ch in text:
+            screen._input_buf.insert(screen._cursor_pos, ch)
+            screen._cursor_pos += 1
+        screen._refresh_input()
 
     def _handle_normal(self, key, state, screen):
         buf = screen._buffer

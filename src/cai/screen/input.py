@@ -8,7 +8,10 @@ import tempfile
 import termios
 import tty
 
-from .ansi import CUR_SHOW, ALT_EXIT, ansi_strip
+from .ansi import CUR_SHOW, ALT_EXIT, ansi_strip, PASTE_START, PASTE_END
+
+# tag identifying a bracketed-paste event returned by read_key: (PASTE, text).
+PASTE = 'paste'
 
 
 def _read_byte(tty_fd):
@@ -36,8 +39,33 @@ def _read_csi(tty_fd):
     return seq
 
 
+def _read_paste(tty_fd):
+    """slurp a bracketed-paste body (after PASTE_START) up to and excluding
+    PASTE_END. reads raw bytes in chunks and decodes once, so multibyte UTF-8 in
+    the paste is preserved. any input following PASTE_END in the same burst is
+    dropped (a keystroke landing in the same read as a paste end is rare)."""
+    data = b''
+    end = PASTE_END.encode('utf-8')
+    while True:
+        ready, _, _ = select.select([tty_fd], [], [], 0.1)
+        if not ready:
+            break
+        chunk = os.read(tty_fd, 4096)
+        if chunk == b'':
+            break
+        data += chunk
+        if end in data:
+            data = data.split(end, 1)[0]
+            break
+    return data.decode('utf-8', errors='replace')
+
+
 def read_key(tty_fd):
-    """read one logical keypress from the given fd (handles escape sequences)."""
+    """read one logical keypress from the given fd (handles escape sequences).
+
+    a bracketed paste is returned as the tuple (PASTE, text) so the caller can
+    insert the whole block literally instead of treating a pasted newline as
+    Enter."""
     ch = os.read(tty_fd, 1).decode('utf-8', errors='replace')
     if ch != '\033':
         return ch
@@ -45,7 +73,10 @@ def read_key(tty_fd):
     if nxt == '':
         return ch
     if nxt == '[':
-        return '\033[' + _read_csi(tty_fd)
+        seq = '\033[' + _read_csi(tty_fd)
+        if seq == PASTE_START:
+            return (PASTE, _read_paste(tty_fd))
+        return seq
     if nxt == 'O':
         return '\033O' + _read_byte(tty_fd)
     return ch + nxt
@@ -56,6 +87,8 @@ def parse_mouse(seq):
     (action, button, col, row), or None if seq isn't one. action is one of
     'wheel_up', 'wheel_down', 'press', 'drag', 'release'. col/row are 1-indexed
     terminal coordinates."""
+    if not isinstance(seq, str):
+        return None
     if not seq.startswith('\033[<'):
         return None
     if not (seq.endswith('M') or seq.endswith('m')):

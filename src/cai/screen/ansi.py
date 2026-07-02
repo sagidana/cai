@@ -54,6 +54,15 @@ ALT_EXIT  = '\033[?1049l'
 MOUSE_ON  = '\033[?1000h\033[?1002h\033[?1006h'
 MOUSE_OFF = '\033[?1000l\033[?1002l\033[?1006l'
 
+# bracketed paste (DECSET 2004): the terminal wraps pasted text in
+# PASTE_START..PASTE_END so a pasted newline is not mistaken for Enter. like the
+# mouse modes it survives overlays and is only reset by an external full-screen
+# program (nvim), so it is re-armed after those.
+BRACKET_PASTE_ON  = '\033[?2004h'
+BRACKET_PASTE_OFF = '\033[?2004l'
+PASTE_START = '\033[200~'
+PASTE_END   = '\033[201~'
+
 KEY_ENTER          = ('\r', '\n')
 KEY_ALT_ENTER      = ('\033\r', '\033\n')
 KEY_BACKSPACE      = '\x7f'
