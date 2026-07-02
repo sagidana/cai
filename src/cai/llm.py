@@ -161,17 +161,16 @@ def _turn(api,
           interrupt):
     """Run one model call, yielding content/reasoning events as they arrive.
     Returns (content, reasoning, tool_calls, usage). A set interrupt stops
-    reading a long stream early (caught again at the call_llm loop)."""
+    reading a long stream early (caught again at the call_llm loop). a failed
+    call raises ApiError out of the api layer - it never reads as an empty
+    answer."""
     if not stream:
-        out = api.chat(call_messages,
-                       model,
-                       tools=tools,
-                       tool_choice=tool_choice,
-                       reasoning_effort=reasoning_effort,
-                       temperature=temperature)
-        if out is None:
-            return "", "", None, {}
-        content, reasoning, tool_calls, usage = out
+        content, reasoning, tool_calls, usage = api.chat(call_messages,
+                                                         model,
+                                                         tools=tools,
+                                                         tool_choice=tool_choice,
+                                                         reasoning_effort=reasoning_effort,
+                                                         temperature=temperature)
         if reasoning:
             yield Event(type=EventType.REASONING, text=reasoning)
         if content:
@@ -352,7 +351,12 @@ def call_llm(messages,
                  safe boundary and returns the partial text. None = no kill.
     steer      - callable() -> list of pending steering texts; drained at each
                  turn boundary and folded in as user turns. None = no steering.
-    Returns the final assistant text (as the generator's return value)."""
+    Returns the final assistant text (as the generator's return value).
+
+    a model call that fails for good raises cai.api.ApiError (the api layer
+    retries the transient cases first). the failed turn appends nothing, so
+    `messages` is left at its pre-turn state and a resubmit is clean - only
+    steering texts already folded in (real user turns) remain."""
     hooks = _as_registry(hooks)
     if ui is None:
         ui = NULL_UI

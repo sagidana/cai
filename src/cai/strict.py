@@ -156,20 +156,24 @@ def enforce_strict_format(make_stream,
         # failed attempt is discarded, so only the winning attempt reaches the UI.
         gen = make_stream(strict_system_prompt)
         buffered = []
-        while True:
-            try:
-                event = next(gen)
-            except StopIteration as stop:
-                text = stop.value
-                break
-            buffered.append(event)
-
-        # call_llm appended the model's answer at the tail; lift it out, then drop
-        # the whole scaffold so a retry (or the final answer) starts from pre_len.
         assistant_msg = None
-        if len(messages) > pre_len and messages[-1].get("role") == "assistant":
-            assistant_msg = messages[-1]
-        del messages[pre_len:]
+        try:
+            while True:
+                try:
+                    event = next(gen)
+                except StopIteration as stop:
+                    text = stop.value
+                    break
+                buffered.append(event)
+        finally:
+            # call_llm appended the model's answer at the tail (when the attempt
+            # got that far); lift it out, then drop the whole scaffold so a retry
+            # (or the final answer) starts from pre_len. in a finally so a raise
+            # mid-attempt (an ApiError) never leaks the guidance/feedback turns
+            # into the conversation the caller keeps.
+            if len(messages) > pre_len and messages[-1].get("role") == "assistant":
+                assistant_msg = messages[-1]
+            del messages[pre_len:]
 
         content = text
         if content:

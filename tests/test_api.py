@@ -9,7 +9,7 @@ import pytest
 import requests
 
 import cai.api as api
-from cai.api import OpenAiApi, _wire_messages
+from cai.api import ApiError, OpenAiApi, _wire_messages
 
 
 # --------------------------------------------------------------------------
@@ -50,11 +50,14 @@ class FakeResponse:
 
 class Recorder:
     """A fake requests.post that records calls and returns a programmed
-    response (or raises a programmed exception)."""
+    response (or raises a programmed exception). `script` replays a sequence -
+    each item a response or an exception, one per call - so a retry path can
+    fail first and succeed later."""
 
-    def __init__(self, response=None, exc=None):
+    def __init__(self, response=None, exc=None, script=None):
         self.response = response
         self.exc = exc
+        self.script = list(script or [])
         self.calls = []
 
     def __call__(self, url, **kwargs):
@@ -62,6 +65,11 @@ class Recorder:
         record['url'] = url
         record['kwargs'] = kwargs
         self.calls.append(record)
+        if self.script:
+            step = self.script.pop(0)
+            if isinstance(step, Exception):
+                raise step
+            return step
         if self.exc is not None:
             raise self.exc
         return self.response
@@ -81,9 +89,11 @@ def sse(obj):
     return b"data: " + json.dumps(obj).encode()
 
 
-def install(monkeypatch, response=None, exc=None):
-    rec = Recorder(response=response, exc=exc)
+def install(monkeypatch, response=None, exc=None, script=None):
+    rec = Recorder(response=response, exc=exc, script=script)
     monkeypatch.setattr(api.requests, "post", rec)
+    # retries wait between attempts; a test never should.
+    monkeypatch.setattr(api, "_RETRY_BACKOFF", 0)
     return rec
 
 
@@ -308,40 +318,84 @@ def test_blocking_usage_defaults_empty(monkeypatch):
     assert usage == {}
 
 
-def test_blocking_connection_error_returns_none(monkeypatch):
-    install(monkeypatch, exc=requests.ConnectionError("boom"))
-    assert client().chat([], "m") is None
+def test_blocking_connection_error_retried_then_raises(monkeypatch):
+    rec = install(monkeypatch, exc=requests.ConnectionError("boom"))
+    with pytest.raises(ApiError) as err:
+        client().chat([], "m")
+    assert err.value.status is None
+    assert len(rec.calls) == 3          # the default retries=3 attempts
 
 
-def test_blocking_timeout_returns_none(monkeypatch):
-    install(monkeypatch, exc=requests.Timeout("slow"))
-    assert client().chat([], "m") is None
+def test_blocking_timeout_retried_then_raises(monkeypatch):
+    rec = install(monkeypatch, exc=requests.Timeout("slow"))
+    with pytest.raises(ApiError):
+        client().chat([], "m")
+    assert len(rec.calls) == 3
 
 
-def test_blocking_non_200_returns_none(monkeypatch):
-    install(monkeypatch, FakeResponse(status_code=500))
-    assert client().chat([], "m") is None
+def test_blocking_500_retried_then_succeeds(monkeypatch):
+    script = [FakeResponse(status_code=500), FakeResponse(body=blocking_body(content="ok"))]
+    rec = install(monkeypatch, script=script)
+    content, _, _, _ = client().chat([], "m")
+    assert content == "ok"
+    assert len(rec.calls) == 2
 
 
-def test_blocking_invalid_json_returns_none(monkeypatch):
-    install(monkeypatch, FakeResponse(raise_json=True))
-    assert client().chat([], "m") is None
+def test_blocking_429_retried_then_succeeds(monkeypatch):
+    script = [FakeResponse(status_code=429), FakeResponse(body=blocking_body(content="ok"))]
+    rec = install(monkeypatch, script=script)
+    content, _, _, _ = client().chat([], "m")
+    assert content == "ok"
+    assert len(rec.calls) == 2
 
 
-def test_blocking_zero_choices_returns_none(monkeypatch):
+def test_blocking_non_200_exhausts_and_raises_with_status(monkeypatch):
+    rec = install(monkeypatch, FakeResponse(status_code=500))
+    with pytest.raises(ApiError) as err:
+        client().chat([], "m")
+    assert err.value.status == 500
+    assert len(rec.calls) == 3
+
+
+def test_blocking_400_not_retried(monkeypatch):
+    rec = install(monkeypatch, FakeResponse(status_code=400))
+    with pytest.raises(ApiError) as err:
+        client().chat([], "m")
+    assert err.value.status == 400
+    assert len(rec.calls) == 1          # permanent: a retry cannot fix it
+
+
+def test_retries_floor_is_one_attempt(monkeypatch):
+    rec = install(monkeypatch, FakeResponse(status_code=500))
+    with pytest.raises(ApiError):
+        OpenAiApi("https://example.test/v1", "sk-test", retries=0).chat([], "m")
+    assert len(rec.calls) == 1
+
+
+def test_blocking_invalid_json_raises_without_retry(monkeypatch):
+    rec = install(monkeypatch, FakeResponse(raise_json=True))
+    with pytest.raises(ApiError):
+        client().chat([], "m")
+    assert len(rec.calls) == 1          # the POST succeeded; the body is broken
+
+
+def test_blocking_zero_choices_raises(monkeypatch):
     install(monkeypatch, FakeResponse(body={"choices": []}))
-    assert client().chat([], "m") is None
+    with pytest.raises(ApiError):
+        client().chat([], "m")
 
 
-def test_blocking_multiple_choices_returns_none(monkeypatch):
+def test_blocking_multiple_choices_raises(monkeypatch):
     body = {"choices": [{"message": {"content": "a"}}, {"message": {"content": "b"}}]}
     install(monkeypatch, FakeResponse(body=body))
-    assert client().chat([], "m") is None
+    with pytest.raises(ApiError):
+        client().chat([], "m")
 
 
-def test_blocking_missing_message_returns_none(monkeypatch):
+def test_blocking_missing_message_raises(monkeypatch):
     install(monkeypatch, FakeResponse(body={"choices": [{}]}))
-    assert client().chat([], "m") is None
+    with pytest.raises(ApiError):
+        client().chat([], "m")
 
 
 # --------------------------------------------------------------------------
@@ -496,21 +550,84 @@ def test_streaming_done_terminates_before_trailing_lines(monkeypatch):
     assert texts == ["a"]
 
 
-def test_streaming_non_200_yields_single_empty(monkeypatch):
+def test_streaming_non_200_exhausts_and_raises(monkeypatch):
     resp = FakeResponse(status_code=500)
-    install(monkeypatch, resp)
-    deltas = drain(client().chat([], "m", stream=True))
-    assert deltas == [(None, None, None, {})]
+    rec = install(monkeypatch, resp)
+    with pytest.raises(ApiError) as err:
+        drain(client().chat([], "m", stream=True))
+    assert err.value.status == 500
     assert resp.closed is True
+    assert len(rec.calls) == 3
 
 
-def test_streaming_connection_error_yields_single_empty(monkeypatch):
-    install(monkeypatch, exc=requests.ConnectionError("boom"))
+def test_streaming_non_200_retried_then_streams(monkeypatch):
+    lines = []
+    lines.append(sse({"choices": [{"delta": {"content": "ok"}, "finish_reason": None}]}))
+    lines.append(b"data: [DONE]")
+    rec = install(monkeypatch, script=[FakeResponse(status_code=503), FakeResponse(lines=lines)])
     deltas = drain(client().chat([], "m", stream=True))
-    assert deltas == [(None, None, None, {})]
+    assert deltas[0][0] == "ok"
+    assert len(rec.calls) == 2
+
+
+def test_streaming_connection_error_retried_then_raises(monkeypatch):
+    rec = install(monkeypatch, exc=requests.ConnectionError("boom"))
+    with pytest.raises(ApiError):
+        drain(client().chat([], "m", stream=True))
+    assert len(rec.calls) == 3
+
+
+def test_streaming_mid_stream_drop_raises_without_retry(monkeypatch):
+    # once bytes flowed a retry would replay output the consumer already saw:
+    # the partial deltas arrive, then the drop surfaces as ApiError, one POST.
+    def lines_then_die():
+        yield sse({"choices": [{"delta": {"content": "par"}, "finish_reason": None}]})
+        raise requests.ConnectionError("reset mid-stream")
+
+    resp = FakeResponse()
+    resp.iter_lines = lines_then_die
+    rec = install(monkeypatch, resp)
+    gen = client().chat([], "m", stream=True)
+    first = next(gen)
+    assert first[0] == "par"
+    with pytest.raises(ApiError):
+        next(gen)
+    assert len(rec.calls) == 1
 
 
 def test_streaming_empty_stream_yields_final_only(monkeypatch):
     install(monkeypatch, FakeResponse(lines=[b"data: [DONE]"]))
     deltas = drain(client().chat([], "m", stream=True))
     assert deltas == [(None, None, None, {})]
+
+
+# --------------------------------------------------------------------------
+# error propagation through call_llm
+# --------------------------------------------------------------------------
+
+class RaisingApi:
+    """an api whose every chat raises ApiError (the exhausted-retries case)."""
+
+    def chat(self, messages, model, **kwargs):
+        raise ApiError("provider down", status=502)
+
+
+def test_call_llm_propagates_api_error():
+    from cai.llm import call_llm
+
+    gen = call_llm([{"role": "user", "content": "hi"}], "m", RaisingApi())
+    with pytest.raises(ApiError) as err:
+        next(gen)
+    assert err.value.status == 502
+
+
+def test_call_llm_failed_turn_leaves_messages_untouched():
+    # a failed call must not read as the model answering "": nothing from the
+    # failed turn is appended, so a resubmit starts from the pre-turn state.
+    from cai.llm import call_llm
+
+    messages = [{"role": "user", "content": "hi"}]
+    gen = call_llm(messages, "m", RaisingApi(), stream=False)
+    with pytest.raises(ApiError):
+        next(gen)
+    assert messages == [{"role": "user", "content": "hi"}]

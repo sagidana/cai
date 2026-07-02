@@ -204,3 +204,26 @@ def test_interrupt_stops_retrying_and_keeps_partial():
     assert text == "oops"
     assert make_stream.count == 1
     assert messages == [user("q"), assistant("oops")]
+
+
+# ---------------------------------------------------------------------------
+# a raise mid-attempt
+# ---------------------------------------------------------------------------
+
+def test_raise_mid_attempt_leaves_no_scaffold():
+    # an attempt that dies mid-run (an ApiError out of the api layer) must not
+    # leak the guidance/feedback scaffold into the conversation the caller keeps.
+    from cai.api import ApiError
+
+    messages = [user("give me json")]
+
+    def make_stream(system_prompt):
+        def gen():
+            yield Event(type=EventType.CONTENT, text="par")
+            raise ApiError("connection reset")
+        return gen()
+
+    gen = enforce_strict_format(make_stream, "json", None, messages)
+    with pytest.raises(ApiError):
+        drain(gen)
+    assert messages == [user("give me json")]

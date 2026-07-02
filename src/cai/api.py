@@ -1,10 +1,40 @@
 import json
+import time
 import logging
 import warnings
 import requests
 from urllib3.exceptions import InsecureRequestWarning
 
 log = logging.getLogger("cai")
+
+# base delay before the second attempt; each further attempt doubles it.
+# module-level so a test can zero it out.
+_RETRY_BACKOFF = 0.5
+
+
+class ApiError(Exception):
+    """a chat request failed for good: a transport error, a bad HTTP status, or
+    an unusable response body - after the transient cases (network errors, 429,
+    5xx) were retried. `status` carries the HTTP status when one was received.
+
+    this is the api layer's whole error surface: chat() raises it instead of
+    returning a sentinel, so a failed call can never read as the model
+    answering with an empty string."""
+
+    def __init__(self, message, status=None):
+        super().__init__(message)
+        self.status = status
+
+
+def _retryable(status):
+    """whether a failed request is worth retrying: any network-level failure
+    (no status), rate limiting (429), or a server-side error (5xx). other 4xx
+    are permanent - a retry cannot fix bad auth or a bad request."""
+    if status is None:
+        return True
+    if status == 429:
+        return True
+    return status >= 500
 
 
 def _price_per_mtok(value):
@@ -47,16 +77,18 @@ def _wire_messages(messages):
 
 
 class OpenAiApi:
-    """A minimal OpenAI-compatible chat client: one blocking HTTP POST to
-    /chat/completions that returns the assistant's message. This is the
-    bottom of the stack - it knows nothing about tools-as-code, sessions,
-    streaming, or retries; it just speaks the wire format."""
+    """A minimal OpenAI-compatible chat client: one HTTP POST to
+    /chat/completions that returns the assistant's message. This is the bottom
+    of the stack - it knows nothing about tools-as-code or sessions; it speaks
+    the wire format, retries the transient failures, and raises ApiError for
+    everything it cannot recover."""
 
     def __init__(self,
                  base_url,
                  api_key,
                  ssl_verify=True,
-                 timeout=(10, 120)):
+                 timeout=(10, 120),
+                 retries=3):
         self.base_url = base_url
         self.api_key = api_key
         self.ssl_verify = ssl_verify
@@ -67,6 +99,8 @@ class OpenAiApi:
         if isinstance(timeout, (list, tuple)):
             timeout = tuple(timeout)
         self.timeout = timeout
+        # total attempts per chat request (1 = no retries).
+        self.retries = max(1, retries)
 
     def _request_data(self,
                       messages,
@@ -108,10 +142,14 @@ class OpenAiApi:
         generator, so its return shape depends on `stream`:
 
         - stream=False: blocks and returns a single tuple
-          (content, reasoning, tool_calls, usage), or None on failure.
+          (content, reasoning, tool_calls, usage).
         - stream=True: returns a generator that yields incremental
           (content, reasoning, finished_tool_calls, usage) tuples; the final
           yield carries the full usage and the assembled tool calls.
+
+        either shape raises ApiError on failure: transient failures (network
+        errors, 429/5xx) are retried up to self.retries attempts first, and a
+        streaming request is only ever retried before its first byte was read.
 
         `system_prompt`, when given, is a ready-built message dict prepended
         to `messages`."""
@@ -226,36 +264,56 @@ class OpenAiApi:
             if extra:
                 record.update(extra)
 
+    def _post_with_retry(self, url, headers, data, stream):
+        """POST one chat request, retrying the transient failures (network
+        errors, 429/5xx) with a short doubling backoff. returns the 200
+        response; raises ApiError once the attempts run out or on a permanent
+        failure. a streaming caller gets the response back before any body was
+        read, so a retry here never duplicates streamed output."""
+        attempt = 0
+        while True:
+            attempt += 1
+            status = None
+            try:
+                r = requests.post(url,
+                                  headers=headers,
+                                  json=data,
+                                  stream=stream,
+                                  timeout=self.timeout,
+                                  verify=self.ssl_verify)
+            except requests.RequestException as e:
+                error = f"request {url} failed: {e}"
+            else:
+                if r.status_code == 200:
+                    return r
+                status = r.status_code
+                error = f"request {url} failed with {status}: {r.text[:300]}"
+                r.close()
+            if not _retryable(status) or attempt >= self.retries:
+                raise ApiError(error, status=status)
+            delay = _RETRY_BACKOFF * (2 ** (attempt - 1))
+            log.warning("api: %s; retrying in %.1fs (attempt %d/%d)",
+                        error, delay, attempt, self.retries)
+            time.sleep(delay)
+
     def _complete(self, url, headers, data):
-        """Blocking path: one POST, parse the single JSON body, return the
-        (content, reasoning, tool_calls, usage) tuple or None."""
-        try:
-            r = requests.post(url,
-                              headers=headers,
-                              json=data,
-                              timeout=self.timeout,
-                              verify=self.ssl_verify)
-        except requests.RequestException as e:
-            log.error(f"[!] request {url} failed: {e}")
-            return
-        if r.status_code != 200:
-            log.error(f"[!] request {url} failed with {r.status_code}, {r.text}")
-            return
+        """Blocking path: one POST (retried while transient), parse the single
+        JSON body, return the (content, reasoning, tool_calls, usage) tuple. an
+        unusable body raises ApiError - a failed call must never read as the
+        model answering with an empty string."""
+        r = self._post_with_retry(url, headers, data, stream=False)
         try:
             result = r.json()
         except ValueError as e:
-            log.error(f"[!] request {url} returned invalid JSON: {e}")
-            return
+            raise ApiError(f"request {url} returned invalid JSON: {e}")
 
         choices = result.get("choices", [])
         if len(choices) != 1:
-            log.error(f"[!] len(choices) != 1: {choices}")
-            return
+            raise ApiError(f"request {url} returned {len(choices)} choices, expected 1")
 
         message = choices[0].get('message', None)
         if not message:
-            log.error("[!] choice message is None")
-            return
+            raise ApiError(f"request {url} returned a choice with no message")
 
         content = message.get('content', "")
         reasoning = message.get('reasoning') or message.get('reasoning_content') or ""
@@ -265,32 +323,30 @@ class OpenAiApi:
         return content, reasoning, tool_calls, usage
 
     def _stream(self, url, headers, data):
-        """Streaming path: POST with stream=True, parse the SSE `data:` lines,
-        reassemble tool-call argument fragments, and yield deltas as they
-        arrive. The final yield carries the assembled tool calls + full usage."""
+        """Streaming path: POST with stream=True (retried while transient,
+        before any byte was read), parse the SSE `data:` lines, reassemble
+        tool-call argument fragments, and yield deltas as they arrive. The
+        final yield carries the assembled tool calls + full usage. a drop
+        mid-stream raises ApiError without retrying - a retry would replay
+        output the consumer already saw."""
         finished_tool_calls = None
         tool_calls = {}
         usage = {}
 
-        try:
-            r = requests.post(url,
-                              headers=headers,
-                              json=data,
-                              stream=True,
-                              timeout=self.timeout,
-                              verify=self.ssl_verify)
-        except requests.RequestException as e:
-            log.error(f"[!] request {url} failed: {e}")
-            yield None, None, None, {}
-            return
-        if r.status_code != 200:
-            log.error(f"[!] request {url} failed with {r.status_code}, {r.text}")
-            r.close()
-            yield None, None, None, {}
-            return
+        r = self._post_with_retry(url, headers, data, stream=True)
 
         with r:
-            for line in r.iter_lines():
+            lines = r.iter_lines()
+            while True:
+                # each read may hit the connection dropping mid-stream; that
+                # surfaces from iter_lines as a requests exception, re-raised
+                # as ApiError so the consumer sees one uniform failure type.
+                try:
+                    line = next(lines)
+                except StopIteration:
+                    break
+                except requests.RequestException as e:
+                    raise ApiError(f"request {url} stream aborted: {e}")
                 if not line: continue
                 if not line.startswith(b"data: "): continue
 

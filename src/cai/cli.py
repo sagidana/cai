@@ -263,8 +263,12 @@ def _short_args(tool_args):
 
 def _drive(run):
     """consume the run, routing output, and print the final answer. returns the
-    process exit code."""
+    process exit code. a run that fails for good (ApiError after the api layer's
+    retries, or an LLMError like max_steps / strict-format exhaustion) prints
+    one error line to stderr and exits 1 - never a silent empty answer."""
+    from cai.api import ApiError
     from cai.events import EventType
+    from cai.llm import LLMError
 
     try:
         for event in run:
@@ -280,6 +284,9 @@ def _drive(run):
         run.interrupt.set()
         _diag("[interrupted]")
         return 130
+    except (ApiError, LLMError) as e:
+        print(f"[!] {e}", file=sys.stderr)
+        return 1
 
     content = run.text
     if run.stream and _STDOUT_TTY:

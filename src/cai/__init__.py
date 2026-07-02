@@ -33,6 +33,7 @@ from cai.llm import LLMError, MaxStepsReached, call_llm
 # definitions (go-to-def) without paying the import.
 if TYPE_CHECKING:
     from cai.agent import Agent, Run
+    from cai.api import ApiError
     from cai.environment import Environment
     from cai.tools import ToolsRegistry, tool, mcp_server
 
@@ -50,6 +51,7 @@ __all__ = [
     "ToolsRegistry",
     "tool",
     "mcp_server",
+    "ApiError",
     "LLMError",
     "MaxStepsReached",
     "call_llm",
@@ -71,6 +73,10 @@ def __getattr__(name):
     if name == "Environment":
         from cai.environment import Environment
         return Environment
+    # api pulls requests; lazy so `import cai` stays light.
+    if name == "ApiError":
+        from cai.api import ApiError
+        return ApiError
     # tools pulls the environment, so keep it lazy too - cai.tool resolves
     # here the first time an extension's tools/*.py decorates a function.
     if name == "tool":
