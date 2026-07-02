@@ -3,8 +3,9 @@
 A self-contained FastMCP stdio server (stdlib only). Its tools are surfaced
 prefixed with the file name: ``fs__search``, ``fs__read_file``,
 ``fs__list_files`` (read-only), and ``fs__create_file``, ``fs__edit_file``,
-``fs__rename_file``, ``fs__move_file``, ``fs__remove_file``,
-``fs__create_directory``, ``fs__move_directory`` (read-write).
+``fs__rename_file``, ``fs__move_file``, ``fs__copy_file``,
+``fs__remove_file``, ``fs__create_directory``, ``fs__move_directory``
+(read-write).
 
 Pair them with the ``fs-read-only`` skill for inspection, or the ``fs`` skill
 which adds the mutating tools. Every path is confined to the current working
@@ -300,6 +301,31 @@ def move_file(src_path: str, dst_path: str) -> str:
     shutil.move(safe_src, safe_dst)
     dst_rel = os.path.relpath(safe_dst, os.path.realpath("."))
     return f"Moved {src_path} -> {dst_rel}"
+
+
+@mcp.tool()
+def copy_file(src_path: str, dst_path: str) -> str:
+    """Copy a file to a new location within the working directory.
+
+    If dst_path is an existing directory the file is placed inside it keeping its
+    original name. Both paths must be inside the working directory; parent
+    directories of dst_path are created automatically.
+    """
+    try:
+        safe_src = safe_path(src_path)
+        safe_dst = safe_path(dst_path)
+    except ValueError as e:
+        return str(e)
+    if not os.path.exists(safe_src):
+        return f"Error: source not found: {src_path}"
+    if os.path.isdir(safe_src):
+        return f"Error: {src_path!r} is a directory, not a file"
+    if os.path.isdir(safe_dst):
+        safe_dst = os.path.join(safe_dst, os.path.basename(safe_src))
+    os.makedirs(os.path.dirname(safe_dst), exist_ok=True)
+    shutil.copy2(safe_src, safe_dst)
+    dst_rel = os.path.relpath(safe_dst, os.path.realpath("."))
+    return f"Copied {src_path} -> {dst_rel}"
 
 
 @mcp.tool()
