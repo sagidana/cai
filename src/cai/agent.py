@@ -202,12 +202,12 @@ class Agent:
         self.children = []   # ids of the sub-agents launched this session
         self.tools_registry = ToolsRegistry(self.env)
 
-        # registers subagents tools (lazy import: subagent imports Agent in turn).
+        # registers the env's agent-bound tools (the sub-agent trio by default).
         # override=True so these bind to *this* agent even if a tool of the same
         # name was inherited from a parent (a child's launch_agent must drive the
-        # child, not the parent).
-        from cai.subagent import subagent_tools
-        for tool in subagent_tools(self):
+        # child, not the parent). the env is the composition root here: the core
+        # Agent never names the feature layers above it.
+        for tool in self.env.agent_tools(self):
             self.tools_registry.register(tool, override=True)
 
         for tool in (tools or []): self.tools_registry.select(tool)
@@ -329,6 +329,24 @@ class Agent:
         recomposes it with the active skills on the next read, so this is all the
         live agent needs. the change is never written to disk."""
         self._system_prompt = base
+
+    @property
+    def system_prompt_base(self):
+        """the user-supplied base prompt (no skills folded in) - what
+        set_system_prompt_base writes and a child/clone inherits."""
+        return self._system_prompt
+
+    @property
+    def hooks(self):
+        """the caller-supplied [(event, fn), ...] hooks (None when none) - what
+        a child/clone inherits; the env's hooks ride along via env, not here."""
+        return self._hooks
+
+    def set_ui(self, ui):
+        """replace the human-interaction surface hooks prompt through (ctx.ui).
+        the serving layer routes prompts over the wire by installing a WireUI
+        here."""
+        self._ui = ui
 
     def clone(self, name=None, ui=None):
         """build a new Agent carrying this one's state - a deep copy of the

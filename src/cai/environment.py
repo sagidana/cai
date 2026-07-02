@@ -189,6 +189,15 @@ def _import_tool_files(extension):
         _import_file(os.path.join(directory, filename))
 
 
+def _subagent_tools(agent):
+    """the sub-agent trio (launch/wait/kill) bound to `agent`; the import is
+    deferred so building an env - or importing cai.agent - never pulls the
+    serving stack. wired here, at the composition root, so the core Agent
+    stays ignorant of the layers above it."""
+    from cai.subagent import subagent_tools
+    return subagent_tools(agent)
+
+
 class Environment:
     """one install catalogue: extensions, function tools, declared MCP servers,
     hooks, commands, and the live Settings. see the module docstring for how
@@ -206,6 +215,10 @@ class Environment:
         self._declared_servers = {}  # server name -> spec dict
         self._hooks = []             # (event, fn) pairs, registration order
         self._commands = {}          # name -> cai.commands.Command
+        # factories called with each new Agent to produce tools bound to it -
+        # registered on the agent (unselected) until a skill or the user
+        # selects them. default: the sub-agent trio.
+        self._agent_tools = [_subagent_tools]
         # the bundle load() is importing right now: an extension name, 'user'
         # for the top-level init.py, or None outside a load. register_tool
         # reads it to namespace extension tools.
@@ -343,6 +356,16 @@ class Environment:
     def commands(self):
         """the registered commands as name -> Command (a copy)."""
         return dict(self._commands)
+
+    def agent_tools(self, agent):
+        """the tools bound to a new Agent, from every registered factory.
+        Agent.__init__ registers them (unselected, override=True) so each
+        agent - a clone, a child - gets its OWN bindings, never an inherited
+        parent's."""
+        tools = []
+        for factory in self._agent_tools:
+            tools.extend(factory(agent))
+        return tools
 
     # --- the filesystem search paths and the install-wide catalogue ---
 

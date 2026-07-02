@@ -235,7 +235,7 @@ class WiredAgent:
         self.ui = WireUI(self)          # sender is self: prompts broadcast to all
         # the served agent's humans are now the wire clients: route its hooks' UI
         # prompts over the channels.
-        agent._ui = self.ui
+        agent.set_ui(self.ui)
         self._wires = set()             # the live Wire connections
         self._wires_lock = threading.Lock()
         self._work = queue.Queue()      # ("submit", text) | ("control", op, value, wire)
@@ -522,7 +522,7 @@ class WiredAgent:
             value["model"] = agent.model
             value["children"] = children
             value["system_prompt"] = agent.system_prompt
-            value["system_prompt_base"] = agent._system_prompt
+            value["system_prompt_base"] = agent.system_prompt_base
             return True, value, None
         if op == "save":
             # value is the target path, or None for a default timestamped file;

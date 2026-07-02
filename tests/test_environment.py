@@ -4,7 +4,9 @@ register onto the loading env (extension tools namespaced at load time). Fully
 offline: each test gets its own ~/.config/cai via HOME, and the conftest
 fixture makes the default env fresh between tests."""
 import os
+import sys
 import textwrap
+import subprocess
 
 import pytest
 
@@ -269,3 +271,39 @@ def test_merge_activations_dedupes_explicit_first():
     merged = Environment.merge_activations(["a", "b"], ["b", "c"])
     assert merged == ["a", "b", "c"]
     assert Environment.merge_activations(None, None) == []
+
+
+def test_importing_agent_does_not_pull_the_serving_stack():
+    # the layer contract: cai.agent must not import cai.subagent (and through
+    # it the wire/serving stack) - the env wires the sub-agent trio in at
+    # Agent construction, so the import happens then, not at module load.
+    # the parent's sys.path rides along: the fixture's HOME isolation hides
+    # the user-site dir a `pip install -e --user` cai lives in.
+    child_env = dict(os.environ)
+    child_env["PYTHONPATH"] = os.pathsep.join(sys.path)
+    code = "import cai.agent, sys; assert 'cai.subagent' not in sys.modules"
+    proc = subprocess.run([sys.executable, "-c", code], env=child_env)
+    assert proc.returncode == 0
+
+
+def test_agent_tools_default_is_the_subagent_trio():
+    tools = Environment().agent_tools(object())
+    names = []
+    for tool in tools:
+        names.append(tool.__name__)
+    assert names == ["launch_agent", "wait_agent", "kill_agent"]
+
+
+def test_env_without_agent_tools_builds_bare_agents():
+    # an embedder can strip the default factories: agents on such an env get
+    # no bound tools at all.
+    env = Environment()
+    env._agent_tools = []
+
+    class OneTurnApi:
+        def chat(self, messages, model, **kw):
+            return "done", "", None, {}
+
+    from cai.agent import Agent
+    agent = Agent(model="m", api=OneTurnApi(), env=env)
+    assert agent.tools_registry.names() == []

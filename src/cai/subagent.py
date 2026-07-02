@@ -1,9 +1,11 @@
 """subagent: launch / wait / kill sub-agents as bound tools on a parent Agent.
 
-A parent activates these by listing the 'subagents' skill: Agent bootstraps the
-three tools at construction (subagent_tools), bound to the parent so they read
-its live state. They are in-process bound tools, NOT MCP tools - an MCP server
-runs in its own subprocess and cannot reach the parent's live Agent.
+A parent activates these by listing the 'subagents' skill: the Environment's
+default agent-tool factory hands the three tools (subagent_tools) to every
+Agent at construction, bound to that agent so they read its live state - the
+env is the composition root, so the core Agent never imports this module. They
+are in-process bound tools, NOT MCP tools - an MCP server runs in its own
+subprocess and cannot reach the parent's live Agent.
 
 launch_agent builds a child Agent, serves it with UnixWiredAgent on its own unix
 socket, and hands it to one owner thread that drives it to completion and tears
@@ -81,7 +83,7 @@ def _inherit_skills(parent, names):
 def _child_system_prompt(parent, override):
     """the child's system prompt: the autonomous-sub-agent PREAMBLE, then the
     override if given else the parent's own base prompt."""
-    base = override or parent._system_prompt
+    base = override or parent.system_prompt_base
     parts = [PREAMBLE]
     if base:
         parts.append(base)
@@ -228,7 +230,7 @@ def _launch_agent(parent,
                       system_prompt=child_prompt,
                       tools=child_tools,
                       skills=child_skills,
-                      hooks=parent._hooks)
+                      hooks=parent.hooks)
         # no path: the child registers at ~/.config/cai/agents/<name>.sock, the
         # common folder every UnixWiredAgent binds in.
         server = UnixWiredAgent(agent)
