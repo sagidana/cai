@@ -7,8 +7,8 @@ The data (one node per agent across the registry, finished agents kept) and the
 preview/stop logic live in cli.py - this module is pure presentation.
 
 Keys: j/k move, gg/G jump, Ctrl-U/D half-page, /search (n/N to cycle), Enter
-attaches to the selected agent, Ctrl-K kills the selected running agent, ESC
-closes.
+views the selected agent's transcript, Ctrl-K kills the selected running
+agent, ESC closes.
 """
 
 from ..ansi import (
@@ -70,5 +70,5 @@ def prompt_agents_overlay(screen, fetch_fn, preview_fn, stop_fn=None, self_id=No
         is_self_fn=_is_self,
         action_fn=stop_fn,
         title="agents",
-        hints='  j/k /:search ↵:attach ^K:kill ESC:cancel',
+        hints='  j/k /:search ↵:view ^K:kill ESC:cancel',
     )
