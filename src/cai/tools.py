@@ -4,6 +4,8 @@ tool its Environment offers.
   - function tools: plain Python callables registered via the cai.tool
     decorator (an extension's tools/*.py, imported by Environment.load). The
     env holds them by exposed name; a registry resolves a bare name against it.
+    cai.wrap registers a function tool that builds on another tool: its first
+    parameter receives the target's dispatch at call time (see wrap).
   - MCP tools: each *.py under an extension's mcps/ dir (or the builtins/mcps/
     dir shipped with cai) is an MCP server (a FastMCP stdio program), and
     cai.mcp_server declares one programmatically into the env. This module
@@ -271,16 +273,22 @@ def server_from_spec(name, spec):
 def schema_from_function(fn):
     """build an OpenAI tool schema from a Python callable. param types come from
     annotations (unannotated default to string; unsupported types raise
-    TypeError); the description is the first line of the docstring."""
+    TypeError); the description is the first line of the docstring. a wrap
+    tool's first parameter receives the injected target call, so it is left out
+    of the schema the model sees."""
     sig = inspect.signature(fn)
     try:
         hints = typing.get_type_hints(fn)
     except Exception:
         hints = {}
 
+    params = list(sig.parameters.items())
+    if getattr(fn, "_cai_wrap_target", None) is not None:
+        params = params[1:]
+
     properties = {}
     required = []
-    for pname, param in sig.parameters.items():
+    for pname, param in params:
         ann = hints.get(pname, param.annotation)
         item_type = None
         if ann is inspect.Parameter.empty:
@@ -383,13 +391,31 @@ class ToolsRegistry:
         """expose a Python callable as a tool. its schema is derived from the
         signature + docstring, and a call runs it in-process. the tool name is
         the function's exposed name (namespaced '<extension>__<name>' for an
-        extension tool, else its __name__); a duplicate name raises ValueError."""
+        extension tool, else its __name__); a duplicate name raises ValueError.
+
+        a wrap tool (cai.wrap) also registers its target - dispatchable but
+        unselected, so the model sees the wrapper and not the tool it builds
+        on. a target that cannot be registered (its bundle not installed, its
+        server failing) unregisters the wrapper again, logged and skipped like
+        a failed MCP tool."""
         name = _function_tool_name(fn)
         self._is_name_free(name)
+        target = getattr(fn, "_cai_wrap_target", None)
+        if target == name:
+            log.error("wrap tool %r wraps itself; skipped", name)
+            return
         self._functions[name] = fn
         self._dispatch[name] = ("function", name)
         self._schemas[name] = schema_from_function(fn)
         self._order.append(name)
+        if target is None: return
+        try:
+            self.register(target)
+        except Exception:
+            log.exception("wrap tool %r: registering target %r failed", name, target)
+        if self.has(target): return
+        log.error("wrap tool %r: target %r not available; skipped", name, target)
+        self.remove(name)
 
     def register_mcp_tool(self, name):
         """register an MCP tool reference '<mcp_name>__<tool_name>'. the server
@@ -555,11 +581,17 @@ class ToolsRegistry:
 
     def _call_function(self, name, arguments):
         fn = self._functions[name]
+        target = getattr(fn, "_cai_wrap_target", None)
+        args = [] # a wrap tool's injected first argument: its target's dispatch
+        if target is not None:
+            def call(**kwargs):
+                return self.dispatch(target, kwargs)
+            args.append(call)
         try:
             if arguments:
-                result = fn(**arguments)
+                result = fn(*args, **arguments)
             else:
-                result = fn()
+                result = fn(*args)
         except Exception as e:
             log.exception("tool %s raised", name)
             return f"Error: tool '{name}' raised: {e}"
@@ -603,6 +635,36 @@ def tool(fn):
     it by name. see Environment / ToolsRegistry."""
     Environment.target().register_tool(fn)
     return fn
+
+
+def wrap(target):
+    """decorator: register a function tool that wraps another tool, e.g.
+
+        @cai.wrap("knowit__read_note")
+        def read_note(call, id: str):
+            \"\"\"Read a note from cai's memory vault.\"\"\"
+            return call(id=id, cwd="~/.config/cai/notes")
+
+    `target` names any registered tool - a function tool, an MCP tool
+    ('<mcp>__<tool>'), or another wrapper. the wrapper is a normal function
+    tool in every respect (namespaced, schema from its own signature +
+    docstring), except its first parameter receives the target at dispatch
+    time - a callable taking the target's kwargs and returning its text result
+    (an 'Error: ...' string on failure, never an exception) - and is hidden
+    from the model's schema. selecting the wrapper registers the target too,
+    dispatchable but unselected. see ToolsRegistry.register_function."""
+    if not isinstance(target, str):
+        raise TypeError(f"cai.wrap: target must be a tool name string, got {target!r}")
+
+    def decorator(fn):
+        sig = inspect.signature(fn)
+        if not sig.parameters:
+            raise TypeError(f"wrap tool {fn.__name__!r} needs a first parameter "
+                            f"to receive the target call")
+        fn._cai_wrap_target = target
+        Environment.target().register_tool(fn)
+        return fn
+    return decorator
 
 
 def mcp_server(name, command=None, url=None, env=None, headers=None, cwd=None):

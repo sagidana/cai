@@ -44,6 +44,29 @@ def test_declared_local_command_server_lists_and_dispatches(tmp_path):
         registry.close()
 
 
+def test_wrap_dispatches_through_a_real_mcp_tool(tmp_path):
+    import os
+    import sys
+
+    fs = os.path.join(builtin_mcp_dir(), "fs.py")
+    (tmp_path / "vault.txt").write_text("hi")
+    cai.mcp_server("myfs", command=[sys.executable, fs], cwd=str(tmp_path))
+
+    @cai.wrap("myfs__list_files")
+    def list_vault(call) -> str:
+        """List the vault."""
+        return call(directory=".")
+
+    registry = ToolsRegistry.for_tools(["list_vault"])
+    try:
+        assert registry.selected() == ["list_vault"]
+        assert "myfs__list_files" in registry.names()
+        out = registry.dispatch("list_vault", {})
+        assert "vault.txt" in out
+    finally:
+        registry.close()
+
+
 def test_declared_server_shadows_on_disk_of_same_name():
     # a declared server named like a builtin (fs) wins over the bundled one.
     import sys

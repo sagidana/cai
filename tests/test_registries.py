@@ -107,6 +107,138 @@ def test_later_tool_of_same_name_wins():
     assert Environment.default().function_tool("dup")() == "second"
 
 
+def test_cai_wrap_registers_and_dispatches_through_target():
+    @cai.tool
+    def read_note(id: str, cwd: str = "~/notes") -> str:
+        """Read a note."""
+        return f"note {id} from {cwd}"
+
+    @cai.wrap("read_note")
+    def read_memory(call, id: str) -> str:
+        """Read a note from the memory vault."""
+        return call(id=id, cwd="~/vault")
+
+    registry = ToolsRegistry()
+    registry.select("read_memory")
+    assert registry.dispatch("read_memory", {"id": "7"}) == "note 7 from ~/vault"
+
+
+def test_wrap_target_registered_but_unselected():
+    @cai.tool
+    def inner() -> str:
+        """inner."""
+        return "x"
+
+    @cai.wrap("inner")
+    def outer(call) -> str:
+        """outer."""
+        return call()
+
+    registry = ToolsRegistry()
+    registry.select("outer")
+    assert registry.selected() == ["outer"]
+    assert registry.has("inner")
+    assert registry.dispatch("inner", {}) == "x"
+
+
+def test_wrap_schema_hides_the_injected_first_param():
+    @cai.tool
+    def inner(a: str) -> str:
+        """inner."""
+        return a
+
+    @cai.wrap("inner")
+    def outer(call, a: str, extra: int = 1) -> str:
+        """outer."""
+        return call(a=a)
+
+    registry = ToolsRegistry()
+    registry.select("outer")
+    schema = registry.tools[0]["function"]
+    assert list(schema["parameters"]["properties"].keys()) == ["a", "extra"]
+    assert schema["parameters"]["required"] == ["a"]
+    assert schema["description"] == "outer."
+
+
+def test_wrap_can_rework_the_targets_result():
+    @cai.tool
+    def shout(text: str) -> str:
+        """shout."""
+        return text.upper()
+
+    @cai.wrap("shout")
+    def polite_shout(call, text: str) -> str:
+        """polite."""
+        return call(text=text) + ", please"
+
+    registry = ToolsRegistry()
+    registry.select("polite_shout")
+    assert registry.dispatch("polite_shout", {"text": "go"}) == "GO, please"
+
+
+def test_wrap_chain_composes():
+    @cai.tool
+    def base(text: str) -> str:
+        """base."""
+        return text
+
+    @cai.wrap("base")
+    def middle(call, text: str) -> str:
+        """middle."""
+        return call(text=text) + "+middle"
+
+    @cai.wrap("middle")
+    def top(call, text: str) -> str:
+        """top."""
+        return call(text=text) + "+top"
+
+    registry = ToolsRegistry()
+    registry.select("top")
+    assert registry.dispatch("top", {"text": "t"}) == "t+middle+top"
+    assert registry.has("middle")
+    assert registry.has("base")
+
+
+def test_wrap_with_missing_target_is_skipped():
+    @cai.wrap("ghost__tool")
+    def haunted(call) -> str:
+        """haunted."""
+        return call()
+
+    registry = ToolsRegistry()
+    registry.select("haunted")
+    assert not registry.has("haunted")
+    assert registry.selected() == []
+
+
+def test_wrap_wrapping_itself_is_skipped():
+    @cai.wrap("loop")
+    def loop(call) -> str:
+        """loop."""
+        return call()
+
+    registry = ToolsRegistry()
+    registry.select("loop")
+    assert not registry.has("loop")
+
+
+def test_wrap_rejects_a_function_without_parameters():
+    with pytest.raises(TypeError):
+        @cai.wrap("whatever")
+        def bare() -> str:
+            """bare."""
+            return "x"
+
+
+def test_wrap_rejects_a_non_string_target():
+    def target() -> str:
+        """t."""
+        return "t"
+
+    with pytest.raises(TypeError):
+        cai.wrap(target)
+
+
 def test_cai_mcp_server_declares_local():
     cai.mcp_server("github",
                    command=["npx", "-y", "@modelcontextprotocol/server-github"],

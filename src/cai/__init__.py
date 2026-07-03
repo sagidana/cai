@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from cai.agent import Agent, Run, RunInFlight
     from cai.api import ApiError
     from cai.environment import Environment
-    from cai.tools import ToolsRegistry, tool, mcp_server
+    from cai.tools import ToolsRegistry, tool, wrap, mcp_server
 
 __all__ = [
     "Event",
@@ -50,6 +50,7 @@ __all__ = [
     "command",
     "ToolsRegistry",
     "tool",
+    "wrap",
     "mcp_server",
     "ApiError",
     "LLMError",
@@ -86,6 +87,9 @@ def __getattr__(name):
     if name == "tool":
         from cai.tools import tool
         return tool
+    if name == "wrap":
+        from cai.tools import wrap
+        return wrap
     if name == "mcp_server":
         from cai.tools import mcp_server
         return mcp_server
