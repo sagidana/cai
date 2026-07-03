@@ -190,7 +190,7 @@ def _import_tool_files(extension):
 
 
 def _subagent_tools(agent):
-    """the sub-agent trio (launch/wait/kill) bound to `agent`; the import is
+    """the sub-agent tools (launch/wait/list/kill) bound to `agent`; the import is
     deferred so building an env - or importing cai.agent - never pulls the
     serving stack. wired here, at the composition root, so the core Agent
     stays ignorant of the layers above it."""
@@ -217,7 +217,7 @@ class Environment:
         self._commands = {}          # name -> cai.commands.Command
         # factories called with each new Agent to produce tools bound to it -
         # registered on the agent (unselected) until a skill or the user
-        # selects them. default: the sub-agent trio.
+        # selects them. default: the sub-agent tools.
         self._agent_tools = [_subagent_tools]
         # the bundle load() is importing right now: an extension name, 'user'
         # for the top-level init.py, or None outside a load. register_tool

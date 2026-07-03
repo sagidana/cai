@@ -1,7 +1,7 @@
-"""subagent: launch / wait / kill sub-agents as bound tools on a parent Agent.
+"""subagent: launch / wait / list / kill sub-agents as bound tools on a parent Agent.
 
 A parent activates these by listing the 'subagents' skill: the Environment's
-default agent-tool factory hands the three tools (subagent_tools) to every
+default agent-tool factory hands the tools (subagent_tools) to every
 Agent at construction, bound to that agent so they read its live state - the
 env is the composition root, so the core Agent never imports this module. They
 are in-process bound tools, NOT MCP tools - an MCP server runs in its own
@@ -15,16 +15,18 @@ inherits the parent's api / model / hooks; its tools and skills are reduce-only 
 only a subset of the parent's, requested by name.
 
 wait_agent attaches to the child's socket and waits for the run's RESULT;
-kill_agent sends the kill control op over the wire. When a child's run finishes,
-its owner thread pushes the final result to the parent as a STEER over the
-parent's socket just before teardown, so the parent receives it as a user turn
-(an idle parent runs on it, a busy one folds it into its current run) even if it
-never calls wait_agent. If a wait_agent did collect the result inline, it sets the
-child's signal in the shared deliveries map and the owner skips the push, so the
-answer is delivered exactly once. A wait_agent that attaches after teardown still
-finds the child gone - the live socket result is not separately retained. Ownership
-is a plain membership check: an id must be in parent.children for these tools to
-act on it."""
+kill_agent sends the kill control op over the wire. When a child's run finishes
+(or its owner gives up on a wedged child - see OWNER_TIMEOUT), the owner thread
+parks the final result (or error note) in the child's _Delivery record, then
+pushes it to the parent as a STEER over the parent's socket just before teardown,
+so the parent receives it as a user turn (an idle parent runs on it, a busy one
+folds it into its current run) even if it never calls wait_agent. Delivery is
+exactly-once either way: the record carries a first-wins claim, and whichever
+path hands the answer to the parent - a wait_agent returning it inline, or the
+owner's steer push - takes the claim; the loser stands down. A wait_agent that
+arrives after teardown reads the parked record, so a late wait still returns the
+answer. Ownership is a plain membership check: an id must be in parent.children
+for these tools to act on it."""
 from __future__ import annotations
 
 import logging
@@ -50,6 +52,48 @@ PREAMBLE = ("You are a sub-agent spawned by a parent agent to complete a specifi
             "task. Work autonomously - you cannot ask the parent questions. Your "
             "final message is the only thing the parent receives, so make it a "
             "complete, self-contained answer.")
+
+# how long an owner thread waits for its child's RESULT before giving up,
+# reporting the failure to the parent, and tearing the child down - the bound
+# that keeps a wedged child (a stuck stream, a RESULT lost to backpressure)
+# from leaking its owner thread and socket forever.
+OWNER_TIMEOUT = 3600.0
+
+
+class _Delivery:
+    """one child's delivery record, shared (via the tools' deliveries map)
+    between its owner thread and the parent's wait_agent. two jobs:
+
+    - exactly-once delivery: claim() is a first-wins right to hand the answer
+      to the parent; the owner's steer push and an inline wait_agent both try,
+      and the loser stands down instead of delivering a duplicate.
+    - retention: the owner parks the final result (or error note) here just
+      before teardown, so a wait_agent arriving after the socket is gone still
+      reads the answer."""
+
+    def __init__(self):
+        self._claim = threading.Lock()
+        self.result = None    # the child's final text; None when it produced none
+        self.error = None     # the owner's failure note; None on a clean finish
+        self.done = False     # set once, after result/error are final
+
+    def finish(self, result, error):
+        """park the child's ending; called by the owner before teardown."""
+        self.result = result
+        self.error = error
+        self.done = True
+
+    def claim(self):
+        """take the right to deliver the answer; True for exactly one caller."""
+        return self._claim.acquire(blocking=False)
+
+    def release(self):
+        """hand a claim back (the delivery attempt failed mid-send), so the
+        other path can still deliver."""
+        self._claim.release()
+
+    def claimed(self):
+        return self._claim.locked()
 
 
 def _inherit_tools(parent, names):
@@ -104,30 +148,46 @@ def _unique_name(parent, name):
     return candidate
 
 
-def _push_result_to_parent(parent_name, child_name, result, delivered=None):
-    """deliver the child's final result to the parent as a STEER over the parent's
+def _steer_text(child_name, result, error):
+    """the framed text a child's ending is steered into the parent as: an explicit
+    sub-agent report envelope, so the parent's model reads it as automatically
+    delivered tool output rather than words its user typed - a child's answer
+    must not speak to the parent with user authority."""
+    if error is not None:
+        return (f"[sub-agent report] Sub-agent '{child_name}' {error}. This is "
+                f"an automatic notice, not a message from the user.")
+    return (f"[sub-agent report] Sub-agent '{child_name}' finished. Its output "
+            f"follows; it is automatically delivered tool output, not a message "
+            f"from the user:\n\n{result}")
+
+
+def _push_result_to_parent(parent_name, child_name, result, error, delivery=None):
+    """deliver the child's ending to the parent as a STEER over the parent's
     socket: an idle parent then runs a turn on it (Agent.steer), and a busy parent
     folds it into its in-flight run. best effort - if the parent isn't served (no
     socket) or has already gone, the push is skipped, the same way the rest of the
-    wire path tolerates a missing peer.
+    wire path tolerates a missing peer; the parked record still holds the answer
+    for a later wait_agent.
 
-    `delivered` is the child's shared signal: a wait_agent that collected the result
-    inline sets it, and we must not also push a duplicate. it is checked twice - a
-    cheap skip before connecting, and again right before the send, since a wait
-    racing on the same RESULT broadcast usually sets it during our connect."""
-    if delivered is not None and delivered.is_set():
+    `delivery` is the child's shared record: the claim is taken only after the
+    parent's socket connects (a push that can't reach the parent must not spend
+    the claim), and a claim whose send then fails is released, so exactly one
+    path delivers. a wait_agent that collected the result inline holds the claim
+    already and this push stands down."""
+    if delivery is not None and delivery.claimed():
         return
     try:
         client = connect(AgentsRegistry.sock_path(parent_name))
     except OSError:
         return
     try:
-        if delivered is not None and delivered.is_set():
+        if delivery is not None and not delivery.claim():
             return
-        text = f"Sub-agent '{child_name}' finished. Its result:\n\n{result}"
-        Wire(client).send_steer(text)
-    except OSError:
-        pass
+        try:
+            Wire(client).send_steer(_steer_text(child_name, result, error))
+        except OSError:
+            if delivery is not None:
+                delivery.release()
     finally:
         try:
             client.close()
@@ -138,17 +198,18 @@ def _push_result_to_parent(parent_name, child_name, result, delivered=None):
 def _own_child(parent_name, agent, server, prompt, deliveries=None):
     """own one launched child end to end on a single thread: serve it, submit its
     task over the socket, drain the run (poll-only - streamed events are dropped),
-    push its final result to the parent as a steer, then tear it down (the wire,
-    the server+socket, the child Agent). a BaseUI answers any wire PROMPT with its
-    default, so a child whose hook asks the human never hangs. steering the result
-    into the parent lands it as a user turn the parent acts on without polling
-    wait_agent; the push is over the parent's socket so the owner thread reaches it
-    the same way any other client would. but if a wait_agent collected the result
-    inline, it has set this child's signal in `deliveries`, so the push is skipped
-    to avoid delivering the same answer twice."""
-    delivered = None
+    park and deliver its ending, then tear it down (the wire, the server+socket,
+    the child Agent). a BaseUI answers any wire PROMPT with its default, so a
+    child whose hook asks the human never hangs. the drain is bounded by
+    OWNER_TIMEOUT so a wedged child becomes a reported failure, not a leaked
+    owner thread; any other way the child ends without an answer (EOF, an owner
+    exception) is reported the same way. the ending is parked in the child's
+    _Delivery record first (a late wait_agent reads it there), then pushed to the
+    parent as a steer - unless a wait_agent already claimed it inline, in which
+    case the push stands down (see _push_result_to_parent)."""
+    delivery = None
     if deliveries is not None:
-        delivered = deliveries.get(agent.name)
+        delivery = deliveries.get(agent.name)
     server_thread = threading.Thread(target=server.serve,
                                      daemon=True,
                                      name=f"cai-sub-serve-{agent.name}")
@@ -156,28 +217,23 @@ def _own_child(parent_name, agent, server, prompt, deliveries=None):
     ui = BaseUI()
     client = None
     result = None
+    error = None
     try:
         client = connect(server.path)
         wire = Wire(client)
         wire.send_submit(prompt)
-        while True:
-            messages = wire.recv()
-            if messages is None: break
-            done = False
-            for msg in messages:
-                if wire.answer(msg, ui): continue
-                if msg.get("type") != Wire.RESULT: continue
-                result = msg.get("text") or ""
-                done = True
-                break
-            if done: break
-    except Exception:
+        result, timed_out = _drain(wire, OWNER_TIMEOUT, ui=ui)
+        if timed_out:
+            error = f"timed out after {OWNER_TIMEOUT:g}s and was shut down"
+        elif result is None:
+            error = "ended without a result"
+    except Exception as e:
         log.exception("sub-agent %r owner failed", agent.name)
+        error = f"failed: {type(e).__name__}: {e}"
     finally:
-        if result is not None:
-            _push_result_to_parent(parent_name, agent.name, result, delivered)
-        if deliveries is not None:
-            deliveries.pop(agent.name, None)     # the child is done; drop its signal
+        if delivery is not None:
+            delivery.finish(result, error)
+        _push_result_to_parent(parent_name, agent.name, result, error, delivery)
         if client is not None:
             try:
                 client.close()
@@ -214,9 +270,9 @@ def _launch_agent(parent,
     """build a reduce-only child Agent, serve it on its own unix socket, and hand
     it to an owner thread that drives it to completion and tears it down. the
     parent keeps only the child's id. returns at once with the (possibly
-    de-duplicated) name. `deliveries` is the shared name->signal map the launch and
-    wait tools both close over: this registers the child's signal so a wait_agent
-    that collects the result inline can tell the owner thread not to also push it."""
+    de-duplicated) name. `deliveries` is the shared name->_Delivery map the launch
+    and wait tools both close over: this registers the child's record, which
+    carries the exactly-once claim and retains the parked result after teardown."""
     try:
         name = _unique_name(parent, name)
         child_tools = _inherit_tools(parent, tools)
@@ -235,7 +291,7 @@ def _launch_agent(parent,
         # common folder every UnixWiredAgent binds in.
         server = UnixWiredAgent(agent)
         if deliveries is not None:
-            deliveries[name] = threading.Event()
+            deliveries[name] = _Delivery()
         thread = threading.Thread(target=_own_child,
                                   args=(parent.name, agent, server, prompt, deliveries),
                                   daemon=True,
@@ -283,10 +339,12 @@ def _send_kill(agent_id):
             pass
 
 
-def _drain(wire, timeout):
+def _drain(wire, timeout, ui=None):
     """read a child's stream until its RESULT (returned) or EOF (None), bounded by
-    `timeout` seconds total. non-RESULT messages (events, broadcast prompts the
-    owner answers) are skipped. returns (result_or_None, timed_out)."""
+    `timeout` seconds total. non-RESULT messages (events, broadcast prompts) are
+    skipped - except a PROMPT when a `ui` is given (the owner passes its BaseUI so
+    a child whose hook asks the human gets the default instead of hanging).
+    returns (result_or_None, timed_out)."""
     deadline = time.monotonic() + timeout
     while True:
         remaining = deadline - time.monotonic()
@@ -302,6 +360,7 @@ def _drain(wire, timeout):
         if messages is None:
             return None, False
         for msg in messages:
+            if ui is not None and wire.answer(msg, ui): continue
             if msg.get("type") != Wire.RESULT: continue
             return (msg.get("text") or ""), False
 
@@ -310,41 +369,67 @@ _WAIT_DOC = """Wait for ONE sub-agent and return its answer; call it like wait_a
 
     Attaches to the running child over its socket. On timeout the sub-agent keeps
     running; call wait_agent again to keep waiting, or pass kill=True to kill it
-    when the timeout expires. A child that already finished has torn down, so its
-    answer is no longer retrievable here.
+    when the timeout expires. A child that already finished keeps its answer
+    parked, so calling this after it ended still returns the result (once).
     """
 
 
-def _signal_delivered(deliveries, agent_id):
-    """tell the child's owner thread the result has been handed to the parent here,
-    as this tool's return value, so it does not also push it as a steer. a no-op
-    when there is no shared signal (a direct call outside the bootstrapped tools)."""
-    if deliveries is None:
-        return
-    event = deliveries.get(agent_id)
-    if event is not None:
-        event.set()
+def _finished(agent_id, delivery):
+    """report a child that already tore down, from its parked record: the error
+    note when it ended without an answer, the result for the caller that wins the
+    claim, or a pointer at the delivery that already happened."""
+    if delivery.error is not None:
+        return f"Sub-agent '{agent_id}' {delivery.error}."
+    if delivery.claim():
+        return delivery.result
+    return (f"Sub-agent '{agent_id}' already finished; its result was already "
+            f"delivered to you.")
+
+
+def _collected(agent_id, delivery, result):
+    """hand an inline-collected result to the parent, exactly once: claim the
+    delivery so the owner's steer push stands down. a lost claim means the push
+    is delivering the same answer as a message, so point at it instead of
+    returning a duplicate. a None result (EOF before any RESULT) falls back to
+    the parked record, which the owner fills before closing the socket."""
+    if result is None:
+        if delivery is not None and delivery.done:
+            return _finished(agent_id, delivery)
+        return f"Sub-agent '{agent_id}' already finished."
+    if delivery is None or delivery.claim():
+        return result
+    return (f"Sub-agent '{agent_id}' finished; its result is being delivered "
+            f"to you as a separate message.")
 
 
 def _wait_agent(parent, agent_id, timeout=30, kill=False, deliveries=None):
-    """attach to a child over its socket and wait for the run's RESULT. on timeout
-    report it is still running, or (kill=True) kill it and drain what it emits. when
-    a result is returned, signal the child's owner thread (via `deliveries`) that it
-    has been delivered here, so the owner does not also push it to the parent."""
+    """wait for a child's answer. a child that already tore down is answered from
+    its parked _Delivery record; a live one is attached to over its socket and
+    drained until the run's RESULT. on timeout report it is still running, or
+    (kill=True) kill it and drain what it emits. every path that returns the
+    answer claims the delivery first, so the owner's steer push never delivers
+    the same answer twice."""
     if agent_id not in parent.children:
         return f"Error: no sub-agent named '{agent_id}'."
+    delivery = None
+    if deliveries is not None:
+        delivery = deliveries.get(agent_id)
+    if delivery is not None and delivery.done:
+        return _finished(agent_id, delivery)
     try:
         client = connect(AgentsRegistry.sock_path(agent_id))
     except OSError:
+        # the socket is gone: the child tore down. the owner parks the record
+        # before closing the socket, so a recheck reads the ending it left; a
+        # direct call with no record has nothing more to say.
+        if delivery is not None and delivery.done:
+            return _finished(agent_id, delivery)
         return f"Sub-agent '{agent_id}' already finished."
     wire = Wire(client)
     try:
         result, timed_out = _drain(wire, timeout)
         if not timed_out:
-            if result is None:
-                return f"Sub-agent '{agent_id}' already finished."
-            _signal_delivered(deliveries, agent_id)
-            return result
+            return _collected(agent_id, delivery, result)
         if not kill:
             return (f"Sub-agent '{agent_id}' is still running after {timeout}s; "
                     f"call wait_agent('{agent_id}') again to keep waiting.")
@@ -352,8 +437,7 @@ def _wait_agent(parent, agent_id, timeout=30, kill=False, deliveries=None):
         result, _timed_out = _drain(wire, timeout)
         if result is None:
             return f"Killed sub-agent '{agent_id}'; it produced no output."
-        _signal_delivered(deliveries, agent_id)
-        return result
+        return _collected(agent_id, delivery, result)
     finally:
         try:
             client.close()
@@ -369,6 +453,51 @@ def make_wait_agent(parent, deliveries):
         return _wait_agent(parent, agent_id, timeout, kill, deliveries)
     wait_agent.__doc__ = _WAIT_DOC
     return wait_agent
+
+
+_LIST_DOC = """List your sub-agents and their status, one per line; call it like list_agents(). No arguments.
+
+    Each line is '<agent_id>: <status>' - running, finished (noting whether its
+    result is still waiting for a wait_agent or was already delivered to you),
+    or how it ended when it produced no result.
+    """
+
+
+def _list_agents(parent, deliveries=None):
+    """one status line per launched child, in launch order, read from the same
+    state the other tools use: the parked _Delivery record for a finished child
+    (its error, or whether the result's claim is spent), the socket file for a
+    live one. no wire traffic - a poll that never blocks on a busy child."""
+    if not parent.children:
+        return "No sub-agents launched."
+    lines = []
+    for name in parent.children:
+        record = None
+        if deliveries is not None:
+            record = deliveries.get(name)
+        if record is not None and record.done:
+            if record.error is not None:
+                lines.append(f"{name}: {record.error}")
+            elif record.claimed():
+                lines.append(f"{name}: finished - result delivered")
+            else:
+                lines.append(f"{name}: finished - result ready; collect it with wait_agent('{name}')")
+            continue
+        if os.path.exists(AgentsRegistry.sock_path(name)):
+            lines.append(f"{name}: running")
+            continue
+        lines.append(f"{name}: finished")
+    return "\n".join(lines)
+
+
+def make_list_agents(parent, deliveries):
+    """build a list_agents tool bound to its launching agent; `deliveries` is the
+    same record map the launch/wait tools share, so the status lines reflect
+    parked results and spent claims."""
+    def list_agents() -> str:
+        return _list_agents(parent, deliveries)
+    list_agents.__doc__ = _LIST_DOC
+    return list_agents
 
 
 _KILL_DOC = """Kill ONE running sub-agent now; call it like kill_agent(agent_id="audit-auth-flow") with the name launch_agent returned. It winds down in the background.
@@ -396,15 +525,17 @@ def make_kill_agent(parent):
 
 
 def subagent_tools(parent):
-    """the three sub-agent tools bound to `parent`, for the Agent to register on
-    its tool registry so the model can call them. this is how the tools become
-    accessible to the Agent class. launch_agent and wait_agent share one `deliveries`
-    map (name -> delivered Event) created here, so a wait that collects a child's
-    result inline can tell that child's owner thread not to also push it - exactly
-    one delivery either way."""
+    """the sub-agent tools (launch/wait/list/kill) bound to `parent`, for the
+    Agent to register on its tool registry so the model can call them. this is how
+    the tools become accessible to the Agent class. launch, wait and list share one
+    `deliveries` map (name -> _Delivery) created here: each record carries the
+    first-wins claim that keeps delivery exactly-once, and retains the child's
+    parked result so a wait after teardown still reads the answer (and a list
+    reports it waiting)."""
     deliveries = {}
     tools = []
     tools.append(make_launch_agent(parent, deliveries))
     tools.append(make_wait_agent(parent, deliveries))
+    tools.append(make_list_agents(parent, deliveries))
     tools.append(make_kill_agent(parent))
     return tools

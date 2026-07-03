@@ -220,10 +220,10 @@ def test_kill_winds_a_running_child_down():
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
         msg = _wait_agent(parent, "runner", timeout=1)
-        if "finished" in msg or msg == "":
+        if "finished" in msg or "without a result" in msg or msg == "":
             break
         time.sleep(0.05)
-    assert "finished" in msg or msg == ""
+    assert "finished" in msg or "without a result" in msg or msg == ""
 
 
 # --------------------------------------------------------------------------
@@ -234,6 +234,7 @@ def test_subagents_skill_bootstraps_the_tools():
     agent = Agent(model="m", api=FakeApi(), skills=["subagents"])
     assert agent.tools_registry.has("launch_agent")
     assert agent.tools_registry.has("wait_agent")
+    assert agent.tools_registry.has("list_agents")
     assert agent.tools_registry.has("kill_agent")
     assert agent.children == []
     agent.close()
@@ -259,9 +260,10 @@ def test_bootstrapped_tools_drive_a_child_end_to_end():
 
 
 def test_push_is_skipped_when_the_result_was_already_delivered():
-    # when a wait_agent collected the result inline it sets the child's signal;
+    # when a wait_agent collected the result inline it holds the child's claim;
     # the owner's push must then be a no-op, so the parent isn't told twice.
     from cai.wired_agent import UnixWiredAgent
+    from cai.subagent import _Delivery
     from cai.subagent import _push_result_to_parent
 
     parent = Agent(model="m", api=FakeApi(chunks=["x"]), skills=["subagents"])
@@ -269,12 +271,112 @@ def test_push_is_skipped_when_the_result_was_already_delivered():
     thread = threading.Thread(target=served.serve, daemon=True)
     thread.start()
     try:
-        delivered = threading.Event()
-        delivered.set()                       # wait_agent already returned the result
-        _push_result_to_parent(parent.name, "c1", "the result", delivered)
+        delivery = _Delivery()
+        assert delivery.claim()               # wait_agent already returned the result
+        _push_result_to_parent(parent.name, "c1", "the result", None, delivery)
         time.sleep(0.3)                       # give any (erroneous) steered turn time to land
         for m in list(parent.messages):
             assert "Sub-agent 'c1' finished" not in (m.get("content") or "")
+    finally:
+        served.close()
+        parent.close()
+        thread.join(timeout=5)
+
+
+def test_wait_after_teardown_returns_the_parked_result():
+    # the owner parks the result in the child's record before teardown, so a
+    # late wait_agent still reads the answer - and only once: the claim is
+    # spent, so a second late wait points at the delivery that happened.
+    deliveries = {}
+    parent = make_parent(FakeApi(chunks=["late answer"]))
+    _launch_agent(parent, "t", "w", deliveries=deliveries)
+    record = deliveries["w"]
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if record.done: break
+        time.sleep(0.02)
+    assert record.done
+    out = _wait_agent(parent, "w", timeout=1, deliveries=deliveries)
+    assert out == "late answer"
+    again = _wait_agent(parent, "w", timeout=1, deliveries=deliveries)
+    assert "already delivered" in again
+
+
+def test_list_agents_tracks_the_childs_lifecycle():
+    # one status line per child, read without blocking: running while the run is
+    # gated, result-ready once the owner parks it, delivered after a wait claims it.
+    from cai.subagent import _list_agents
+
+    deliveries = {}
+    api = GatedApi(["done"])
+    parent = make_parent(api)
+    assert _list_agents(parent, deliveries) == "No sub-agents launched."
+    _launch_agent(parent, "t", "runner", deliveries=deliveries)
+    assert api.started.wait(5)
+    assert _list_agents(parent, deliveries) == "runner: running"
+    api.release.set()
+    record = deliveries["runner"]
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if record.done: break
+        time.sleep(0.02)
+    assert record.done
+    listed = _list_agents(parent, deliveries)
+    assert "runner: finished" in listed
+    assert "wait_agent" in listed             # the result is parked, still claimable
+    assert _wait_agent(parent, "runner", timeout=1, deliveries=deliveries) == "done"
+    assert "result delivered" in _list_agents(parent, deliveries)
+
+
+def test_owner_gives_up_on_a_wedged_child(monkeypatch):
+    # a child whose run never produces a RESULT must not hang its owner thread
+    # forever: the owner's drain is bounded, and the failure is parked so the
+    # parent can read it from wait_agent.
+    monkeypatch.setattr("cai.subagent.OWNER_TIMEOUT", 0.5)
+    deliveries = {}
+    api = BlockingApi()
+    parent = make_parent(api)
+    _launch_agent(parent, "loop forever", "runner", deliveries=deliveries)
+    assert api.started.wait(5)
+    record = deliveries["runner"]
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if record.done: break
+        time.sleep(0.02)
+    assert record.done
+    assert record.error is not None
+    assert "timed out" in record.error
+    out = _wait_agent(parent, "runner", timeout=1, deliveries=deliveries)
+    assert "timed out" in out
+
+
+def test_owner_failure_is_steered_to_a_served_parent(monkeypatch):
+    # fix for silent child death: when the owner gives up (or fails), the parent
+    # is told via the same steer path a successful result takes.
+    from cai.wired_agent import UnixWiredAgent
+
+    monkeypatch.setattr("cai.subagent.OWNER_TIMEOUT", 0.5)
+    api = BlockingApi()
+    parent = Agent(model="m", api=api, skills=["subagents"])
+    served = UnixWiredAgent(parent)
+    thread = threading.Thread(target=served.serve, daemon=True)
+    thread.start()
+    try:
+        out = parent.tools_registry.dispatch("launch_agent", {"prompt": "p", "name": "c1"})
+        assert "c1" in out
+        assert api.started.wait(5)
+        landed = None
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            for m in list(parent.messages):
+                content = m.get("content") or ""
+                if m.get("role") == "user" and "c1" in content and "timed out" in content:
+                    landed = content
+                    break
+            if landed is not None:
+                break
+            time.sleep(0.02)
+        assert landed is not None         # the failure reached the parent as a user turn
     finally:
         served.close()
         parent.close()

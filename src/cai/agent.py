@@ -211,7 +211,7 @@ class Agent:
         self.children = []   # ids of the sub-agents launched this session
         self.tools_registry = ToolsRegistry(self.env)
 
-        # registers the env's agent-bound tools (the sub-agent trio by default).
+        # registers the env's agent-bound tools (the sub-agent tools by default).
         # override=True so these bind to *this* agent even if a tool of the same
         # name was inherited from a parent (a child's launch_agent must drive the
         # child, not the parent). the env is the composition root here: the core

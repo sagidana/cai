@@ -1,5 +1,5 @@
 name: subagents
-tools: launch_agent, wait_agent, kill_agent
+tools: launch_agent, wait_agent, list_agents, kill_agent
 ---
 # Skill: Sub-Agents
 
@@ -14,7 +14,11 @@ Pass arguments as named fields, exactly as shown:
   ONE sub-agent and returns its `agent_id` (the name). Optional: `tools=[...]`,
   `skills=[...]`, `model="..."`, `system_prompt="..."`.
 - `wait_agent(agent_id="audit-auth-flow")` blocks for ONE sub-agent's final
-  answer.
+  answer. A sub-agent that already finished keeps its answer parked, so a late
+  `wait_agent` still returns it.
+- `list_agents()` reports every sub-agent's status (running / finished /
+  failed), one per line, without blocking. Use it instead of repeated
+  `wait_agent` timeouts when you only need a status check.
 - `kill_agent(agent_id="audit-auth-flow")` stops ONE runaway sub-agent.
 
 `agent_id` is a single string — the exact name `launch_agent` returned — and you
