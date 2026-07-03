@@ -184,6 +184,59 @@ def test_safe_path_admits_scratch_inside_a_function_tool(tmp_path, monkeypatch):
     assert "outside working directory" in out
 
 
+def test_safe_path_expands_leading_scratch_token(tmp_path, monkeypatch):
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    scratch = tmp_path / "s"
+    scratch.mkdir()
+    monkeypatch.chdir(cwd)
+    monkeypatch.setenv("CAI_SCRATCH", str(scratch))
+    assert cai.safe_path("$CAI_SCRATCH") == str(scratch)
+    assert cai.safe_path("$CAI_SCRATCH/dump.bin") == str(scratch / "dump.bin")
+    assert cai.safe_path("${CAI_SCRATCH}/dump.bin") == str(scratch / "dump.bin")
+
+
+def test_scratch_token_is_a_whole_segment_only(tmp_path, monkeypatch):
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    scratch = tmp_path / "s"
+    scratch.mkdir()
+    monkeypatch.chdir(cwd)
+    monkeypatch.setenv("CAI_SCRATCH", str(scratch))
+    # not a token: a longer name that merely starts with the token text is left
+    # literal - a (odd) relative path under the cwd, not the scratch dir
+    assert cai.safe_path("$CAI_SCRATCHED/x") == str(cwd / "$CAI_SCRATCHED" / "x")
+
+
+def test_scratch_token_without_a_session_errors(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("CAI_SCRATCH", raising=False)
+    with pytest.raises(ValueError):
+        cai.safe_path("$CAI_SCRATCH/dump.bin")
+
+
+def test_scratch_token_materializes_the_dir_inside_a_tool(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("CAI_SCRATCH", raising=False)
+    created = {}
+
+    def provider():
+        d = tmp_path / "lazy"
+        d.mkdir(exist_ok=True)
+        created["path"] = str(d)
+        return str(d)
+
+    @cai.tool
+    def jail(p: str) -> str:
+        """jail."""
+        return cai.safe_path(p)
+
+    registry = ToolsRegistry(scratch=provider)
+    registry.select("jail")
+    out = registry.dispatch("jail", {"p": "$CAI_SCRATCH/a.bin"})
+    assert out == os.path.join(created["path"], "a.bin")
+
+
 def test_agent_creates_scratch_lazily_and_deletes_on_close():
     agent = Agent(model="m", api=object())
     assert agent._scratch is None

@@ -16,8 +16,13 @@ Modifying tools:
 - `fs__create_directory` - make a directory tree (`mkdir -p` semantics).
 - `fs__move_directory` - rename or relocate a directory.
 
+Scratch directory:
+- A session scratch directory exists for intermediates - bulky tool outputs, binary artifacts, working files that are not part of the project. Address it as `$CAI_SCRATCH` in any path (e.g. `fs__copy_bytes(src, "$CAI_SCRATCH/head.bin", ...)`); it also expands in `bash` commands.
+- It lives for this session only and is deleted afterwards - move anything worth keeping into the project tree.
+- Prefer it over the working directory for anything the user did not ask to have in their tree.
+
 Discipline:
-- Always use absolute paths.
+- Always use absolute paths (or the `$CAI_SCRATCH` prefix for scratch).
 - Read a file before editing it, and confirm the edit landed where you intended.
 - Make the smallest change that accomplishes the task; do not create, move, or delete files that were not part of the request.
 - All paths must stay inside the working directory - traversal outside it is rejected.

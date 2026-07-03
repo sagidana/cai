@@ -8,12 +8,17 @@ call. Same accessor, both contexts - "" when no session scratch exists (e.g.
 under a bare MCP client), so callers can fall back to tempfile.
 
 safe_path confines a model-supplied path to the current working directory plus
-that scratch directory. Exposed as cai.safe_path / cai.scratch_dir so an
-extension's MCP servers and function tools share one implementation instead of
-vendoring copies. A server file cai spawns runs under the same interpreter, so
-`from cai import safe_path` always resolves. Stdlib-only."""
+that scratch directory, and expands a leading $CAI_SCRATCH (the stable name the
+model uses to address scratch without knowing its real, per-session path).
+Exposed as cai.safe_path / cai.scratch_dir so an extension's MCP servers and
+function tools share one implementation instead of vendoring copies. A server
+file cai spawns runs under the same interpreter, so `from cai import safe_path`
+always resolves. Stdlib-only."""
 import os
 from contextvars import ContextVar
+
+
+_SCRATCH_VAR = "CAI_SCRATCH"
 
 
 # the in-process scratch source: ToolsRegistry sets it to its provider (a
@@ -35,9 +40,27 @@ def scratch_dir():
     return os.environ.get("CAI_SCRATCH", "")
 
 
+def _expand_scratch(user_path):
+    """expand a leading $CAI_SCRATCH / ${CAI_SCRATCH} token in user_path to the
+    real scratch directory (materializing it), so the model addresses scratch by
+    name without knowing its per-session path. only a whole leading path segment
+    is a token - '$CAI_SCRATCHED/x' is left alone. raises ValueError when the
+    path names scratch but no session scratch exists."""
+    for token in ("${" + _SCRATCH_VAR + "}", "$" + _SCRATCH_VAR):
+        if user_path != token and not user_path.startswith(token + "/"):
+            continue
+        scratch = scratch_dir()
+        if not scratch:
+            raise ValueError(f"Error: no session scratch directory for {user_path!r}")
+        return scratch + user_path[len(token):]
+    return user_path
+
+
 def safe_path(user_path):
     """resolve user_path relative to the cwd and reject traversal outside it;
-    the session scratch directory (scratch_dir(), when set) is allowed too."""
+    the session scratch directory (scratch_dir(), when set) is allowed too, and
+    a leading $CAI_SCRATCH addresses it by name."""
+    user_path = _expand_scratch(user_path)
     cwd = os.path.realpath(os.getcwd())
     resolved = os.path.realpath(os.path.join(cwd, user_path))
     if resolved == cwd or resolved.startswith(cwd + os.sep):
