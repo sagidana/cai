@@ -1,43 +1,69 @@
-"""Tests for the uniform one-blank-line block separation: the screen's
-_block_separator decision over the buffer state, the buffer's ends_blank
-probe, and the _Transcript state machine that streams CONTENT/REASONING into
-one block while making every other event its own block."""
+"""Tests for deterministic block separation and the message gutter frame:
+Screen._start_block trims whatever trailing blank rows the previous block
+streamed and lays down exactly one blank row; _Transcript strips a block's
+leading newlines and chains a tool call with its result into one block; the
+buffer re-applies a segment's gutter to every wrapped line and strips it
+back out of selections."""
 from cai.screen.screen import Screen
-from cai.screen.buffer import ContentBuffer
+from cai.screen.buffer import ContentBuffer, GUTTER_GLYPH
+from cai.screen.state import TUIState
+from cai.screen.ansi import ansi_strip
 from cai.environment import Settings
 from cai.tui import _Transcript
 from cai.events import EventType
 
 
 class _Carrier:
-    """just enough of a Screen to call the unbound _block_separator: it only
-    reads self._buffer."""
+    """just enough of a Screen to call the unbound _start_block: it reads
+    self._buffer and clamps self._state."""
 
     def __init__(self, buffer):
         self._buffer = buffer
+        self._state = TUIState()
 
 
-def _separator_after(*writes):
-    buf = ContentBuffer(80)
+def _blank_rows_before_block(*writes):
+    """append writes, start a block, append its first line; return how many
+    blank display rows separate the block from the previous content."""
+    carrier = _Carrier(ContentBuffer(80))
     for text in writes:
-        buf.append_text(text)
-    return Screen._block_separator(_Carrier(buf))
+        carrier._buffer.append_text(text)
+    Screen._start_block(carrier)
+    carrier._buffer.append_text("-> next\n")
+    lines = carrier._buffer._lines
+    blanks = 0
+    idx = len(lines) - 2
+    while idx >= 0:
+        plain = ansi_strip(lines[idx]).strip()
+        if plain != '' and plain != GUTTER_GLYPH: break
+        blanks += 1
+        idx -= 1
+    return blanks
 
 
-def test_separator_is_empty_on_an_empty_buffer():
-    assert _separator_after() == ""
+def test_block_on_empty_buffer_adds_no_gap():
+    assert _blank_rows_before_block() == 0
 
 
-def test_separator_terminates_and_blanks_a_partial_line():
-    assert _separator_after("hello") == "\n\n"
+def test_gap_is_one_after_a_partial_line():
+    assert _blank_rows_before_block("hello") == 1
 
 
-def test_separator_adds_one_blank_after_a_finished_line():
-    assert _separator_after("hello\n") == "\n"
+def test_gap_is_one_after_a_finished_line():
+    assert _blank_rows_before_block("hello\n") == 1
 
 
-def test_separator_adds_nothing_when_already_blank():
-    assert _separator_after("hello\n\n") == ""
+def test_gap_is_one_no_matter_how_many_trailing_newlines():
+    # the historic bug: trailing newlines streamed by the model made the
+    # gap 1 + extra. now every ending collapses to exactly one blank row.
+    for ending in ("\n\n", "\n\n\n", "\n\n\n\n\n"):
+        assert _blank_rows_before_block("hello" + ending) == 1
+
+
+def test_gap_is_one_after_trailing_newline_only_chunks():
+    # trailing newlines arriving as their own streamed chunks, not attached
+    # to the text chunk.
+    assert _blank_rows_before_block("hello", "\n", "\n\n") == 1
 
 
 def test_ends_blank_probe():
@@ -50,6 +76,68 @@ def test_ends_blank_probe():
     buf.append_text("\n")
     assert buf.ends_blank() is True         # a real blank line
 
+
+def test_trim_keeps_internal_blanks():
+    # paragraph breaks inside a block survive; only trailing blanks go.
+    buf = ContentBuffer(80)
+    buf.append_text("para one\n\npara two\n\n\n")
+    buf.trim_trailing_blanks()
+    plains = [ansi_strip(l) for l in buf._lines]
+    assert plains == ["para one", "", "para two"]
+
+
+def test_trim_survives_rewrap():
+    # raw segments are trimmed too, so a resize reproduces the trimmed state.
+    buf = ContentBuffer(80)
+    buf.append_text("hello\n\n\n")
+    buf.trim_trailing_blanks()
+    buf.rewrap(40)
+    assert [ansi_strip(l) for l in buf._lines] == ["hello"]
+
+
+# --- gutter frame ---
+
+_GUTTER = f'{GUTTER_GLYPH} '
+
+
+def test_gutter_prefixes_every_wrapped_line():
+    buf = ContentBuffer(12)
+    buf.append_text("a" * 25 + "\n", gutter=_GUTTER)
+    for line in buf._lines:
+        assert ansi_strip(line).startswith(_GUTTER)
+    # wrap width shrank by the gutter width
+    assert len(ansi_strip(buf._lines[0])) == 12
+
+
+def test_gutter_survives_rewrap():
+    buf = ContentBuffer(80)
+    buf.append_text("some text\n", gutter=_GUTTER)
+    buf.rewrap(40)
+    assert ansi_strip(buf._lines[0]) == f"{_GUTTER}some text"
+
+
+def test_trim_drops_gutter_only_blank_rows():
+    buf = ContentBuffer(80)
+    buf.append_text("hello\n\n\n", gutter=_GUTTER)
+    buf.trim_trailing_blanks()
+    assert [ansi_strip(l) for l in buf._lines] == [f"{_GUTTER}hello"]
+
+
+def test_gutter_change_mid_line_breaks_the_line():
+    buf = ContentBuffer(80)
+    buf.append_text("first", gutter=_GUTTER)
+    buf.append_text("second\n", gutter='')
+    assert ansi_strip(buf._lines[0]) == f"{_GUTTER}first"
+    assert ansi_strip(buf._lines[1]) == "second"
+
+
+def test_selection_strips_the_gutter():
+    buf = ContentBuffer(80)
+    buf.append_text("copy me\n", gutter=_GUTTER)
+    assert buf.get_selection_text(0, 0, 0, 79, True) == "copy me"
+
+
+# --- transcript ---
 
 class _Event:
     def __init__(self, type, text="", tool_name="", tool_args=None,
@@ -83,7 +171,7 @@ def test_consecutive_content_chunks_stream_into_one_block():
     assert _blocks(screen) == [True, False]
 
 
-def test_each_non_content_event_is_its_own_block():
+def test_unit_changes_start_blocks_and_tool_pairs_chain():
     screen = _RecordingScreen()
     t = _Transcript(screen, Settings())
     t.event(_Event(EventType.USER, text="hi"))
@@ -92,14 +180,38 @@ def test_each_non_content_event_is_its_own_block():
     t.event(_Event(EventType.TOOL_CALL, tool_name="ls"))
     t.event(_Event(EventType.TOOL_RESULT, tool_name="ls", tool_result="x"))
     t.event(_Event(EventType.CONTENT, text="done"))
-    # user / first-content / tool-call / tool-result / resumed-content each
-    # start a block; the middle content chunk continues its block.
-    assert _blocks(screen) == [True, True, False, True, True, True]
+    # user / first-content / tool-call / resumed-content each start a block;
+    # the middle content chunk and the tool result continue theirs.
+    assert _blocks(screen) == [True, True, False, True, False, True]
 
 
-def test_two_tool_calls_in_a_row_are_separate_blocks():
+def test_consecutive_tool_exchanges_share_one_block():
     screen = _RecordingScreen()
     t = _Transcript(screen, Settings())
     t.event(_Event(EventType.TOOL_CALL, tool_name="a"))
     t.event(_Event(EventType.TOOL_CALL, tool_name="b"))
-    assert _blocks(screen) == [True, True]
+    assert _blocks(screen) == [True, False]
+
+
+def test_leading_newlines_of_a_block_are_stripped():
+    screen = _RecordingScreen()
+    t = _Transcript(screen, Settings())
+    t.event(_Event(EventType.CONTENT, text="\n\nAll good."))
+    assert screen.writes == [("All good.", True)]
+
+
+def test_newline_only_chunk_does_not_open_a_block():
+    screen = _RecordingScreen()
+    t = _Transcript(screen, Settings())
+    t.event(_Event(EventType.CONTENT, text="\n\n"))
+    t.event(_Event(EventType.CONTENT, text="All good."))
+    # the whitespace-only chunk is dropped; the first real chunk opens the
+    # block so the separator still lands before visible text.
+    assert screen.writes == [("All good.", True)]
+
+
+def test_user_trailing_whitespace_is_stripped():
+    screen = _RecordingScreen()
+    t = _Transcript(screen, Settings())
+    t.event(_Event(EventType.USER, text="hello\n\n"))
+    assert screen.writes == [("> hello\n", True)]

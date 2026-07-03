@@ -109,16 +109,19 @@ class _Transcript:
     spacing: exactly one blank line between logical blocks.
 
     a block is a user prompt, an assistant message, a reasoning trace, a tool
-    call, a tool result, or a one-off note. consecutive CONTENT (or REASONING)
-    chunks stream into one block - only a change of unit asks the screen for a
-    separator (block=True), so the model's own paragraph breaks survive while
-    the gaps between blocks no longer depend on whatever newlines each event
-    happened to carry."""
+    exchange, or a one-off note. consecutive CONTENT (or REASONING) chunks
+    stream into one block, and a tool call chains with its result (and any
+    directly following tool exchange) into one tool block - only a change of
+    unit starts a new block (block=True). a block's opening chunk is stripped
+    of leading newlines (the boundary is owned by the screen, which also
+    trims whatever trailing newlines the previous block streamed), so the
+    model's own paragraph breaks survive while the gaps between blocks never
+    depend on the newlines each event happened to carry."""
 
     def __init__(self, screen, settings):
         self._screen = screen
         self._settings = settings   # the live env Settings (:config edits it)
-        self._streaming = None   # the open streaming unit: "content"/"reasoning"/None
+        self._streaming = None   # the open unit: "content"/"reasoning"/"tool"/None
 
     def event(self, event):
         if event.type == EventType.CONTENT:
@@ -130,22 +133,30 @@ class _Transcript:
             self._stream(event.text or "", "reasoning", Screen.REASONING)
             return
         if event.type == EventType.USER:
-            self.note(f"> {event.text or ''}\n", Screen.USER)
+            self.note(f"> {(event.text or '').rstrip()}\n", Screen.USER)
             return
         if event.type == EventType.TOOL_CALL:
-            self.note(f"-> {event.tool_name}({_short_args(event.tool_args)})\n", Screen.TOOL)
+            self._stream(f"-> {event.tool_name}({_short_args(event.tool_args)})\n",
+                         "tool", Screen.TOOL)
             return
         if event.type == EventType.TOOL_RESULT:
             kind = Screen.TOOL
             if event.is_error:
                 kind = Screen.ERROR
             result = event.tool_result or ""
-            self.note(f"<- {event.tool_name}: {len(result)} chars\n", kind)
+            self._stream(f"<- {event.tool_name}: {len(result)} chars\n", "tool", kind)
             return
 
     def _stream(self, text, unit, kind):
-        # a fresh unit starts a new block; the same unit continues the open one.
+        # a fresh unit starts a new block; the same unit continues the open
+        # one. the opening chunk sheds its leading newlines - a chunk that is
+        # nothing but newlines does not open the block at all, the next real
+        # chunk does.
         block = unit != self._streaming
+        if block:
+            text = text.lstrip('\n')
+            if not text:
+                return
         self._streaming = unit
         self._screen.write(text, kind=kind, block=block)
 

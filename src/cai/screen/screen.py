@@ -22,6 +22,7 @@ import tty
 
 from .ansi import (
     SGR_RESET, SGR_BOLD, SGR_CYAN, SGR_DIM_GRAY, SGR_BOLD_RED,
+    SGR_GREEN, SGR_YELLOW, SGR_RED,
     SGR_AZURE_ON_DGRAY,
     CUR_SHOW, CUR_HIDE,
     CURSOR_BAR, CURSOR_BLOCK, CURSOR_RESET,
@@ -32,7 +33,7 @@ from .ansi import (
     SYNC_START, SYNC_END,
 )
 from .state import Mode, TUIState, SubmitException, CommandException
-from .buffer import ContentBuffer
+from .buffer import ContentBuffer, GUTTER_GLYPH
 from .layout import Layout
 from .modes import ModeHandler
 from .input import read_key
@@ -66,6 +67,20 @@ class Screen:
         META:      SGR_DIM_GRAY,
         TOOL:      SGR_DIM_GRAY,
         ERROR:     SGR_BOLD_RED,
+        DEFAULT:   '',
+    }
+
+    # the message frame: a colored gutter bar at the start of every wrapped
+    # line of a kind-styled block. colors follow the overlays' role palette
+    # (user green, assistant cyan, tools yellow) so the conversation and the
+    # pickers read the same.
+    _KIND_GUTTERS = {
+        USER:      SGR_GREEN,
+        LLM:       SGR_CYAN,
+        REASONING: SGR_DIM_GRAY,
+        META:      SGR_DIM_GRAY,
+        TOOL:      SGR_YELLOW,
+        ERROR:     SGR_RED,
         DEFAULT:   '',
     }
 
@@ -236,10 +251,11 @@ class Screen:
         text); the screen leaves _current_kind untouched.
 
         block=True marks the start of a new logical block (a user prompt, an
-        assistant message, a tool call, a notice): the screen lays down
-        exactly one blank line between it and whatever is already on screen,
-        so block separation is owned here rather than summed from per-caller
-        newlines. streamed continuation chunks pass block=False."""
+        assistant message, a tool call, a notice): the screen normalizes the
+        boundary to exactly one blank line - trailing blank rows the previous
+        block streamed are dropped first, so the gap never depends on however
+        many newlines the model happened to emit. streamed continuation
+        chunks pass block=False."""
         if not text: return
 
         with self._render_lock:
@@ -248,15 +264,12 @@ class Screen:
                 self._resize_pending = False
                 self._handle_resize()
 
-            sep = ''
             if block:
-                sep = self._block_separator()
+                self._start_block()
             if kind is not None:
-                text = self._apply_kind(text, kind, separated=bool(sep))
-            if sep:
-                text = sep + text
+                text = self._apply_kind(text, kind, separated=block)
 
-            self._buffer.append_text(text)
+            self._buffer.append_text(text, gutter=self._kind_gutter(kind))
             total = self._buffer.line_count()
             content_rows = self._layout.content_rows
 
@@ -303,6 +316,13 @@ class Screen:
             else:
                 self._write_pending = True
 
+    def _kind_gutter(self, kind):
+        """the styled gutter prefix for a kind, or '' for unstyled writes."""
+        color = self._KIND_GUTTERS.get(kind, '')
+        if not color:
+            return ''
+        return f'{color}{GUTTER_GLYPH}{SGR_RESET} '
+
     def _apply_kind(self, text, kind, separated=False):
         """derive the SGR/newline prefix required to render text as kind.
 
@@ -315,8 +335,8 @@ class Screen:
              style tracking per segment, so re-open the style or the new
              segment would render in default color.
 
-        separated=True means a block separator already terminated the line,
-        so the mid-line '\\n' is not needed - the line is treated as already
+        separated=True means _start_block already terminated the line, so
+        the mid-line '\\n' is not needed - the line is treated as already
         ended for the prefix decision."""
         style = self._KIND_STYLES.get(kind, '')
         prev = self._current_kind
@@ -336,18 +356,19 @@ class Screen:
             return text
         return prefix + text
 
-    def _block_separator(self):
-        """leading whitespace that leaves exactly one blank line before the
-        next block. nothing when the buffer is empty or already ends on a
-        blank line; a single '\\n' after a finished, non-blank line; '\\n\\n'
-        to terminate a partial line and then drop one blank line."""
-        if self._buffer.line_count() == 0:
-            return ''
-        if self._buffer._partial:
-            return '\n\n'
-        if self._buffer.ends_blank():
-            return ''
-        return '\n'
+    def _start_block(self):
+        """normalize the boundary before a new block so it is exactly one
+        blank row, always: terminate a partial line, drop whatever trailing
+        blank rows the previous block streamed (the source of the historic
+        non-deterministic spacing), then lay down one gutter-free blank row.
+        the cursor and viewport are clamped against the removed rows."""
+        self._buffer.end_line()
+        self._buffer.trim_trailing_blanks()
+        if self._buffer.line_count() > 0:
+            self._buffer.append_text('\n')
+        total = self._buffer.line_count()
+        self._state.cursor_row = min(self._state.cursor_row, max(0, total - 1))
+        self._state.viewport_offset = min(self._state.viewport_offset, max(0, total - 1))
 
     def set_status(self, text, right=''):
         """update status bar text and refresh. right is rendered flush against
