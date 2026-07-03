@@ -82,3 +82,25 @@ def test_widget_lines_flatten_in_insertion_order_with_a_gap():
     widgets["chips"] = ["a", "b"]
     widgets["other"] = ["c"]
     assert Screen._widget_lines(_Carrier(widgets)) == ["a", "b", "", "c"]
+
+
+# --- :prompts entries ---
+
+from cai.tui import _prompt_entries
+
+
+def test_prompt_entries_dedupe_keeps_newest_first():
+    history = ["fix the bug", "add tests", "fix the bug"]
+    entries = _prompt_entries(history)
+    assert list(entries) == ["fix the bug", "add tests"]
+
+
+def test_prompt_entries_flatten_multiline_labels():
+    history = ["line one\n  line two"]
+    entries = _prompt_entries(history)
+    assert list(entries) == ["line one line two"]
+    assert entries["line one line two"] == "line one\n  line two"
+
+
+def test_prompt_entries_skip_blanks():
+    assert _prompt_entries(["", "  \n ", "real"]) == {"real": "real"}

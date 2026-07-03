@@ -778,6 +778,22 @@ class Screen:
         finally:
             self.pop_focus()
 
+    def prompt_history_overlay(self, entries, preview_fn=None):
+        """fuzzy picker over prompt-history entries (kept in the caller's
+        newest-first order): type to filter, the preview pane shows the full
+        prompt. returns the picked entry or None on cancel."""
+        from .overlays.model import prompt_model_overlay
+
+        self.push_focus('model')
+        try:
+            return prompt_model_overlay(self,
+                                        entries,
+                                        presorted=True,
+                                        noun="prompts",
+                                        preview_fn=preview_fn)
+        finally:
+            self.pop_focus()
+
     def prompt_agents_overlay(self, fetch_fn, preview_fn, stop_fn=None, self_id=None):
         """live agents tree (tree(1)-style hierarchy + auto-refreshing preview).
         fetch_fn() returns the node snapshot (see cli._agent_tree_nodes);

@@ -54,6 +54,7 @@ _PALETTE_COMMANDS = [
     ("skills", "activate / deactivate skills"),
     ("messages", "view / edit / delete the conversation"),
     ("history", "fork back to an earlier point in this conversation"),
+    ("prompts", "fuzzy-search your prompt history"),
     ("continue", "continue the conversation without a new prompt"),
     ("agents", "live view of sub-agents"),
     ("system", "view / edit the system prompt"),
@@ -668,6 +669,42 @@ def _open_history(screen, client, status, jobs):
     _replay_messages(screen, client.get_messages())
     if tree.should_continue(sel):
         jobs.put(_CONTINUE)
+
+
+def _prompt_entries(history):
+    """the :prompts entries: label -> full prompt, newest first, blanks
+    skipped and duplicates dropped (the newest occurrence wins). the label
+    is the prompt flattened to one line - it is what the fuzzy filter
+    matches against, so the whole prompt is searchable, not just the part
+    that fits the row."""
+    entries = {}
+    for entry in history:
+        label = " ".join(entry.split())
+        if not label: continue
+        if label in entries: continue
+        entries[label] = entry
+    return entries
+
+
+def _open_prompts(screen):
+    """open the :prompts picker - a fuzzy finder over the prompt history.
+    picking an entry drops it into the input box for editing, exactly like
+    the Ctrl-X recall; nothing is submitted until the user hits Enter."""
+    from cai.screen.ansi import wrap_ansi
+
+    entries = _prompt_entries(screen._history)
+    if not entries:
+        screen.write("[no prompt history]\n", kind=Screen.META, block=True)
+        return
+
+    def _preview(label, width, max_lines):
+        return wrap_ansi(entries[label], width)[:max_lines]
+
+    picked = screen.prompt_history_overlay(list(entries), preview_fn=_preview)
+    if picked is None:
+        return
+    screen._input_buf = list(entries[picked])
+    screen._cursor_pos = len(screen._input_buf)
 
 
 def _open_models(screen, client, status, registry):
@@ -1370,6 +1407,9 @@ def _handle_command(screen, client, status, registry, jobs, env, cmd):
             screen.write("[nothing to continue]\n", kind=Screen.META, block=True)
             return False
         jobs.put(_CONTINUE)
+        return False
+    if head == "prompts":
+        _open_prompts(screen)
         return False
     if head == "agents":
         _open_agents(screen, client)
