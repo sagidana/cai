@@ -29,6 +29,7 @@ from .ansi import (
     ALT_ENTER, ALT_EXIT,
     MOUSE_ON, MOUSE_OFF,
     BRACKET_PASTE_ON, BRACKET_PASTE_OFF,
+    SYNC_START, SYNC_END,
 )
 from .state import Mode, TUIState, SubmitException, CommandException
 from .buffer import ContentBuffer
@@ -109,6 +110,11 @@ class Screen:
         # of commands that expect an argument (picked -> pre-filled ':').
         self._palette_commands = []
         self._palette_arg_commands = set()
+
+        # hover widgets: name -> pre-styled lines, painted over the content
+        # viewport (top-right, stacked in insertion order) after every
+        # content render so they always sit above the conversation.
+        self._widgets = {}
 
         self._closed = False
         self._resize_pending = False
@@ -275,6 +281,7 @@ class Screen:
             # batch rendering: don't redraw more than ~60fps
             now = time.monotonic()
             if now - self._last_render_time >= _RENDER_INTERVAL:
+                sys.stdout.write(SYNC_START)
                 self._refresh_content()
                 self._refresh_status()
                 # while the user is actively at the prompt, re-render the
@@ -289,6 +296,7 @@ class Screen:
                                                  self._state.cursor_row,
                                                  self._state.viewport_offset,
                                                  self._state.cursor_col)
+                sys.stdout.write(SYNC_END)
                 sys.stdout.flush()
                 self._last_render_time = now
                 self._write_pending = False
@@ -389,6 +397,35 @@ class Screen:
             return prompt_palette_overlay(self, self._palette_commands)
         finally:
             self.pop_focus()
+
+    def add_widget(self, name, lines):
+        """add or replace a hover widget: a block of pre-styled lines painted
+        over the conversation, anchored top-right. widgets stack vertically in
+        insertion order; replacing an existing name keeps its slot. lines carry
+        their own SGR styling - the screen just places them."""
+        with self._render_lock:
+            self._widgets[name] = list(lines)
+            if self._focus_stack[-1] != 'main': return
+            self._refresh_all()
+
+    def remove_widget(self, name):
+        """remove a hover widget. unknown names are ignored."""
+        with self._render_lock:
+            if name not in self._widgets: return
+            del self._widgets[name]
+            if self._focus_stack[-1] != 'main': return
+            self._refresh_all()
+
+    def _widget_lines(self):
+        """all widgets' lines flattened in insertion order, top to bottom,
+        with one empty line between blocks. an empty line paints nothing, so
+        the gap row shows the conversation through."""
+        lines = []
+        for name in self._widgets:
+            if lines:
+                lines.append('')
+            lines.extend(self._widgets[name])
+        return lines
 
     def set_interrupt_handler(self, fn):
         """register a Ctrl-C handler invoked when the input buffer is empty.
@@ -560,6 +597,7 @@ class Screen:
                 # flush any pending batched writes
                 if self._write_pending:
                     with self._render_lock:
+                        sys.stdout.write(SYNC_START)
                         self._refresh_content()
                         self._refresh_status()
                         self._refresh_input()
@@ -567,6 +605,7 @@ class Screen:
                                                      self._state.cursor_row,
                                                      self._state.viewport_offset,
                                                      self._state.cursor_col)
+                        sys.stdout.write(SYNC_END)
                         sys.stdout.flush()
                         self._write_pending = False
                         self._last_render_time = time.monotonic()
@@ -854,14 +893,15 @@ class Screen:
             sys.stdout.flush()
 
     def _refresh_content(self):
-        """re-render the content viewport area."""
+        """re-render the content viewport area (and the widgets above it)."""
         self._layout.render_content(self._buffer._lines,
                                     self._layout.content_rows,
                                     self._cols,
                                     cursor_row=self._state.cursor_row,
                                     selection=self._build_selection(),
                                     search_spans=self._build_search_spans(),
-                                    viewport_offset=self._state.viewport_offset)
+                                    viewport_offset=self._state.viewport_offset,
+                                    widget_lines=self._widget_lines())
 
     def _refresh_status(self):
         """re-render the status line."""
@@ -936,7 +976,8 @@ class Screen:
         return (sr, er, line_mode, sc, ec)
 
     def _refresh_all(self):
-        """full screen redraw."""
+        """full screen redraw, presented as one synchronized frame."""
+        sys.stdout.write(SYNC_START)
         self._layout.update_input_height(self._input_buf, self._PROMPT_PREFIX, self._CONT_PREFIX)
         search_buf = None
         if self._state.mode == Mode.SEARCH:
@@ -960,7 +1001,9 @@ class Screen:
                                 auto_scroll=self._state.auto_scroll,
                                 new_content_below=self._new_content_below,
                                 cursor_row=self._state.cursor_row,
-                                cursor_col=self._state.cursor_col)
+                                cursor_col=self._state.cursor_col,
+                                widget_lines=self._widget_lines())
+        sys.stdout.write(SYNC_END)
         sys.stdout.flush()
 
     def _on_resize(self, signum, frame):

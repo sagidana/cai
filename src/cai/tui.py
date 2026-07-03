@@ -714,7 +714,7 @@ def _session_preview(path, width, max_lines):
     return lines[:max_lines]
 
 
-def _load_session(screen, client, status, path):
+def _load_session(screen, client, status, path, cfg):
     """load a .flow into the agent over the wire, then refresh the view: clear the
     viewport, replay the conversation, and follow the restored model. shared by
     :load, the :sessions picker, and the --continue/--sessions resume flags."""
@@ -724,6 +724,7 @@ def _load_session(screen, client, status, path):
     status.set_model(client.get_info().get("model", ""))
     screen.clear_buffer()
     _replay_messages(screen, client.get_messages())
+    _refresh_chips(screen, client, cfg)
     screen.write(f"[loaded {os.path.basename(path)}]\n", kind=Screen.META, block=True)
 
 
@@ -766,7 +767,7 @@ def _session_tree_nodes():
     return list(nodes.values())
 
 
-def _open_sessions(screen, client, status):
+def _open_sessions(screen, client, status, cfg):
     """open the :sessions picker (a tree of sessions and their sub-agent
     sessions) and load the chosen saved session. building the tree reads .flow
     files off disk; the load itself goes over the wire. Ctrl-K deletes the
@@ -820,7 +821,7 @@ def _open_sessions(screen, client, status):
         path = node.get("path")
         if path is None:
             return
-        _load_session(screen, client, status, path)
+        _load_session(screen, client, status, path, cfg)
         return
 
 
@@ -872,17 +873,19 @@ def _list_setting(label, obj, attr):
                    set=write)
 
 
-def _open_config(screen, cfg):
+def _open_config(screen, client, cfg):
     """the :config overlay - edit the env's live Settings (cai.settings) in
     place. edits apply to this session only; permanent config lives in init.py."""
     settings = []
     settings.append(_bool_setting("show reasoning", cfg, "show_reasoning"))
+    settings.append(_bool_setting("show chips", cfg, "show_chips"))
     settings.append(_int_setting("tool result max chars", cfg, "tool_result_max_chars"))
     settings.append(_bool_setting("auto save sessions", cfg, "auto_save_sessions"))
     settings.append(_int_setting("max sessions mb", cfg, "max_sessions_mb"))
     settings.append(_list_setting("skills", cfg, "skills"))
     settings.append(_list_setting("tools", cfg, "tools"))
     screen.prompt_config_overlay(settings)
+    _refresh_chips(screen, client, cfg)
 
 
 def _save_session(screen, client, path, cfg):
@@ -1033,6 +1036,134 @@ def _open_agents(screen, client):
     screen.prompt_messages_overlay(messages)
 
 
+def _chip_lines(skills, tools):
+    """the chips widget body: one pill per row, the skills column (pink)
+    to the left of the tools column (cyan). pills in a column share one width
+    so each column reads as a block; a row whose skills cell is empty paints
+    nothing there, so the conversation shows through."""
+    from cai.screen.ansi import SGR_PINK_ON_DGRAY, SGR_CYAN_ON_DGRAY, SGR_RESET
+
+    skill_width = 0
+    for name in skills:
+        skill_width = max(skill_width, len(name))
+    tool_width = 0
+    for name in tools:
+        tool_width = max(tool_width, len(name))
+
+    lines = []
+    count = max(len(skills), len(tools))
+    for i in range(count):
+        parts = []
+        if i < len(skills):
+            name = skills[i].ljust(skill_width)
+            parts.append(f'{SGR_PINK_ON_DGRAY} {name} {SGR_RESET}')
+        if tools:
+            if i < len(tools):
+                name = tools[i].ljust(tool_width)
+                parts.append(f'{SGR_CYAN_ON_DGRAY} {name} {SGR_RESET}')
+            elif i < len(skills):
+                # keep the skill pill in its column: blank out the tools cell
+                # so the pill doesn't drift to the right edge.
+                parts.append(' ' * (tool_width + 2))
+        lines.append(' '.join(parts))
+    return lines
+
+
+def _refresh_chips(screen, client, cfg):
+    """rebuild the hover chips widget from the agent's live selection (over
+    the wire): the active skills and tools, one pill per row. the show_chips
+    setting (:config) turns the widget off entirely."""
+    if not cfg.show_chips:
+        screen.remove_widget("chips")
+        return
+    skills = sorted(client.get_selected_skills())
+    tools = sorted(client.get_selected_tools())
+    lines = _chip_lines(skills, tools)
+    if not lines:
+        screen.remove_widget("chips")
+        return
+    screen.add_widget("chips", lines)
+
+
+def _running_subagents(client):
+    """display names of the live sub-agents descended from this session's
+    agent, read solely over the agents sockets (like the :agents view):
+    every live agent answers get_info, and the descendants are walked
+    through the children lists starting from this agent."""
+    from cai.agents_registry import AgentsRegistry
+
+    infos = {}
+    for name in AgentsRegistry.list_names():
+        info = _agent_control(name, "get_info")
+        if info is None: continue
+        infos[name] = info
+    self_name = client.get_info().get("name", "")
+    self_info = infos.get(self_name) or {}
+
+    running = []
+    pending = list(self_info.get("children") or [])
+    seen = set()
+    while pending:
+        child_id = pending.pop(0)
+        if child_id in seen: continue
+        seen.add(child_id)
+        info = infos.get(child_id)
+        if info is None: continue
+        running.append(info.get("name") or child_id)
+        pending.extend(info.get("children") or [])
+    return running
+
+
+def _agent_chip_lines(names):
+    """the agents widget body: one yellow pill per running sub-agent, all
+    padded to one width so the column reads as a block."""
+    from cai.screen.ansi import SGR_YELLOW_ON_DGRAY, SGR_RESET
+
+    width = 0
+    for name in names:
+        width = max(width, len(name))
+    lines = []
+    for name in names:
+        text = name.ljust(width)
+        lines.append(f'{SGR_YELLOW_ON_DGRAY} {text} {SGR_RESET}')
+    return lines
+
+
+# how often the agents-chips loop re-reads the agents sockets.
+_AGENTS_REFRESH = 1.0
+
+
+class _AgentsChipsLoop(threading.Thread):
+    """keeps the 'agents' hover widget in sync with the live sub-agents by
+    polling the agents sockets every _AGENTS_REFRESH seconds. polling is the
+    only source: a sub-agent starting or finishing is not an event on this
+    run's stream. the widget is only touched when the pill lines actually
+    change, so an idle session repaints nothing."""
+
+    def __init__(self, screen, client, cfg, stop):
+        super().__init__(daemon=True, name="cai-tui-agents-chips")
+        self._screen = screen
+        self._client = client
+        self._cfg = cfg
+        self._stop_event = stop
+        self._last = []
+
+    def run(self):
+        while not self._stop_event.wait(_AGENTS_REFRESH):
+            lines = []
+            if self._cfg.show_chips:
+                try:
+                    lines = _agent_chip_lines(_running_subagents(self._client))
+                except OSError:
+                    continue
+            if lines == self._last: continue
+            self._last = lines
+            if not lines:
+                self._screen.remove_widget("agents")
+                continue
+            self._screen.add_widget("agents", lines)
+
+
 def _tool_label(name):
     """the origin column for a tool entry: the MCP server name (the part before
     '__'), or 'tool' for an unprefixed function tool."""
@@ -1041,7 +1172,7 @@ def _tool_label(name):
     return "tool"
 
 
-def _open_tools(screen, client):
+def _open_tools(screen, client, cfg):
     """open the :tools overlay and apply the new selection, all over the wire.
     get_available_tools already unions the catalogue with the agent's own
     registered tools, so it is the full selectable set."""
@@ -1055,9 +1186,10 @@ def _open_tools(screen, client):
         entries.append((name, _tool_label(name)))
     new_selected = screen.prompt_tools_overlay(entries, active)
     client.set_selected_tools(sorted(new_selected))
+    _refresh_chips(screen, client, cfg)
 
 
-def _open_skills(screen, client):
+def _open_skills(screen, client, cfg):
     """open the :skills overlay and apply the new selection, all over the wire."""
     available = set(client.get_available_skills())
     active = set(client.get_selected_skills())
@@ -1066,6 +1198,7 @@ def _open_skills(screen, client):
         return
     new_active = screen.prompt_skills_overlay(sorted(available), active)
     client.set_selected_skills(sorted(new_active))
+    _refresh_chips(screen, client, cfg)
 
 
 def _system_prompt_nodes(composed, base):
@@ -1186,25 +1319,25 @@ def _handle_command(screen, client, status, registry, jobs, env, cmd):
         if not arg:
             screen.write("[usage: :load <path>]\n", kind=Screen.META, block=True)
             return False
-        _load_session(screen, client, status, os.path.expanduser(arg))
+        _load_session(screen, client, status, os.path.expanduser(arg), env.settings)
         return False
     if head == "models":
         _open_models(screen, client, status, registry)
         return False
     if head == "config":
-        _open_config(screen, env.settings)
+        _open_config(screen, client, env.settings)
         return False
     if head == "tools":
         if screen._busy:
             screen.write("[busy — open :tools when idle]\n", kind=Screen.META, block=True)
             return False
-        _open_tools(screen, client)
+        _open_tools(screen, client, env.settings)
         return False
     if head == "skills":
         if screen._busy:
             screen.write("[busy — open :skills when idle]\n", kind=Screen.META, block=True)
             return False
-        _open_skills(screen, client)
+        _open_skills(screen, client, env.settings)
         return False
     if head == "messages":
         if screen._busy:
@@ -1240,7 +1373,7 @@ def _handle_command(screen, client, status, registry, jobs, env, cmd):
         if screen._busy:
             screen.write("[busy — open :sessions when idle]\n", kind=Screen.META, block=True)
             return False
-        _open_sessions(screen, client, status)
+        _open_sessions(screen, client, status, env.settings)
         return False
     command = env.commands().get(head)
     if command is not None:
@@ -1401,16 +1534,19 @@ def run(*,
     worker.start()
     status_loop = _StatusLoop(status, stop)
     status_loop.start()
+    agents_chips = _AgentsChipsLoop(screen, client, env.settings, stop)
+    agents_chips.start()
 
     screen.write(f"cai — model {model}. type to chat; :q to quit.\n",
                  kind=Screen.META, block=True)
+    _refresh_chips(screen, client, env.settings)
 
     # resume at startup: --continue loads the resolved session directly;
     # --sessions opens the picker. nothing is running yet, so no idle gate.
     if resume_path:
-        _load_session(screen, client, status, resume_path)
+        _load_session(screen, client, status, resume_path, env.settings)
     elif pick_session:
-        _open_sessions(screen, client, status)
+        _open_sessions(screen, client, status, env.settings)
 
     # a prompt passed on the command line with -i: hand it to the worker as the
     # first turn. the worker echoes the USER event and streams the answer just
@@ -1448,6 +1584,7 @@ def run(*,
         server.close()
         worker.join(timeout=2)
         status_loop.join(timeout=2)
+        agents_chips.join(timeout=2)
         client.close()
         screen.close()
         agent.close()

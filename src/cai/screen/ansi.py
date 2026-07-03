@@ -26,6 +26,9 @@ SGR_MAGENTA        = '\033[35m'
 SGR_BOLD_AZURE     = '\033[1;38;5;45m'
 SGR_AZURE_ON_DGRAY = '\033[38;5;45;48;5;238m'
 SGR_REVERSE_YELLOW = '\033[7;33m'
+SGR_PINK_ON_DGRAY   = '\033[38;5;213;48;5;238m'
+SGR_CYAN_ON_DGRAY   = '\033[36;48;5;238m'
+SGR_YELLOW_ON_DGRAY = '\033[38;5;221;48;5;238m'
 
 # cursor control
 CUR_SHOW      = '\033[?25h'
@@ -46,6 +49,13 @@ ERASE_LINE   = '\033[K'
 
 ALT_ENTER = '\033[?1049h'
 ALT_EXIT  = '\033[?1049l'
+
+# synchronized output (DEC 2026): the terminal buffers everything between
+# begin/end and presents it as one frame, so an erase-then-repaint cycle
+# (content rows wiped, then widgets painted back on top) never shows its
+# intermediate state. terminals without the mode ignore the sequences.
+SYNC_START = '\033[?2026h'
+SYNC_END   = '\033[?2026l'
 
 # mouse reporting: 1000 = press/release, 1002 = motion while a button is held
 # (drag), 1006 = SGR extended coordinates so x/y aren't capped at 223. these

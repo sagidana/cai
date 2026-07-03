@@ -126,13 +126,22 @@ class Layout:
                        cursor_row=None,
                        selection=None,
                        search_spans=None,
-                       viewport_offset=0):
+                       viewport_offset=0,
+                       widget_lines=None):
         """render the content viewport directly to stdout.
 
         selection is (start_row, end_row, line_mode, start_col, end_col)
         where rows/cols refer to buffer line indices. search_spans maps a
         line index to a list of (start_col, end_col) half-open spans of
-        matched substrings - each span is highlighted individually."""
+        matched substrings - each span is highlighted individually.
+
+        widget_lines are hover-widget lines painted over the top-right of
+        the viewport. each widget cell is emitted right after its row's
+        content, in the same output buffer - erase and overlay stay adjacent,
+        so a stdio flush landing mid-frame never shows a widget-less row."""
+        widget_cells = {}
+        for vrow, col, text in self._widget_cells(widget_lines or [], cols):
+            widget_cells[vrow] = (col, text)
         out = []
         sel_sr = 0
         sel_er = 0
@@ -182,6 +191,12 @@ class Layout:
 
                 out.append(line)
             out.append(SGR_RESET)
+            cell = widget_cells.get(vrow)
+            if cell is not None:
+                wcol, wtext = cell
+                out.append(cur_move(vrow + 1, wcol))
+                out.append(wtext)
+                out.append(SGR_RESET)
         sys.stdout.write(''.join(out))
 
     def render_status(self,
@@ -330,6 +345,45 @@ class Layout:
             sys.stdout.write(cur_move(abs_cursor_row, cursor_col + 1))
             sys.stdout.write(CUR_SHOW)
 
+    def _widget_cells(self, lines, cols):
+        """(vrow, col, text) placements for hover-widget lines: line i
+        right-aligned on viewport row i, a stack taller than the viewport cut
+        and closed with a dim +N row. empty lines (block gaps) consume their
+        row but place nothing."""
+        rows = self.content_rows
+        shown = lines
+        extra = 0
+        if len(lines) > rows:
+            shown = lines[:max(0, rows - 1)]
+            extra = len(lines) - len(shown)
+        cells = []
+        vrow = 0
+        for line in shown:
+            width = len(ansi_strip(line))
+            if width > cols:
+                line = ansi_strip(line)[:cols]
+                width = cols
+            if width > 0:
+                cells.append((vrow, cols - width + 1, line))
+            vrow += 1
+        if extra > 0:
+            tag = f' +{extra} '
+            cells.append((vrow, cols - len(tag) + 1, f'{SGR_DIM_GRAY}{tag}{SGR_RESET}'))
+        return cells
+
+    def render_widgets(self, lines, cols):
+        """paint hover-widget lines over the content viewport, anchored
+        top-right. each line only overwrites its own cells. streaming paths
+        should pass widget_lines to render_content instead, which interleaves
+        the widgets row by row so no flush boundary can separate a row's
+        erase from its widget."""
+        out = []
+        for vrow, col, text in self._widget_cells(lines, cols):
+            out.append(cur_move(vrow + 1, col))
+            out.append(text)
+            out.append(SGR_RESET)
+        sys.stdout.write(''.join(out))
+
     def position_cursor(self, mode, cursor_row, viewport_offset, cursor_col=0):
         """final cursor placement after all regions have been rendered.
         only NORMAL and VISUAL modes need explicit positioning here (block
@@ -361,14 +415,16 @@ class Layout:
                    auto_scroll=True,
                    new_content_below=False,
                    cursor_row=0,
-                   cursor_col=0):
+                   cursor_col=0,
+                   widget_lines=None):
         """full screen redraw (used on resize and initial draw)."""
         self.render_content(buffer_lines,
                             self.content_rows,
                             self._cols,
                             selection=selection,
                             search_spans=search_spans,
-                            viewport_offset=viewport_offset)
+                            viewport_offset=viewport_offset,
+                            widget_lines=widget_lines)
         if mode in (Mode.COMMAND, Mode.SEARCH):
             # render input first (clears prompt area), then status last
             # so cursor ends up on the status line.
