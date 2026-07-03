@@ -3,7 +3,9 @@
 A one-shot driver: build a standalone Run from the flags + config and stream its
 answer. Tools/skills come from --tool/--skill; the LLM knobs (--model,
 --system-prompt, --reasoning-effort, --temperature, --max-steps, --non-streaming)
-are forwarded to the run. base_url/model/api_key come from cai.config. Tab
+are forwarded to the run. The base system prompt is composed by appending, in
+order, whichever of ~/.config/cai/SYSTEM.md, ./SYSTEM.md and --system-prompt
+exist. base_url/model/api_key come from cai.config. Tab
 completion lists every available tool/skill via the registries themselves.
 
 With no prompt to act on (no -p/'--', no --file, no piped stdin) and a terminal
@@ -144,7 +146,9 @@ def build_parser():
                         help="pick a saved session to resume (implies -i)")
     parser.add_argument("--system-prompt",
                         default=None,
-                        help="system prompt text")
+                        help="system prompt text (appended after "
+                             "~/.config/cai/SYSTEM.md and ./SYSTEM.md, "
+                             "when those exist)")
     skill_arg = parser.add_argument("--skill",
                                     nargs="+",
                                     default=[],
@@ -220,8 +224,27 @@ def _resolve_prompt(args, dashdash_prompt, parser):
     return dashdash_prompt
 
 
-def _resolve_system_prompt(args):
-    return args.system_prompt
+def _resolve_system_prompt(args, parser):
+    """compose the base system prompt from, in order: ~/.config/cai/SYSTEM.md,
+    ./SYSTEM.md, --system-prompt. each part that exists is appended; None when
+    none do. a CLI-only convenience - SDK callers pass Agent(system_prompt=...)
+    themselves and never read these files."""
+    from cai import config
+    parts = []
+    for path in (os.path.join(config.config_dir(), "SYSTEM.md"), "SYSTEM.md"):
+        if not os.path.isfile(path): continue
+        try:
+            with open(path) as f:
+                content = f.read().strip()
+        except OSError as e:
+            parser.error(f"cannot read {path}: {e}")
+        if content:
+            parts.append(content)
+    if args.system_prompt is not None:
+        parts.append(args.system_prompt)
+    if not parts:
+        return None
+    return "\n\n".join(parts)
 
 
 def _build_messages(args, prompt, parser):
@@ -346,7 +369,7 @@ def main(argv=None):
         return 1
 
     prompt = _resolve_prompt(args, dashdash_prompt, parser)
-    system_prompt = _resolve_system_prompt(args)
+    system_prompt = _resolve_system_prompt(args, parser)
 
     # resume flags. --continue resolves the most recent saved session up front;
     # --sessions defers the choice to a picker shown once the TUI is up. both
