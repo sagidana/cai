@@ -28,7 +28,9 @@ import logging
 import os
 import re
 import secrets
+import shutil
 import string
+import tempfile
 import threading
 
 from cai import config
@@ -149,6 +151,11 @@ class RunHandle:
 
 
 class Agent:
+    # class-level defaults so scratch()/close() work on any Agent, however
+    # constructed (tests build bare agents via __new__).
+    _scratch = None
+    _scratch_owned = False
+
     def __init__(self,
                  *,
                  name=None,
@@ -165,7 +172,8 @@ class Agent:
                  temperature=None,
                  max_steps=None,
                  tool_result_max_chars=None,
-                 stream=True):
+                 stream=True,
+                 scratch=None):
         # only read config/key for a default the caller didn't supply - a child
         # agent given both a model and an api never touches the disk.
         cfg = None
@@ -209,7 +217,16 @@ class Agent:
         self._run_lock = threading.Lock()
         self.messages = []
         self.children = []   # ids of the sub-agents launched this session
-        self.tools_registry = ToolsRegistry(self.env)
+        # the session scratch directory: one place tools exchange binary/bulky
+        # intermediates as files (handed to every local MCP spawn as
+        # CAI_SCRATCH). scratch= is an existing directory to use instead of
+        # creating one - a sub-agent inherits its parent's, so a path it
+        # reports outlives it - and is never deleted here; an agent that
+        # creates its own owns it and removes it on close(). not persistent:
+        # a saved session does not keep it.
+        self._scratch = scratch
+        self._scratch_owned = False
+        self.tools_registry = ToolsRegistry(self.env, scratch=self.scratch)
 
         # registers the env's agent-bound tools (the sub-agent tools by default).
         # override=True so these bind to *this* agent even if a tool of the same
@@ -642,10 +659,23 @@ class Agent:
         finally:
             run.close()
 
+    def scratch(self):
+        """the agent's scratch directory, created on first call. an inherited
+        one (the scratch= param) is returned as-is and never owned."""
+        if self._scratch is None:
+            self._scratch = tempfile.mkdtemp(prefix="cai-scratch-")
+            self._scratch_owned = True
+        return self._scratch
+
     def close(self):
         """close the tool registry, terminating any live MCP server connections
-        this agent spawned at bootstrap."""
+        this agent spawned at bootstrap; a scratch directory this agent created
+        (not an inherited one) is deleted with it."""
         self.tools_registry.close()
+        if not self._scratch_owned: return
+        shutil.rmtree(self._scratch, ignore_errors=True)
+        self._scratch = None
+        self._scratch_owned = False
 
     def __enter__(self):
         return self

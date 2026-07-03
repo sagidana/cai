@@ -262,12 +262,20 @@ def _function_tool_name(fn):
     return getattr(fn, "_cai_tool_name", fn.__name__)
 
 
-def server_from_spec(name, spec):
+def server_from_spec(name, spec, extra_env=None):
     """build a live MCP server connection from a declared spec - a
-    RemoteMCPServer for a url spec, a LocalMCPServer for a command one."""
+    RemoteMCPServer for a url spec, a LocalMCPServer for a command one.
+    extra_env (the registry's CAI_SCRATCH injection) is merged under a command
+    spec's own env - a declared variable wins; a url server has no process to
+    inject into, so it is ignored there."""
     if "url" in spec:
         return RemoteMCPServer(spec["url"], name, headers=spec.get("headers"))
-    return LocalMCPServer(spec["command"], name, env=spec.get("env"), cwd=spec.get("cwd"))
+    env = spec.get("env")
+    if extra_env is not None:
+        merged = dict(extra_env)
+        merged.update(env or {})
+        env = merged
+    return LocalMCPServer(spec["command"], name, env=env, cwd=spec.get("cwd"))
 
 
 def schema_from_function(fn):
@@ -364,8 +372,13 @@ class ToolsRegistry:
     under one of the env's mcp dirs - is spawned on first use, when its schema
     is read for the model or when the tool is called, not before."""
 
-    def __init__(self, env=None):
+    def __init__(self, env=None, scratch=None):
         self.env = env or Environment.default()
+        # scratch: a zero-arg callable returning the session scratch directory
+        # (Agent wires its own; see Agent.scratch). every local MCP server this
+        # registry spawns gets it as CAI_SCRATCH, so tools share one place to
+        # exchange binary/bulky intermediates as files. None: no injection.
+        self.scratch = scratch
         self._functions = {}     # name -> callable
         self._dispatch = {}      # exposed_name -> tagged entry
         self._schemas = {}       # exposed_name -> schema (eager, or resolved lazily)
@@ -567,17 +580,28 @@ class ToolsRegistry:
         server = self._mcp_servers.get(mcp_name)
         if server is not None:
             return server
+        extra_env = self._scratch_env()
         spec = self.env.server_spec(mcp_name)
         if spec is not None:
-            server = server_from_spec(mcp_name, spec)
+            server = server_from_spec(mcp_name, spec, extra_env=extra_env)
         else:
             path = _mcp_server_path(mcp_name, self.env.mcp_dirs())
             if path is None:
                 raise FileNotFoundError(
                     f"no MCP server {mcp_name!r} declared, or in any extension mcps dir or builtins")
-            server = LocalMCPServer([sys.executable, path], mcp_name)
+            server = LocalMCPServer([sys.executable, path], mcp_name, env=extra_env)
         self._mcp_servers[mcp_name] = server
         return server
+
+    def _scratch_env(self):
+        """the env injected into every local MCP spawn: the scratch directory
+        as CAI_SCRATCH when a provider is wired, else None (no injection)."""
+        if self.scratch is None:
+            return None
+        path = self.scratch()
+        if not path:
+            return None
+        return {"CAI_SCRATCH": path}
 
     def _call_function(self, name, arguments):
         fn = self._functions[name]

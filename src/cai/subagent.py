@@ -286,7 +286,10 @@ def _launch_agent(parent,
                       system_prompt=child_prompt,
                       tools=child_tools,
                       skills=child_skills,
-                      hooks=parent.hooks)
+                      hooks=parent.hooks,
+                      # share the parent's scratch: a path the child reports in
+                      # its final text must outlive the child's teardown.
+                      scratch=parent.scratch())
         # no path: the child registers at ~/.config/cai/agents/<name>.sock, the
         # common folder every UnixWiredAgent binds in.
         server = UnixWiredAgent(agent)

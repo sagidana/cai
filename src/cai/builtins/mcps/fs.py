@@ -8,8 +8,11 @@ prefixed with the file name: ``fs__search``, ``fs__read_file``,
 (read-write).
 
 Pair them with the ``fs-read-only`` skill for inspection, or the ``fs`` skill
-which adds the mutating tools. Every path is confined to the current working
-directory via an inlined ``safe_path`` - traversal outside it is rejected.
+which adds the mutating tools. Every path is confined via an inlined
+``safe_path`` to the current working directory - plus the session scratch
+directory when cai hands one down as ``CAI_SCRATCH``, so scratch artifacts
+(bulky tool outputs, binary intermediates) stay searchable and readable with
+these same tools.
 """
 
 import os
@@ -24,12 +27,18 @@ mcp = FastMCP(name="fs")
 
 
 def safe_path(user_path):
-    """resolve user_path relative to the cwd and reject traversal outside it."""
+    """resolve user_path relative to the cwd and reject traversal outside it;
+    the session scratch directory ($CAI_SCRATCH, when set) is allowed too."""
     cwd = os.path.realpath(os.getcwd())
     resolved = os.path.realpath(os.path.join(cwd, user_path))
-    if resolved != cwd and not resolved.startswith(cwd + os.sep):
-        raise ValueError(f"Error: path outside working directory: {user_path!r}")
-    return resolved
+    if resolved == cwd or resolved.startswith(cwd + os.sep):
+        return resolved
+    scratch = os.environ.get("CAI_SCRATCH", "")
+    if scratch:
+        scratch = os.path.realpath(scratch)
+        if resolved == scratch or resolved.startswith(scratch + os.sep):
+            return resolved
+    raise ValueError(f"Error: path outside working directory: {user_path!r}")
 
 
 def _paginate(lines, start, end, unit):
