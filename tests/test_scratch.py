@@ -125,6 +125,65 @@ def test_scratch_does_not_unlock_other_paths(tmp_path):
         registry.close()
 
 
+def test_scratch_dir_inside_a_function_tool_reads_the_provider(tmp_path, monkeypatch):
+    monkeypatch.delenv("CAI_SCRATCH", raising=False)
+
+    @cai.tool
+    def where() -> str:
+        """where."""
+        return cai.scratch_dir()
+
+    registry = ToolsRegistry(scratch=lambda: str(tmp_path / "s"))
+    registry.select("where")
+    assert registry.dispatch("where", {}) == str(tmp_path / "s")
+
+
+def test_scratch_provider_only_called_when_a_tool_asks(tmp_path):
+    calls = []
+
+    def provider():
+        calls.append(1)
+        return str(tmp_path)
+
+    @cai.tool
+    def indifferent() -> str:
+        """indifferent."""
+        return "never asked"
+
+    registry = ToolsRegistry(scratch=provider)
+    registry.select("indifferent")
+    assert registry.dispatch("indifferent", {}) == "never asked"
+    assert calls == []
+
+
+def test_scratch_dir_outside_dispatch_falls_back_to_env(monkeypatch):
+    monkeypatch.setenv("CAI_SCRATCH", "/somewhere")
+    assert cai.scratch_dir() == "/somewhere"
+    monkeypatch.delenv("CAI_SCRATCH")
+    assert cai.scratch_dir() == ""
+
+
+def test_safe_path_admits_scratch_inside_a_function_tool(tmp_path, monkeypatch):
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    scratch = tmp_path / "s"
+    scratch.mkdir()
+    monkeypatch.chdir(cwd)
+    monkeypatch.delenv("CAI_SCRATCH", raising=False)
+
+    @cai.tool
+    def jail(p: str) -> str:
+        """jail."""
+        return cai.safe_path(p)
+
+    registry = ToolsRegistry(scratch=lambda: str(scratch))
+    registry.select("jail")
+    out = registry.dispatch("jail", {"p": str(scratch / "a.bin")})
+    assert out == str(scratch / "a.bin")
+    out = registry.dispatch("jail", {"p": "/etc/passwd"})
+    assert "outside working directory" in out
+
+
 def test_agent_creates_scratch_lazily_and_deletes_on_close():
     agent = Agent(model="m", api=object())
     assert agent._scratch is None

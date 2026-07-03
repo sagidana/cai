@@ -43,6 +43,7 @@ import subprocess
 
 import requests
 
+from cai import paths
 from cai.environment import Environment
 
 
@@ -611,6 +612,12 @@ class ToolsRegistry:
             def call(**kwargs):
                 return self.dispatch(target, kwargs)
             args.append(call)
+        # bracket the call with this registry's scratch provider, so in-process
+        # tool code reaches it through cai.scratch_dir() the same way a spawned
+        # server reaches CAI_SCRATCH.
+        token = None
+        if self.scratch is not None:
+            token = paths._scratch_provider.set(self.scratch)
         try:
             if arguments:
                 result = fn(*args, **arguments)
@@ -619,6 +626,9 @@ class ToolsRegistry:
         except Exception as e:
             log.exception("tool %s raised", name)
             return f"Error: tool '{name}' raised: {e}"
+        finally:
+            if token is not None:
+                paths._scratch_provider.reset(token)
         if result is None:
             return ""
         return str(result)

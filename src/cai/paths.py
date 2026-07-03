@@ -1,24 +1,48 @@
-"""paths: safe_path - the one path jail cai tools share.
+"""paths: scratch_dir + safe_path - how cai tool code finds and jails paths.
 
-A tool that takes a filesystem path from the model resolves it through
-safe_path, which confines it to the current working directory plus the session
-scratch directory ($CAI_SCRATCH, when set - the place tools exchange
-binary/bulky intermediates; see ToolsRegistry). Exposed as cai.safe_path so an
-extension's MCP servers and function tools share one implementation - with the
-scratch semantics included - instead of vendoring copies. A server file cai
-spawns runs under the same interpreter, so `from cai import safe_path` always
-resolves. Stdlib-only."""
+scratch_dir() is the one way any tool code locates the session scratch
+directory (the place tools exchange binary/bulky intermediates): an MCP server
+subprocess reads the CAI_SCRATCH env var cai spawned it with; an in-process
+function tool reads the per-dispatch context ToolsRegistry brackets around its
+call. Same accessor, both contexts - "" when no session scratch exists (e.g.
+under a bare MCP client), so callers can fall back to tempfile.
+
+safe_path confines a model-supplied path to the current working directory plus
+that scratch directory. Exposed as cai.safe_path / cai.scratch_dir so an
+extension's MCP servers and function tools share one implementation instead of
+vendoring copies. A server file cai spawns runs under the same interpreter, so
+`from cai import safe_path` always resolves. Stdlib-only."""
 import os
+from contextvars import ContextVar
+
+
+# the in-process scratch source: ToolsRegistry sets it to its provider (a
+# zero-arg callable) for the duration of one function-tool call, so the dir is
+# still only created when a tool actually asks. holding the provider - not the
+# path - keeps laziness; a ContextVar - not a global - keeps two agents
+# dispatching in two threads isolated.
+_scratch_provider = ContextVar("cai_scratch_provider", default=None)
+
+
+def scratch_dir():
+    """the session scratch directory, or "" when there is none. reads the
+    dispatch context inside a function tool, the CAI_SCRATCH env var inside a
+    spawned MCP server. note: a thread a tool spawns itself starts with a fresh
+    context - capture the value before spawning."""
+    provider = _scratch_provider.get()
+    if provider is not None:
+        return provider()
+    return os.environ.get("CAI_SCRATCH", "")
 
 
 def safe_path(user_path):
     """resolve user_path relative to the cwd and reject traversal outside it;
-    the session scratch directory ($CAI_SCRATCH, when set) is allowed too."""
+    the session scratch directory (scratch_dir(), when set) is allowed too."""
     cwd = os.path.realpath(os.getcwd())
     resolved = os.path.realpath(os.path.join(cwd, user_path))
     if resolved == cwd or resolved.startswith(cwd + os.sep):
         return resolved
-    scratch = os.environ.get("CAI_SCRATCH", "")
+    scratch = scratch_dir()
     if scratch:
         scratch = os.path.realpath(scratch)
         if resolved == scratch or resolved.startswith(scratch + os.sep):

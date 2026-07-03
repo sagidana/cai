@@ -22,7 +22,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",
 )
 
-from cai.paths import safe_path
+from cai.paths import safe_path, scratch_dir
 from cai.events import Event, EventType
 from cai.hooks import HookContext, HookEvent, HooksRegistry, ToolCall, hook
 from cai.commands import Command, CommandContext, command
@@ -40,6 +40,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "safe_path",
+    "scratch_dir",
     "Event",
     "EventType",
     "HookContext",
