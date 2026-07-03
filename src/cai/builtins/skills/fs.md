@@ -1,6 +1,6 @@
 name: fs
 skills: fs-read-only
-tools: fs__create_file, fs__edit_file, fs__rename_file, fs__move_file, fs__copy_file, fs__remove_file, fs__create_directory, fs__move_directory
+tools: fs__create_file, fs__edit_file, fs__rename_file, fs__move_file, fs__copy_file, fs__copy_bytes, fs__remove_file, fs__create_directory, fs__move_directory
 ---
 # Skill: File System (Read-Write)
 
@@ -11,6 +11,7 @@ Modifying tools:
 - `fs__edit_file` - replace the first occurrence of `old_text` with `new_text`; quote enough surrounding context to make the match unique.
 - `fs__rename_file` / `fs__move_file` - rename in place or relocate a file; `fs__move_file` accepts a destination directory.
 - `fs__copy_file` - copy a file to a new path; accepts a destination directory and preserves metadata.
+- `fs__copy_bytes` - copy a byte range between files without the bytes passing through you: extract a slice to a new file, append, or patch a byte range in place (src offsets default to the whole file; dst offsets choose append/create vs replace).
 - `fs__remove_file` - delete a regular file (directories are never removed).
 - `fs__create_directory` - make a directory tree (`mkdir -p` semantics).
 - `fs__move_directory` - rename or relocate a directory.
