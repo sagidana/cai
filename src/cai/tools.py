@@ -652,7 +652,11 @@ def wrap(target):
     time - a callable taking the target's kwargs and returning its text result
     (an 'Error: ...' string on failure, never an exception) - and is hidden
     from the model's schema. selecting the wrapper registers the target too,
-    dispatchable but unselected. see ToolsRegistry.register_function."""
+    dispatchable but unselected. see ToolsRegistry.register_function.
+
+    before_tool_call hooks fire on the tool the model calls - the wrapper -
+    not on the inner call, so wrapping a gated tool creates an ungated path:
+    ship a gate for the wrapper if its target had one."""
     if not isinstance(target, str):
         raise TypeError(f"cai.wrap: target must be a tool name string, got {target!r}")
 
