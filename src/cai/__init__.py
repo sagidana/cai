@@ -22,6 +22,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",
 )
 
+from cai.paths import safe_path
 from cai.events import Event, EventType
 from cai.hooks import HookContext, HookEvent, HooksRegistry, ToolCall, hook
 from cai.commands import Command, CommandContext, command
@@ -38,6 +39,7 @@ if TYPE_CHECKING:
     from cai.tools import ToolsRegistry, tool, wrap, mcp_server
 
 __all__ = [
+    "safe_path",
     "Event",
     "EventType",
     "HookContext",

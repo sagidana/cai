@@ -5,6 +5,8 @@ spawned - no network, everything under tmp_path."""
 import os
 import sys
 
+import pytest
+
 import cai
 from cai.agent import Agent
 from cai.environment import Environment, builtin_mcp_dir
@@ -13,6 +15,33 @@ from cai.tools import ToolsRegistry
 
 def _fs_path():
     return os.path.join(builtin_mcp_dir(), "fs.py")
+
+
+def test_safe_path_confines_to_cwd(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("CAI_SCRATCH", raising=False)
+    (tmp_path / "inside.txt").write_text("x")
+    assert cai.safe_path("inside.txt") == str(tmp_path / "inside.txt")
+    with pytest.raises(ValueError):
+        cai.safe_path("/etc/passwd")
+    with pytest.raises(ValueError):
+        cai.safe_path("../escape.txt")
+
+
+def test_safe_path_admits_the_scratch_dir(tmp_path, monkeypatch):
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.chdir(cwd)
+    monkeypatch.setenv("CAI_SCRATCH", str(scratch))
+    assert cai.safe_path(str(scratch / "artifact.bin")) == str(scratch / "artifact.bin")
+    assert cai.safe_path(str(scratch)) == str(scratch)
+    # a sibling that merely shares the scratch dir's name prefix stays jailed
+    with pytest.raises(ValueError):
+        cai.safe_path(str(tmp_path / "scratch-evil" / "x"))
+    with pytest.raises(ValueError):
+        cai.safe_path("/etc/passwd")
 
 
 def test_scratch_injected_into_declared_server(tmp_path):

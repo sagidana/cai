@@ -1,6 +1,6 @@
 """fs.py - the built-in file-system MCP server, shipped with cai.
 
-A self-contained FastMCP stdio server (stdlib only). Its tools are surfaced
+A FastMCP stdio server (stdlib + cai.safe_path). Its tools are surfaced
 prefixed with the file name: ``fs__search``, ``fs__read_file``,
 ``fs__list_files`` (read-only), and ``fs__create_file``, ``fs__edit_file``,
 ``fs__rename_file``, ``fs__move_file``, ``fs__copy_file``,
@@ -8,11 +8,10 @@ prefixed with the file name: ``fs__search``, ``fs__read_file``,
 (read-write).
 
 Pair them with the ``fs-read-only`` skill for inspection, or the ``fs`` skill
-which adds the mutating tools. Every path is confined via an inlined
-``safe_path`` to the current working directory - plus the session scratch
-directory when cai hands one down as ``CAI_SCRATCH``, so scratch artifacts
-(bulky tool outputs, binary intermediates) stay searchable and readable with
-these same tools.
+which adds the mutating tools. Every path is confined via ``cai.safe_path`` to
+the current working directory - plus the session scratch directory when cai
+hands one down as ``CAI_SCRATCH``, so scratch artifacts (bulky tool outputs,
+binary intermediates) stay searchable and readable with these same tools.
 """
 
 import os
@@ -23,22 +22,9 @@ from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 
+from cai import safe_path
+
 mcp = FastMCP(name="fs")
-
-
-def safe_path(user_path):
-    """resolve user_path relative to the cwd and reject traversal outside it;
-    the session scratch directory ($CAI_SCRATCH, when set) is allowed too."""
-    cwd = os.path.realpath(os.getcwd())
-    resolved = os.path.realpath(os.path.join(cwd, user_path))
-    if resolved == cwd or resolved.startswith(cwd + os.sep):
-        return resolved
-    scratch = os.environ.get("CAI_SCRATCH", "")
-    if scratch:
-        scratch = os.path.realpath(scratch)
-        if resolved == scratch or resolved.startswith(scratch + os.sep):
-            return resolved
-    raise ValueError(f"Error: path outside working directory: {user_path!r}")
 
 
 def _paginate(lines, start, end, unit):
