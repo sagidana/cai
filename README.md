@@ -19,9 +19,9 @@ make dev            # pip install -e .[dev]
 
 Requires Python >= 3.11.
 
-## Configure
+## Configuration
 
-Two files under `~/.config/cai/`:
+Everything lives under `~/.config/cai/`. Two files are required:
 
 ```sh
 cat > ~/.config/cai/config.json <<'EOF'
@@ -33,6 +33,45 @@ echo "sk-..." > ~/.config/cai/api_key
 Nothing is defaulted: a missing or incomplete config stops cai with a clear
 message. If `~/.config/cai/SYSTEM.md` or `./SYSTEM.md` exist, they are appended
 to the system prompt (then `--system-prompt`, when given).
+
+### init.py
+
+`~/.config/cai/init.py` is optional Python imported on every load, after the
+extensions — so its registrations win. Everything the SDK registers works
+here: MCP servers, settings, tools, hooks, commands.
+
+```python
+import cai
+
+# MCP servers - local (spawned stdio subprocess) or remote (URL)
+cai.mcp_server("github",
+               command=["npx", "-y", "@modelcontextprotocol/server-github"],
+               env={"GITHUB_TOKEN": "..."})
+cai.mcp_server("linear",
+               url="https://mcp.linear.app/mcp",
+               headers={"Authorization": "Bearer ..."})
+
+# settings - the same object the TUI's :config overlay edits
+cai.settings.show_reasoning = False
+cai.settings.tool_result_max_chars = 20_000
+cai.settings.auto_save_sessions = True
+cai.settings.skills.append("fs")                  # auto-activated on CLI runs
+cai.settings.tools.append("github__search_issues")
+
+# tools / hooks / commands - same decorators as the SDK
+@cai.tool
+def shout(text: str) -> str:
+    """upper-case text."""
+    return text.upper()
+
+@cai.hook("after_turn")
+def log_turn(ctx):
+    print(f"turn done, {len(ctx.messages)} messages")
+
+@cai.command(name="clear", help="wipe the conversation")
+def clear(ctx):
+    ctx.client.set_messages([])
+```
 
 ## CLI
 
@@ -71,18 +110,8 @@ conversation plus the settings needed to resume it.
 - **Function tools** are plain Python callables registered with `@cai.tool`.
 - **MCP tools** come from MCP servers, named `<server>__<tool>` so two
   servers can each expose a `search` without colliding. `fs` ships built in.
-  A server is either a `mcps/*.py` FastMCP stdio script, or declared from
-  `init.py` with `cai.mcp_server` — local (spawned subprocess) or remote (URL):
-
-  ```python
-  cai.mcp_server("github",
-                 command=["npx", "-y", "@modelcontextprotocol/server-github"],
-                 env={"GITHUB_TOKEN": "..."})              # local stdio server
-
-  cai.mcp_server("linear",
-                 url="https://mcp.linear.app/mcp",
-                 headers={"Authorization": "Bearer ..."})  # remote server
-  ```
+  A server is either a `mcps/*.py` FastMCP stdio script, or declared with
+  `cai.mcp_server` (see [Configuration](#initpy)) — local or remote.
 - **Skills** are markdown files: a small header (`tools:`, `skills:`) plus a
   prompt body. Activating one unions its tools into the registry and appends
   its body to the system prompt. Built in: `fs`, `fs-read-only`, `subagents`.
