@@ -754,24 +754,62 @@ def _as_json_text(text):
     return json.dumps(obj, indent=2, ensure_ascii=False)
 
 
+_REASONING_MARK = '═══ reasoning ═══'
+_RESPONSE_MARK = '═══ response ═══'
+
+
+def _sectioned_text(reasoning, response):
+    """two-section editor layout for assistant messages with reasoning."""
+    return (f'{_REASONING_MARK}\n{reasoning}\n\n'
+            f'{_RESPONSE_MARK}\n{response}')
+
+
+def _parse_sections(text):
+    """split sectioned editor text back into (reasoning, response).
+    returns None when a marker was removed or the two were reordered."""
+    lines = text.split('\n')
+    reasoning_at = None
+    response_at = None
+    for i, line in enumerate(lines):
+        if line.strip() == _REASONING_MARK and reasoning_at is None:
+            reasoning_at = i
+        elif line.strip() == _RESPONSE_MARK and response_at is None:
+            response_at = i
+    if reasoning_at is None: return None
+    if response_at is None: return None
+    if response_at < reasoning_at: return None
+    reasoning = '\n'.join(lines[reasoning_at + 1:response_at]).strip('\n')
+    response = '\n'.join(lines[response_at + 1:]).strip('\n')
+    return (reasoning, response)
+
+
 def _edit_in_nvim(ctx, screen):
     """open the selected message in nvim. messages with structure
-    (tool_calls, list content, or stored reasoning) are edited as the raw
-    JSON object so the user can rewrite tool names, arguments, call ids,
-    etc. plain text messages edit as raw content - no JSON escaping needed
+    (tool_calls or list content) are edited as the raw JSON object so the
+    user can rewrite tool names, arguments, call ids, etc. assistant
+    messages with stored reasoning edit as two plain-text sections
+    (reasoning / response); each section writes back only if it changed.
+    plain text messages edit as raw content - no JSON escaping needed
     for the common case."""
     ai = ctx.view[ctx.selected_idx]
     msg = ctx.messages[ai]
 
     needs_json = (bool(msg.get('tool_calls'))
-                  or isinstance(msg.get('content'), list)
-                  or bool(msg.get('_reasoning')))
+                  or isinstance(msg.get('content'), list))
+    sectioned = bool(msg.get('_reasoning')) and not needs_json
 
     if needs_json:
         editable = _unpack_tool_args(msg)
         # ensure_ascii=False so non-ASCII content stays readable in the editor.
         text = json.dumps(editable, indent=2, ensure_ascii=False)
         suffix = '.json'
+    elif sectioned:
+        response = msg.get('content', '') or ''
+        json_text = _as_json_text(response)
+        if json_text is not None:
+            response = json_text
+        text = _sectioned_text(msg['_reasoning'], response)
+        suffix = '.md'
     else:
         text = msg.get('content', '') or ''
         suffix = '.txt'
@@ -812,6 +850,25 @@ def _edit_in_nvim(ctx, screen):
                 return
             _repack_tool_args(new_msg)
             ctx.messages[ai] = new_msg
+        elif sectioned:
+            old_sections = _parse_sections(text)
+            new_sections = _parse_sections(new_text)
+            if new_sections is None:
+                ctx.status_flash = 'edit: section markers missing or reordered'
+                return
+            # whitespace-only difference around the markers parses back to
+            # identical sections - treat as a pure view, same as new_text == text.
+            if new_sections == old_sections:
+                return
+            edited = dict(msg)
+            if new_sections[0] != old_sections[0]:
+                if new_sections[0]:
+                    edited['_reasoning'] = new_sections[0]
+                else:
+                    edited.pop('_reasoning', None)
+            if new_sections[1] != old_sections[1]:
+                edited['content'] = new_sections[1]
+            ctx.messages[ai] = edited
         else:
             # replace the dict rather than mutate in place: the tree diffs by
             # content against the message objects it holds, so an in-place edit
