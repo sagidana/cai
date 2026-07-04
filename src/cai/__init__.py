@@ -35,8 +35,11 @@ from cai.llm import LLMError, MaxStepsReached, call_llm
 if TYPE_CHECKING:
     from cai.agent import Agent, Run, RunInFlight
     from cai.api import ApiError
-    from cai.environment import Environment
+    from cai.environment import Environment, Settings
     from cai.tools import ToolsRegistry, tool, wrap, mcp_server
+    # cai.settings is served by __getattr__ at runtime; this declaration is
+    # what lets an editor complete cai.settings and its attributes.
+    settings: Settings
 
 __all__ = [
     "safe_path",
@@ -63,6 +66,7 @@ __all__ = [
     "Run",
     "RunInFlight",
     "Environment",
+    "Settings",
     "settings",
 ]
 
@@ -81,6 +85,9 @@ def __getattr__(name):
     if name == "Environment":
         from cai.environment import Environment
         return Environment
+    if name == "Settings":
+        from cai.environment import Settings
+        return Settings
     # api pulls requests; lazy so `import cai` stays light.
     if name == "ApiError":
         from cai.api import ApiError
