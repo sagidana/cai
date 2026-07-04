@@ -63,8 +63,8 @@ def _hexdump(data, offset):
 
 
 def _paginate(lines, start, end, unit):
-    """return a 100-line window of `lines` as text, with a footer when more
-    remain. start/end are 1-based and inclusive."""
+    """return a window of `lines` as text (100 lines by default), with a footer
+    when more remain. start/end are 1-based and inclusive."""
     total = len(lines)
     if start is None:
         start = 1
@@ -83,23 +83,15 @@ def _paginate(lines, start, end, unit):
 @mcp.tool()
 def search(pattern: str, path: str = ".", file_glob: str = "",
            start: Optional[int] = None, end: Optional[int] = None) -> str:
-    """Search for a regex pattern across files using ripgrep (rg), returning results in
-    vimgrep format: one match per line as  <file>:<line>:<col>:<matched line text>.
-
-    This is the right tool to locate where something is defined or used. At most 100
-    result lines are returned per call (lines 1-100 by default); paginate with
-    start/end (e.g. start=101, end=200 for the next page).
-
-    Text only: a recursive search skips binary files; naming a binary file
-    directly reports 'binary file matches' without content - inspect it with
-    read_file (offset_start/offset_end give an xxd-style hexdump) instead.
+    """Regex-search files with ripgrep. Returns vimgrep lines
+    <file>:<line>:<col>:<text>; skips binary files.
 
     Args:
-        pattern:   Regular expression to search for (ripgrep / Rust regex syntax).
-        path:      Directory or file to search in. Defaults to "." (cwd).
-        file_glob: Optional glob restricting which files are searched, e.g. "*.py".
-        start:     1-based index of the first result line to return (default 1).
-        end:       1-based index of the last result line (default start + 99).
+        pattern:   Regex (ripgrep syntax).
+        path:      Dir or file to search (default ".").
+        file_glob: Optional glob, e.g. "*.py".
+        start/end: 1-based result-line window (default 1..100; paginate
+                   with start=101 etc, or ask for a larger range).
     """
     import subprocess
 
@@ -133,21 +125,16 @@ def read_file(file_path: str,
               line_end: Optional[int] = None,
               offset_start: Optional[int] = None,
               offset_end: Optional[int] = None) -> str:
-    """Read a file: text is returned as lines, binary as an xxd-style hexdump.
-
-    A file is treated as binary if its first 8KB contain a NUL byte. A call with
-    no range arguments works on any file: text shows a 200-line window, binary
-    the first 3200 bytes (200 dump lines). Only the requested range is read off
-    disk, so this is safe on very large files.
+    """Read a file: text as lines, binary (NUL in first 8KB) as an xxd-style
+    hexdump. Only the requested range is read, so any file size is safe. With
+    no range arguments: text shows 200 lines, binary the first 3200 bytes.
 
     Args:
-        file_path:    Path to the file, relative to the working directory.
-        line_start:   TEXT ONLY. First line to read (1-based). Defaults to 1.
-        line_end:     TEXT ONLY. Last line to read (inclusive). Defaults to
-                      line_start + 199.
-        offset_start: BINARY ONLY. First byte to read (0-based). Defaults to 0.
-        offset_end:   BINARY ONLY. End byte (exclusive). Defaults to
-                      offset_start + 3200.
+        file_path:    Path to the file.
+        line_start:   TEXT ONLY. First line, 1-based (default 1).
+        line_end:     TEXT ONLY. Last line, inclusive (default line_start+199).
+        offset_start: BINARY ONLY. First byte, 0-based (default 0).
+        offset_end:   BINARY ONLY. End byte, exclusive (default offset_start+3200).
     """
     try:
         safe = safe_path(file_path)
@@ -235,16 +222,14 @@ def _read_binary(safe, offset_start, offset_end):
 def list_files(path: str = ".", pattern: str = "",
                start: Optional[int] = None, end: Optional[int] = None) -> str:
     """Recursively list files and directories under `path`, shallowest first.
-
-    Each line is "file  <rel-path>" or "dir  <rel-path>". At most 100 lines are
-    returned per call; paginate with start/end. Pass a regex `pattern` to filter
-    entries by their relative path (traversal still goes full-depth).
+    Each line is "file  <rel-path>" or "dir  <rel-path>".
 
     Args:
-        path:    Root directory to list. Defaults to "." (cwd).
-        pattern: Optional regex (Python re) matched against each entry's rel path.
-        start:   1-based index of the first result line (default 1).
-        end:     1-based index of the last result line (default start + 99).
+        path:      Root directory (default ".").
+        pattern:   Optional regex filtering entries by relative path
+                   (traversal still goes full-depth).
+        start/end: 1-based result-line window (default 1..100; paginate
+                   with start=101 etc, or ask for a larger range).
     """
     try:
         root = safe_path(path)
@@ -311,13 +296,15 @@ def _decode_content(content, encoding):
 
 @mcp.tool()
 def create_file(file_path: str, content: str, encoding: str = "text") -> str:
-    """Create (or overwrite) a file at file_path with the given content.
+    """Create (or overwrite) a file with the given content. Parent directories
+    are created automatically.
 
-    encoding declares how `content` is to be interpreted: 'text' (default,
-    written as UTF-8), 'hex' (pairs of hex digits, whitespace ignored - hexdump
-    style '7f45 4c46' works) or 'base64' - use hex/base64 to write binary files.
-    file_path must be inside the working directory; paths that escape it are
-    rejected. Parent directories are created automatically.
+    Args:
+        file_path: Path to the file.
+        content:   The content to write, interpreted per `encoding`.
+        encoding:  How `content` is decoded: 'text' (default, UTF-8), or
+                   'hex' / 'base64' for binary files (hex ignores whitespace,
+                   so hexdump-style '7f45 4c46' pastes straight in).
     """
     try:
         safe = safe_path(file_path)
@@ -337,22 +324,18 @@ def edit_file(file_path: str, old_text: str, new_text: str,
               replace_all: bool = False, encoding: str = "text") -> str:
     """Replace old_text with new_text in a file.
 
-    encoding declares how old_text/new_text are to be interpreted: 'text'
-    (default) for text files, 'hex' (pairs of hex digits, whitespace ignored -
-    hexdump style '7f45 4c46' works) for binary files. A text edit on a binary
-    file, or a hex edit on a text file, is an error - a file is binary if its
-    first 8KB contain a NUL byte, matching read_file.
-
-    old_text must identify a UNIQUE span: if it occurs more than once the edit is
-    rejected (add surrounding context to make it unique, or pass replace_all=True).
-    file_path must be inside the working directory.
-
     Args:
-        file_path:   File to edit, relative to the working directory.
-        old_text:    Exact content to find. Must be unique unless replace_all.
-        new_text:    Replacement content (may be empty to delete).
-        replace_all: When True, replace every occurrence.
-        encoding:    'text' (default) or 'hex'.
+        file_path:   Path to the file.
+        old_text:    The span to replace. Must be UNIQUE in the file - text and
+                     binary alike - or the edit is rejected; add surrounding
+                     context to disambiguate, or pass replace_all=True.
+        new_text:    The replacement; may be empty to delete old_text.
+        replace_all: Replace EVERY occurrence of old_text instead of requiring
+                     it to be unique (default False).
+        encoding:    Must match the file: 'text' (default) for text files,
+                     'hex' (whitespace ignored, hexdump-style '7f45 4c46'
+                     works) for binary files (NUL in first 8KB) - a mismatch
+                     is an error.
     """
     try:
         safe = safe_path(file_path)
@@ -398,11 +381,7 @@ def edit_file(file_path: str, old_text: str, new_text: str,
 
 @mcp.tool()
 def rename_file(src_path: str, dst_path: str) -> str:
-    """Move or rename a file within the working directory.
-
-    Both paths must be inside the working directory; parent directories of
-    dst_path are created automatically.
-    """
+    """Rename a file. Parent directories of dst_path are created automatically."""
     try:
         safe_src = safe_path(src_path)
         safe_dst = safe_path(dst_path)
@@ -419,11 +398,8 @@ def rename_file(src_path: str, dst_path: str) -> str:
 
 @mcp.tool()
 def move_file(src_path: str, dst_path: str) -> str:
-    """Move a file to a new location within the working directory.
-
-    If dst_path is an existing directory the file is placed inside it keeping its
-    original name. Both paths must be inside the working directory.
-    """
+    """Move a file. If dst_path is an existing directory the file is placed
+    inside it, keeping its name."""
     try:
         safe_src = safe_path(src_path)
         safe_dst = safe_path(dst_path)
@@ -443,12 +419,8 @@ def move_file(src_path: str, dst_path: str) -> str:
 
 @mcp.tool()
 def copy_file(src_path: str, dst_path: str) -> str:
-    """Copy a file (text or binary, byte-exact) within the working directory.
-
-    If dst_path is an existing directory the file is placed inside it keeping its
-    original name. Both paths must be inside the working directory; parent
-    directories of dst_path are created automatically.
-    """
+    """Copy a file (byte-exact, works on binary). If dst_path is an existing
+    directory the file is placed inside it, keeping its name."""
     try:
         safe_src = safe_path(src_path)
         safe_dst = safe_path(dst_path)
@@ -472,23 +444,20 @@ def copy_bytes(src_path: str, dst_path: str,
                src_offset_end: Optional[int] = None,
                dst_offset_start: Optional[int] = None,
                dst_offset_end: Optional[int] = None) -> str:
-    """Copy a byte range from one file into another - bytes move directly
-    between the files, never through the conversation. src and dst may be the
-    same file.
+    """Copy a byte range from one file into another - the bytes never pass
+    through the conversation. src and dst may be the same file.
 
-    The source range defaults to the whole file: src_offset_start omitted
-    starts at the beginning, src_offset_end omitted reads to the end (offsets
-    0-based, end exclusive). Where the bytes land is chosen by the dst offsets:
+    Source range: src_offset_start..src_offset_end (0-based, end exclusive),
+    defaulting to the whole file. Destination, chosen by the dst offsets:
 
       - both omitted:          append to dst_path, creating it if missing
-      - only dst_offset_start: the bytes overwrite dst starting there
-      - only dst_offset_end:   the bytes overwrite dst ending there
-      - both:                  the bytes replace dst[start:end] (sizes may
-                               differ - the tail shifts)
+      - only dst_offset_start: overwrite dst starting there
+      - only dst_offset_end:   overwrite dst ending there
+      - both:                  replace dst[start:end] (sizes may differ -
+                               the tail shifts)
 
-    Patching (any dst offset given) requires dst_path to exist and the replace
-    range to be within its size. Returns a message naming what happened
-    (created / appended / replaced).
+    Patching (any dst offset given) requires dst_path to exist and the range
+    to be within its size.
     """
     try:
         safe_src = safe_path(src_path)
@@ -556,11 +525,7 @@ def copy_bytes(src_path: str, dst_path: str,
 
 @mcp.tool()
 def remove_file(file_path: str) -> str:
-    """Remove a regular file at file_path (directories are never removed).
-
-    file_path must be inside the working directory; paths that escape it are
-    rejected.
-    """
+    """Remove a regular file (directories are never removed)."""
     try:
         safe = safe_path(file_path)
     except ValueError as e:
@@ -575,11 +540,7 @@ def remove_file(file_path: str) -> str:
 
 @mcp.tool()
 def create_directory(dir_path: str) -> str:
-    """Create a directory and any missing parents ('mkdir -p' semantics).
-
-    dir_path must be inside the working directory; paths that escape it are
-    rejected.
-    """
+    """Create a directory and any missing parents ('mkdir -p' semantics)."""
     try:
         safe = safe_path(dir_path)
     except ValueError as e:
@@ -593,11 +554,8 @@ def create_directory(dir_path: str) -> str:
 
 @mcp.tool()
 def move_directory(src_path: str, dst_path: str) -> str:
-    """Move or rename a directory within the working directory.
-
-    If dst_path is an existing directory the source is placed inside it (shell
-    'mv' behaviour). Both paths must be inside the working directory.
-    """
+    """Move or rename a directory. If dst_path is an existing directory the
+    source is placed inside it (shell 'mv' behaviour)."""
     try:
         safe_src = safe_path(src_path)
         safe_dst = safe_path(dst_path)

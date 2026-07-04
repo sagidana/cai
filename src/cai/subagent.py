@@ -246,16 +246,14 @@ def _own_child(parent_name, agent, server, prompt, deliveries=None):
             log.exception("sub-agent %r: closing child agent failed", agent.name)
 
 
-_LAUNCH_DOC = """Launch ONE background sub-agent and return its agent_id (its name); call it like launch_agent(prompt="<self-contained task>", name="audit-auth-flow"). Pass arguments as named fields.
+_LAUNCH_DOC = """Launch ONE background sub-agent, return its agent_id (name). Call like launch_agent(prompt="<self-contained task>", name="audit-auth-flow").
 
     The child shares your working directory but not your conversation, so
     ``prompt`` must be self-contained. ``tools`` and ``skills`` are each a LIST
-    of names (a subset of your own); nothing is inherited by default. ``model``
-    and ``system_prompt`` override the inherited model / replace the prompt. It
-    runs in the background; when it finishes its result is delivered back to you
-    automatically as a message, and you can also collect it with
-    wait_agent(agent_id=...). The returned name may be de-duplicated, so use the
-    one this returns.
+    of names (a subset of your own; nothing is inherited by default);
+    ``model`` / ``system_prompt`` override the inherited model / prompt. When it
+    finishes its result is delivered to you as a message; you can also collect
+    it with wait_agent. Use the returned name — it may be de-duplicated.
     """
 
 
@@ -368,12 +366,12 @@ def _drain(wire, timeout, ui=None):
             return (msg.get("text") or ""), False
 
 
-_WAIT_DOC = """Wait for ONE sub-agent and return its answer; call it like wait_agent(agent_id="audit-auth-flow") with the name launch_agent returned. agent_id is a single string, one per call - to wait on several, make several calls.
+_WAIT_DOC = """Wait for ONE sub-agent, return its answer. Call like wait_agent(agent_id="audit-auth-flow"). agent_id is a single string, one per call - to wait on several, make several calls.
 
-    Attaches to the running child over its socket. On timeout the sub-agent keeps
-    running; call wait_agent again to keep waiting, or pass kill=True to kill it
-    when the timeout expires. A child that already finished keeps its answer
-    parked, so calling this after it ended still returns the result (once).
+    Blocks up to `timeout` seconds (default 30). On timeout the sub-agent keeps
+    running; call again to keep waiting, or pass kill=True to kill it when the
+    timeout expires. A finished child keeps its
+    answer parked, so a call after it ended still returns the result (once).
     """
 
 
@@ -458,11 +456,11 @@ def make_wait_agent(parent, deliveries):
     return wait_agent
 
 
-_LIST_DOC = """List your sub-agents and their status, one per line; call it like list_agents(). No arguments.
+_LIST_DOC = """List your sub-agents and their status, one per line. Call like list_agents(); no arguments.
 
-    Each line is '<agent_id>: <status>' - running, finished (noting whether its
-    result is still waiting for a wait_agent or was already delivered to you),
-    or how it ended when it produced no result.
+    Each line is '<agent_id>: <status>' - running, finished (noting whether the
+    result still awaits a wait_agent or was already delivered), or how it ended
+    when it produced no result.
     """
 
 
