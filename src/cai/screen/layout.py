@@ -127,7 +127,8 @@ class Layout:
                        selection=None,
                        search_spans=None,
                        viewport_offset=0,
-                       widget_lines=None):
+                       widget_lines=None,
+                       positioned_cells=None):
         """render the content viewport directly to stdout.
 
         selection is (start_row, end_row, line_mode, start_col, end_col)
@@ -136,12 +137,20 @@ class Layout:
         matched substrings - each span is highlighted individually.
 
         widget_lines are hover-widget lines painted over the top-right of
-        the viewport. each widget cell is emitted right after its row's
+        the viewport; positioned_cells are (vrow, col, text) placements with
+        their own anchor (positioned chips), col 0-based and clipped to the
+        viewport here. each widget cell is emitted right after its row's
         content, in the same output buffer - erase and overlay stay adjacent,
         so a stdio flush landing mid-frame never shows a widget-less row."""
         widget_cells = {}
         for vrow, col, text in self._widget_cells(widget_lines or [], cols):
-            widget_cells[vrow] = (col, text)
+            widget_cells.setdefault(vrow, []).append((col, text))
+        for vrow, col, text in positioned_cells or []:
+            if not 0 <= vrow < content_rows: continue
+            if col < 0 or col >= cols: continue
+            if col + len(ansi_strip(text)) > cols:
+                text = ansi_strip(text)[:cols - col]
+            widget_cells.setdefault(vrow, []).append((col + 1, text))
         out = []
         sel_sr = 0
         sel_er = 0
@@ -191,9 +200,7 @@ class Layout:
 
                 out.append(line)
             out.append(SGR_RESET)
-            cell = widget_cells.get(vrow)
-            if cell is not None:
-                wcol, wtext = cell
+            for wcol, wtext in widget_cells.get(vrow, ()):
                 out.append(cur_move(vrow + 1, wcol))
                 out.append(wtext)
                 out.append(SGR_RESET)
@@ -416,7 +423,8 @@ class Layout:
                    new_content_below=False,
                    cursor_row=0,
                    cursor_col=0,
-                   widget_lines=None):
+                   widget_lines=None,
+                   positioned_cells=None):
         """full screen redraw (used on resize and initial draw)."""
         self.render_content(buffer_lines,
                             self.content_rows,
@@ -424,7 +432,8 @@ class Layout:
                             selection=selection,
                             search_spans=search_spans,
                             viewport_offset=viewport_offset,
-                            widget_lines=widget_lines)
+                            widget_lines=widget_lines,
+                            positioned_cells=positioned_cells)
         if mode in (Mode.COMMAND, Mode.SEARCH):
             # render input first (clears prompt area), then status last
             # so cursor ends up on the status line.

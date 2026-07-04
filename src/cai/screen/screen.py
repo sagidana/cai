@@ -131,6 +131,13 @@ class Screen:
         # content render so they always sit above the conversation.
         self._widgets = {}
 
+        # chips with an explicit position: name -> Chip, painted at their
+        # own (row, col) anchor instead of the top-right stack. chip
+        # timeouts live in _chip_timers so replacing a chip cancels the
+        # removal its predecessor scheduled.
+        self._positioned_chips = {}
+        self._chip_timers = {}
+
         self._closed = False
         self._resize_pending = False
 
@@ -436,6 +443,51 @@ class Screen:
             del self._widgets[name]
             if self._focus_stack[-1] != 'main': return
             self._refresh_all()
+
+    def add_chip(self, name, chip):
+        """add or replace a chip (screen.chip.Chip): a single framed piece
+        of text. a chip without a position joins the top-right widget stack;
+        one with a position is painted at its own (row, col) viewport anchor.
+        a chip with a timeout removes itself that many seconds later."""
+        timer = self._chip_timers.pop(name, None)
+        if timer is not None:
+            timer.cancel()
+        with self._render_lock:
+            if chip.position is None:
+                self._positioned_chips.pop(name, None)
+                self._widgets[name] = chip.lines()
+            else:
+                self._widgets.pop(name, None)
+                self._positioned_chips[name] = chip
+            if chip.timeout is not None:
+                timer = threading.Timer(chip.timeout, self.remove_chip, (name,))
+                timer.daemon = True
+                self._chip_timers[name] = timer
+                timer.start()
+            if self._focus_stack[-1] != 'main': return
+            self._refresh_all()
+
+    def remove_chip(self, name):
+        """remove a chip added by add_chip. unknown names are ignored."""
+        timer = self._chip_timers.pop(name, None)
+        if timer is not None:
+            timer.cancel()
+        with self._render_lock:
+            stacked = self._widgets.pop(name, None)
+            anchored = self._positioned_chips.pop(name, None)
+            if stacked is None and anchored is None: return
+            if self._focus_stack[-1] != 'main': return
+            self._refresh_all()
+
+    def _positioned_cells(self):
+        """(vrow, col, text) placements for the positioned chips, one cell
+        per framed line, anchored at each chip's (row, col)."""
+        cells = []
+        for chip in self._positioned_chips.values():
+            row, col = chip.position
+            for i, line in enumerate(chip.lines()):
+                cells.append((row + i, col, line))
+        return cells
 
     def _widget_lines(self):
         """all widgets' lines flattened in insertion order, top to bottom,
@@ -938,7 +990,8 @@ class Screen:
                                     selection=self._build_selection(),
                                     search_spans=self._build_search_spans(),
                                     viewport_offset=self._state.viewport_offset,
-                                    widget_lines=self._widget_lines())
+                                    widget_lines=self._widget_lines(),
+                                    positioned_cells=self._positioned_cells())
 
     def _refresh_status(self):
         """re-render the status line."""
@@ -1039,7 +1092,8 @@ class Screen:
                                 new_content_below=self._new_content_below,
                                 cursor_row=self._state.cursor_row,
                                 cursor_col=self._state.cursor_col,
-                                widget_lines=self._widget_lines())
+                                widget_lines=self._widget_lines(),
+                                positioned_cells=self._positioned_cells())
         sys.stdout.write(SYNC_END)
         sys.stdout.flush()
 

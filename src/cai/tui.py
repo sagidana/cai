@@ -1085,11 +1085,14 @@ def _open_agents(screen, client):
 
 
 def _chip_lines(skills, tools):
-    """the chips widget body: one pill per row, the skills column (pink)
-    to the left of the tools column (cyan). pills in a column share one width
-    so each column reads as a block; a row whose skills cell is empty paints
-    nothing there, so the conversation shows through."""
-    from cai.screen.ansi import SGR_PINK_ON_DGRAY, SGR_CYAN_ON_DGRAY, SGR_RESET
+    """the chips widget body: one chip (screen.chip.Chip) per name, one row
+    per chip pair, the skills column (pink) to the left of the tools column
+    (cyan). every entry here is activated, so each body carries a one-column
+    check mark to its left. chips in a column share one width so each column
+    reads as a block; a row whose skills cell is empty paints nothing there,
+    so the conversation shows through."""
+    from cai.screen.ansi import SGR_PINK_ON_DGRAY, SGR_CYAN_ON_DGRAY
+    from cai.screen.chip import Chip
 
     skill_width = 0
     for name in skills:
@@ -1103,16 +1106,18 @@ def _chip_lines(skills, tools):
     for i in range(count):
         parts = []
         if i < len(skills):
-            name = skills[i].ljust(skill_width)
-            parts.append(f'{SGR_PINK_ON_DGRAY} {name} {SGR_RESET}')
+            chip = Chip('✓ ' + skills[i].ljust(skill_width),
+                        sgr=SGR_PINK_ON_DGRAY)
+            parts.extend(chip.lines())
         if tools:
             if i < len(tools):
-                name = tools[i].ljust(tool_width)
-                parts.append(f'{SGR_CYAN_ON_DGRAY} {name} {SGR_RESET}')
+                chip = Chip('✓ ' + tools[i].ljust(tool_width),
+                            sgr=SGR_CYAN_ON_DGRAY)
+                parts.extend(chip.lines())
             elif i < len(skills):
-                # keep the skill pill in its column: blank out the tools cell
-                # so the pill doesn't drift to the right edge.
-                parts.append(' ' * (tool_width + 2))
+                # keep the skill chip in its column: blank out the tools cell
+                # so the chip doesn't drift to the right edge.
+                parts.append(' ' * (tool_width + 4))
         lines.append(' '.join(parts))
     return lines
 
@@ -1163,17 +1168,18 @@ def _running_subagents(client):
 
 
 def _agent_chip_lines(names):
-    """the agents widget body: one yellow pill per running sub-agent, all
-    padded to one width so the column reads as a block."""
-    from cai.screen.ansi import SGR_YELLOW_ON_DGRAY, SGR_RESET
+    """the agents widget body: one yellow chip per running sub-agent, one
+    row each, all padded to one width so the column reads as a block."""
+    from cai.screen.ansi import SGR_YELLOW_ON_DGRAY
+    from cai.screen.chip import Chip
 
     width = 0
     for name in names:
         width = max(width, len(name))
     lines = []
     for name in names:
-        text = name.ljust(width)
-        lines.append(f'{SGR_YELLOW_ON_DGRAY} {text} {SGR_RESET}')
+        chip = Chip(name.ljust(width), sgr=SGR_YELLOW_ON_DGRAY)
+        lines.extend(chip.lines())
     return lines
 
 
