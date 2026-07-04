@@ -1,7 +1,7 @@
 """Interactive messages overlay — vim-style viewer/editor for messages[].
 
 Adds folding (per-message + assistant/tool pair), multi-message selection
-(marks + visual-line), ad-hoc LLM rewrite (``!``), and edit/delete. edits are
+(visual-line), ad-hoc LLM rewrite (``!``), and edit/delete. edits are
 written back to the host conversation on close.
 """
 
@@ -106,7 +106,7 @@ def _build_status(ctx, nv, nm, inner_w, sel_count):
         if ctx.search_matches:
             m = f' [{ctx.search_match_idx + 1}/{len(ctx.search_matches)}]'
         pos_str += f'   {dir_char}{ctx.search_pattern}{m}'
-    hints = '  Tab:fold  m/V:sel  !:rewrite  ESC:close'
+    hints = '  Tab:fold  V:sel  d:del  !:rewrite  ESC:close'
     if len(ansi_strip(pos_str)) + len(hints) <= inner_w:
         pos_str += hints
     return pos_str, False
@@ -135,8 +135,7 @@ def draw_messages_overlay(ctx, rows, cols):
 
     idx_w = max(2, len(str(max(nm, 1))))
     role_w = 9
-    mark_w = 1  # * or space
-    prefix_w = 1 + idx_w + 1 + role_w + 1 + mark_w + 1
+    prefix_w = 1 + idx_w + 1 + role_w + 1
 
     overhead = 4
     max_box_h = max(overhead + 1, int(rows * 0.95))
@@ -220,15 +219,12 @@ def draw_messages_overlay(ctx, rows, cols):
         if kind == 'header':
             idx_str = str(ai + 1).rjust(idx_w)
             role_str = role[:role_w].ljust(role_w)
-            mark_ch = ' '
-            if ai in ctx.marks:
-                mark_ch = '*'
-            prefix = f' {idx_str} {role_str} {mark_ch} '
+            prefix = f' {idx_str} {role_str} '
             cell = (prefix + text)[:inner_w].ljust(inner_w)
             styled = _style_cell(cell, role, is_cursor, is_match, in_sel)
             put(1 + i, f'{VL}{styled}{VL}')
         else:
-            indent = '   ' + ' ' * (idx_w + role_w + mark_w)
+            indent = '   ' + ' ' * (idx_w + role_w)
             body = (indent + text)[:inner_w].ljust(inner_w)
             # body rows never render with cursor highlight; selection dim only.
             styled = _style_cell(body, role, False, False, in_sel)
@@ -288,10 +284,9 @@ def _rebind_view(ctx):
     """rebuild all view state from the current ctx.messages list.
     call after anything that can wholesale-replace messages (history jump,
     transform, undo/redo). resets everything keyed against the previous
-    message identities: marks, scroll, fold state. applies the current
+    message identities: selection, scroll, fold state. applies the current
     filter so the view reflects the new contents, clamps the cursor, and
     invalidates the prev_lines cache so the next draw repaints every row."""
-    ctx.marks.clear()
     ctx.visual_mode = False
     ctx.collapsed = {id(m) for m in ctx.messages}
 
@@ -340,7 +335,7 @@ def _live_sync(ctx, refetch):
 def _refresh_view_after_external_mutation(ctx):
     """rebuild ctx.view after the worker thread mutated ctx.messages.
     unlike _rebind_view (used for transforms/jumps that wholesale-replace
-    messages), this preserves marks, fold state, and the cursor position
+    messages), this preserves fold state and the cursor position
     where possible. the common case is a fresh assistant message arriving
     at the tail while the user is browsing - keep their selection pinned
     unless they were already at the bottom, in which case follow."""
@@ -382,7 +377,6 @@ def _refresh_view_after_external_mutation(ctx):
 
 
 def _clear_selection(ctx):
-    ctx.marks.clear()
     ctx.visual_mode = False
 
 
@@ -633,14 +627,6 @@ def overlay_nav_key(ctx, key, rows, screen):
         ctx.selected_idx = ctx.search_matches[ctx.search_match_idx]
 
     # selection
-    elif key == 'm':
-        ai = ctx.view[sel]
-        if ai in ctx.marks:
-            ctx.marks.discard(ai)
-        else:
-            ctx.marks.add(ai)
-    elif key == 'M':
-        ctx.marks.clear()
     elif key == 'V':
         if ctx.visual_mode:
             ctx.visual_mode = False

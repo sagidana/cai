@@ -242,7 +242,7 @@ def run_streaming_transform(screen, fn, name, selected, kwargs, *, header=''):
             # popup. LLM-backed ones streamed something; keep it on screen.
             if not (state.content or state.reasoning or state.tool_calls):
                 return result
-            state.status = f'done — parsed {len(result)} message(s). Press any key.'
+            state.status = f'done — {len(result)} replacement message(s). Press any key.'
             state.status_color = SGR_GREEN
         except Exception as e:
             # Keep the streamed body visible next to the error so the user

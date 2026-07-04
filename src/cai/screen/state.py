@@ -356,7 +356,6 @@ class MsgOverlayCtx:
         'seen_ids',
 
         # selection
-        'marks',          # set of msg indices
         'visual_mode',    # bool
         'visual_anchor',  # int view position (mirrors selected_idx)
 
@@ -401,7 +400,6 @@ class MsgOverlayCtx:
         self.collapsed = {id(m) for m in messages}
         self.seen_ids = {id(m) for m in messages}
 
-        self.marks = set()
         self.visual_mode = False
         self.visual_anchor = 0
 
@@ -448,8 +446,8 @@ def _msg_is_folded(ctx, msg_idx):
 
 
 def _msg_effective_selection(ctx):
-    """ordered list of message indices currently selected (marks + visual)."""
-    sel = set(ctx.marks)
+    """ordered list of message indices currently selected (visual-line)."""
+    sel = set()
     if ctx.visual_mode and ctx.view:
         lo = min(ctx.visual_anchor, ctx.selected_idx)
         hi = max(ctx.visual_anchor, ctx.selected_idx)
