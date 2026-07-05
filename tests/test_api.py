@@ -5,6 +5,8 @@ outgoing request and replays a canned blocking body or SSE line stream. No
 network, no API key, no real provider.
 """
 import json
+import threading
+
 import pytest
 import requests
 
@@ -631,3 +633,92 @@ def test_call_llm_failed_turn_leaves_messages_untouched():
     with pytest.raises(ApiError):
         next(gen)
     assert messages == [{"role": "user", "content": "hi"}]
+
+
+# --------------------------------------------------------------------------
+# interrupt - the polled paths
+# --------------------------------------------------------------------------
+
+class BlockingLinesResponse(FakeResponse):
+    """streams `lines`, then blocks like a provider that went quiet; close()
+    releases the block the way a real socket shutdown wakes a recv."""
+
+    def __init__(self, lines):
+        super().__init__(lines=lines)
+        self._released = threading.Event()
+
+    def iter_lines(self):
+        for line in self._lines:
+            yield line
+        self._released.wait()
+        raise requests.ConnectionError("shut down")
+
+    def close(self):
+        self._released.set()
+        super().close()
+
+
+def test_interrupted_blocking_call_returns_empty(monkeypatch):
+    install(monkeypatch, FakeResponse(body=blocking_body(content="late")))
+    interrupt = threading.Event()
+    interrupt.set()
+    out = client().chat([], "m", interrupt=interrupt)
+    assert out == ("", "", None, {})
+
+
+def test_uninterrupted_blocking_call_matches_direct_path(monkeypatch):
+    body = blocking_body(content="hello", usage={"total_tokens": 5})
+    install(monkeypatch, FakeResponse(body=body))
+    out = client().chat([], "m", interrupt=threading.Event())
+    assert out == ("hello", "", None, {"total_tokens": 5})
+
+
+def test_polled_blocking_call_propagates_api_error(monkeypatch):
+    install(monkeypatch, FakeResponse(status_code=400))
+    with pytest.raises(ApiError) as err:
+        client().chat([], "m", interrupt=threading.Event())
+    assert err.value.status == 400
+
+
+def test_uninterrupted_stream_matches_direct_path(monkeypatch):
+    lines = [sse({"choices": [{"delta": {"content": "hel"}}]}),
+             sse({"choices": [{"delta": {"content": "lo"}}]}),
+             b"data: [DONE]"]
+    install(monkeypatch, FakeResponse(lines=lines))
+    out = list(client().chat([], "m", stream=True, interrupt=threading.Event()))
+    assert out == [("hel", None, None, {}),
+                   ("lo", None, None, {}),
+                   (None, None, None, {})]
+
+
+def test_interrupt_mid_stream_ends_generator_and_closes_response(monkeypatch):
+    response = BlockingLinesResponse([sse({"choices": [{"delta": {"content": "partial"}}]})])
+    install(monkeypatch, response)
+    interrupt = threading.Event()
+    gen = client().chat([], "m", stream=True, interrupt=interrupt)
+    content, _, _, _ = next(gen)          # first chunk arrives normally...
+    assert content == "partial"
+    interrupt.set()                       # ...then the kill lands while the
+    assert list(gen) == []                # pump is blocked waiting for more
+    assert response.closed is True        # and the abort tore the response down
+
+
+def test_interrupted_stream_error_is_swallowed(monkeypatch):
+    # the abort makes the pump's blocked read raise; that error must die with
+    # the pump, not surface after the consumer already walked away.
+    response = BlockingLinesResponse([])
+    install(monkeypatch, response)
+    interrupt = threading.Event()
+    gen = client().chat([], "m", stream=True, interrupt=interrupt)
+    interrupt.set()
+    assert list(gen) == []
+
+
+def test_interrupt_during_retry_backoff_stops_retrying(monkeypatch):
+    rec = install(monkeypatch, exc=requests.ConnectionError("down"))
+    interrupt = threading.Event()
+    interrupt.set()
+    url = "https://example.test/v1/chat/completions"
+    with pytest.raises(ApiError):
+        client()._post_with_retry(url, {}, {}, stream=False, interrupt=interrupt)
+    assert len(rec.calls) == 1            # gave up instead of retrying

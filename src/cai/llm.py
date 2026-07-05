@@ -171,17 +171,19 @@ def _turn(api,
           stream,
           interrupt):
     """Run one model call, yielding content/reasoning events as they arrive.
-    Returns (content, reasoning, tool_calls, usage). A set interrupt stops
-    reading a long stream early (caught again at the call_llm loop). a failed
-    call raises ApiError out of the api layer - it never reads as an empty
-    answer."""
+    Returns (content, reasoning, tool_calls, usage). the interrupt is handed
+    down to the api layer, which polls it while blocked on the network - so a
+    kill bites mid-request, not just between streamed chunks (the check here
+    covers an api without that support). a failed call raises ApiError out of
+    the api layer - it never reads as an empty answer."""
     if not stream:
         content, reasoning, tool_calls, usage = api.chat(call_messages,
                                                          model,
                                                          tools=tools,
                                                          tool_choice=tool_choice,
                                                          reasoning_effort=reasoning_effort,
-                                                         temperature=temperature)
+                                                         temperature=temperature,
+                                                         interrupt=interrupt)
         if reasoning:
             yield Event(type=EventType.REASONING, text=reasoning)
         if content:
@@ -198,7 +200,8 @@ def _turn(api,
                           tool_choice=tool_choice,
                           reasoning_effort=reasoning_effort,
                           temperature=temperature,
-                          stream=True)
+                          stream=True,
+                          interrupt=interrupt)
     for delta_content, delta_reasoning, finished_tool_calls, chunk_usage in stream_gen:
         if _interrupted(interrupt): break
         if delta_content:

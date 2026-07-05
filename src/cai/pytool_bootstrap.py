@@ -157,8 +157,13 @@ def enter_kernel_jail():
     # kernel >= 5.12, same era as unprivileged userns hosts that get here).
     attr = MountAttr()
     attr.attr_set = MOUNT_ATTR_RDONLY
-    need(libc.syscall(MOUNT_SETATTR_NR, AT_FDCWD, staging.encode(), AT_RECURSIVE,
-                      ctypes.byref(attr), ctypes.sizeof(attr)), "make jail read-only")
+    need(libc.syscall(MOUNT_SETATTR_NR,
+                      AT_FDCWD,
+                      staging.encode(),
+                      AT_RECURSIVE,
+                      ctypes.byref(attr),
+                      ctypes.sizeof(attr)),
+        "make jail read-only")
     os.chdir(staging)
     need(libc.syscall(PIVOT_ROOT_NR[machine], b".", b"."), "pivot_root")
     need(libc.umount2(b".", MNT_DETACH), "detach old root")
