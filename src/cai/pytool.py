@@ -4,16 +4,34 @@ callback into the agent's own tools.
 `python(code, timeout=60)` runs a snippet in a subprocess of a cai-MANAGED
 virtualenv (config.venv_dir(), created lazily, empty by default - stdlib only,
 so its package surface is well-defined and no compiled escape hatch ships in
-it). Before the snippet runs, the child installs a sys.addaudithook jail. The
-tool is READ-ONLY: it may read files and list directories under the working
-directory and the session scratch dir (and read the interpreter's own prefixes,
-so imports work), but every write - create, modify, delete, rename, anywhere,
-cwd and scratch included - is denied, as are subprocess/exec/fork, sockets,
-ctypes and cffi. A denied op raises PermissionError, whose traceback is the
-result. (The snippet's own filesystem is read-only; it can still cause writes
-only by call()ing a write-capable tool, which runs under that tool's own gates.
-One residual: the stat family emits no audit event, so a snippet can test one
-known outside path for existence/size - not its contents, and not list dirs.)
+it). The sandbox is two layers, both set up by the child script
+(pytool_bootstrap.py, fed to the interpreter as `python -c` source text):
+
+KERNEL layer (the boundary; default, `python_sandbox: "kernel"`). Before the
+snippet runs, the child enters fresh user + mount + network namespaces and
+pivot_roots onto a tmpfs holding bind mounts of ONLY the interpreter prefixes,
+the working directory and the session scratch dir - every other path does not
+exist, at the kernel level, no matter how the snippet issues the syscall (this
+also closes the stat-probe leak the audit hook alone had). The empty network
+namespace has no interfaces (not even loopback), so no network, and abstract
+unix sockets die with it too. Capabilities are dropped after the mounts, so
+the snippet cannot rearrange its own jail. Enforcement is confinement, not
+read-only-ness: within cwd and scratch, unix permissions still apply but the
+kernel does not forbid writes - that is the hook layer's job.
+
+HOOK layer (UX + read-only policy). A sys.addaudithook jail makes the tool
+READ-ONLY: reads and directory listings are confined to cwd + scratch + the
+interpreter prefixes, every write - create, modify, delete, rename, anywhere -
+is denied, as are subprocess/exec/fork, sockets, ctypes and cffi. A denied op
+raises PermissionError, whose traceback is the result. Audit hooks are
+python-level and evadable by determined code - but anything that slips past
+them is still inside the kernel jail, so the blast radius is "writes under
+cwd/scratch", never "anywhere else".
+
+Hosts that forbid unprivileged user namespaces (e.g. default-hardened Docker
+seccomp/AppArmor) fail closed with a clear message; there the operator - whose
+container is then the boundary - may set `python_sandbox: "hook"` in
+config.json to run with the hook layer only.
 
 The snippet is also handed a `call(name, **kwargs) -> str` builtin: it names one
 of the agent's OWN selected tools, and the call is dispatched IN the cai process
@@ -22,13 +40,12 @@ the run's before/after_tool_call hooks (so a gate still vetoes it), and the
 result string comes back into the snippet. Only what the snippet print()s becomes
 the tool result - so a script can read a big tool result, reduce it in Python,
 and return just the answer, the intermediate data never entering model context.
+The RPC pipes are plain inherited fds, which namespaces do not sever - the
+call() channel is the one deliberate hole in the jail.
 
 The tool is bound to its Agent (like the sub-agent tools) - that is what gives
 call() a live dispatch. It is registered on every agent but only offered to the
-model when the `python` skill selects it.
-
-This is a guardrail, the same posture as safe_path - not a hard boundary against
-hostile code. Run cai itself in a container for untrusted use."""
+model when the `python` skill selects it."""
 
 import json
 import os
@@ -48,173 +65,15 @@ from cai import hooks
 PY_TOOL_NAME = "python"
 
 
-# the child bootstrap: read code from stdin, install the audit-hook jail, wire
-# call() over the two inherited RPC fds, exec the code. stdlib-only so it runs
-# under the managed venv. the jail is READ-ONLY: reads (and directory listings)
-# are confined to cwd + CAI_SCRATCH + the interpreter prefixes (imports open
-# files there); ALL writes - anywhere, cwd and scratch included - are denied, as
-# are subprocess/exec/fork, sockets, ctypes and cffi. raw os.read/os.write on the
-# inherited fds emit no audit events, so call() needs no exception in the jail.
-_BOOTSTRAP = r'''
-import sys
-import os
-import json
-
-code = sys.stdin.read()
-
-read_roots = [os.path.realpath(os.getcwd())]
-scratch = os.environ.get("CAI_SCRATCH", "")
-if scratch:
-    read_roots.append(os.path.realpath(scratch))
-for prefix in (sys.prefix, sys.exec_prefix, sys.base_prefix, sys.base_exec_prefix):
-    real = os.path.realpath(prefix)
-    if real in read_roots: continue
-    read_roots.append(real)
-
-BLOCKED = (
-    "subprocess.Popen",
-    "os.system",
-    "os.exec",
-    "os.spawn",
-    "os.posix_spawn",
-    "os.fork",
-    "os.forkpty",
-    "os.kill",
-    "os.killpg",
-    "pty.spawn",
-    "socket.getaddrinfo",
-    "socket.gethostbyname",
-    "socket.gethostbyaddr",
-    "socket.connect",
-    "socket.bind",
-    "socket.sendto",
-    "socket.sendmsg",
-)
-
-WRITE_EVENTS = (
-    "os.remove",
-    "os.rename",
-    "os.mkdir",
-    "os.rmdir",
-    "os.link",
-    "os.symlink",
-    "os.chmod",
-    "os.chown",
-    "os.truncate",
-    "os.utime",
-    "shutil.rmtree",
-    "shutil.move",
-)
-
-# listing a directory's entries is still a read - confine it to read_roots the
-# same way open-for-read is, or the jail leaks the whole filesystem tree
-# (os.listdir/scandir, and glob/os.walk/pathlib.iterdir which build on scandir).
-# note the stat family (os.stat, os.path.exists/getsize) emits NO audit event, so
-# probing one KNOWN path outside the cwd for existence/size cannot be blocked here
-# - a residual leak, consistent with the guardrail (not hard-boundary) posture.
-READ_EVENTS = (
-    "os.listdir",
-    "os.scandir",
-)
-
-WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC
-
-in_hook = [False]
-
-
-def under(path, roots):
-    """True when path resolves into one of roots. non-path args (fds, None)
-    pass - the open that produced the fd was already checked."""
-    if isinstance(path, bytes):
-        path = os.fsdecode(path)
-    if not isinstance(path, str):
-        return True
-    resolved = os.path.realpath(path)
-    for root in roots:
-        if resolved == root:
-            return True
-        if resolved.startswith(root + os.sep):
-            return True
-    return False
-
-
-def wants_write(mode, flags):
-    if isinstance(mode, str):
-        for ch in "wax+":
-            if ch in mode:
-                return True
-        return False
-    if not isinstance(flags, int):
-        return False
-    return bool(flags & WRITE_FLAGS)
-
-
-def check(event, args):
-    if event == "import":
-        if args[0] in ("ctypes", "_ctypes", "cffi", "_cffi_backend"):
-            raise PermissionError(f"cai sandbox: {args[0]} is blocked")
-        return
-    if event in BLOCKED:
-        raise PermissionError(f"cai sandbox: {event} is blocked")
-    if event == "open":
-        path, mode, flags = args
-        if wants_write(mode, flags):
-            raise PermissionError(f"cai sandbox: the python tool is read-only - cannot open {path!r} for writing")
-        if not under(path, read_roots):
-            raise PermissionError(f"cai sandbox: open outside the working directory: {path!r}")
-        return
-    if event in READ_EVENTS:
-        for arg in args:
-            if under(arg, read_roots): continue
-            raise PermissionError(f"cai sandbox: {event} outside the working directory: {arg!r}")
-        return
-    if event in WRITE_EVENTS:
-        raise PermissionError(f"cai sandbox: the python tool is read-only - {event} is disabled")
-
-
-def hook(event, args):
-    if in_hook[0]:
-        return
-    in_hook[0] = True
-    try:
-        check(event, args)
-    finally:
-        in_hook[0] = False
-
-
-_RPC_RD = int(os.environ["CAI_PY_RPC_READ"])
-_RPC_WR = int(os.environ["CAI_PY_RPC_WRITE"])
-_rpc_buf = bytearray()
-
-
-def _rpc_readline():
-    while True:
-        nl = _rpc_buf.find(b"\n")
-        if nl >= 0:
-            line = bytes(_rpc_buf[:nl])
-            del _rpc_buf[:nl + 1]
-            return line
-        chunk = os.read(_RPC_RD, 65536)
-        if not chunk:
-            raise RuntimeError("cai sandbox: tool channel closed")
-        _rpc_buf.extend(chunk)
-
-
-def call(name, **kwargs):
-    """dispatch one of the agent's own tools and return its result string. the
-    call runs in the cai process, through cai's tool gates; only what you
-    print() reaches the model, so reduce a big result here first."""
-    request = {}
-    request["name"] = name
-    request["kwargs"] = kwargs
-    os.write(_RPC_WR, json.dumps(request).encode("utf-8") + b"\n")
-    reply = json.loads(_rpc_readline().decode("utf-8"))
-    return reply["result"]
-
-
-sys.addaudithook(hook)
-exec(compile(code, "<python>", "exec"), {"__name__": "__main__", "call": call})
-'''
+# the child bootstrap lives in pytool_bootstrap.py - a real module so it
+# reads and edits like code - but it is executed as SOURCE TEXT via
+# `python -c`, never imported: -c keeps sys.path[0] = cwd (so a snippet can
+# import the project's own modules), and the file's side effects sit behind
+# a __main__ guard, which -c satisfies.
+def _bootstrap_source():
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pytool_bootstrap.py")
+    with open(path) as f:
+        return f.read()
 
 
 def _truncate(text):
@@ -324,6 +183,7 @@ def _run_python(agent, code, timeout):
     return its combined stdout/stderr (truncated), with an exit-code footer."""
     python = ensure_venv()
     scratch = cai.scratch_dir()
+    sandbox = config.load_optional("python_sandbox", "kernel")
 
     req_r, req_w = os.pipe()   # child -> parent: call() requests
     rep_r, rep_w = os.pipe()   # parent -> child: results
@@ -332,12 +192,21 @@ def _run_python(agent, code, timeout):
         child_env["CAI_SCRATCH"] = scratch
     child_env["CAI_PY_RPC_READ"] = str(rep_r)
     child_env["CAI_PY_RPC_WRITE"] = str(req_w)
+    child_env["CAI_PY_SANDBOX"] = str(sandbox)
+
+    # the mount point the child's kernel jail pivots onto. the tmpfs and binds
+    # exist only in the child's mount namespace - in ours it stays an empty dir,
+    # removed when the child is done.
+    staging = None
+    if sandbox != "hook":
+        staging = tempfile.mkdtemp(prefix="cai-py-")
+        child_env["CAI_PY_STAGING"] = staging
 
     out = tempfile.TemporaryFile()
     proc = None
     timed_out = False
     try:
-        proc = subprocess.Popen([python, "-c", _BOOTSTRAP],
+        proc = subprocess.Popen([python, "-c", _bootstrap_source()],
                                 stdin=subprocess.PIPE,
                                 stdout=out,
                                 stderr=subprocess.STDOUT,
@@ -357,6 +226,8 @@ def _run_python(agent, code, timeout):
     finally:
         os.close(req_r)
         os.close(rep_w)
+        if staging:
+            shutil.rmtree(staging, ignore_errors=True)
 
     if timed_out:
         return f"Error: run timed out after {timeout}s"
@@ -389,8 +260,10 @@ _DOC = """Run a Python snippet in cai's sandbox and return its output (stdout + 
     the working directory and the session scratch dir, but cannot create, modify
     or delete any file (do file changes by call()ing a write tool like
     fs__create_file instead). subprocess, network, ctypes and cffi are blocked; a
-    denied op raises PermissionError. The interpreter is a managed virtualenv with
-    the standard library only.
+    denied op raises PermissionError. The snippet runs in its own kernel
+    namespace jail: no path outside the working directory, the scratch dir and
+    the interpreter exists at all, and there is no network interface. The
+    interpreter is a managed virtualenv with the standard library only.
 
     Args:
         code:    Python source to execute.

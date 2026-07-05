@@ -284,6 +284,25 @@ def _short_args(tool_args):
     return ", ".join(parts)
 
 
+def _diag_tool_call(tool_name, tool_args):
+    """the '-> tool(...)' diagnostic line; a python call is always a script,
+    so its code argument prints as a syntax-colored block under the line
+    instead of a truncated blob."""
+    from cai.screen.render import python_code_arg, render_python_code
+
+    code = python_code_arg(tool_name, tool_args)
+    if code is None:
+        _diag(f"  -> {tool_name}({_short_args(tool_args)})")
+        return
+    rest = dict(tool_args)
+    del rest["code"]
+    _diag(f"  -> {tool_name}({_short_args(rest)})")
+    if not _STDERR_TTY:
+        return
+    sys.stderr.write(render_python_code(code))
+    sys.stderr.flush()
+
+
 def _drive(run):
     """consume the run, routing output, and print the final answer. returns the
     process exit code. a run that fails for good (ApiError after the api layer's
@@ -300,7 +319,7 @@ def _drive(run):
             elif event.type == EventType.REASONING:
                 _stream_out(event.text or "")
             elif event.type == EventType.TOOL_CALL:
-                _diag(f"  -> {event.tool_name}({_short_args(event.tool_args)})")
+                _diag_tool_call(event.tool_name, event.tool_args)
             elif event.type == EventType.TOOL_RESULT:
                 _diag(f"  <- {event.tool_name}: {len(event.tool_result or '')} chars")
     except KeyboardInterrupt:

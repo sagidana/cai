@@ -36,6 +36,7 @@ from cai.commands import CommandContext
 from cai.environment import Environment
 from cai.events import EventType
 from cai.screen import Screen
+from cai.screen.render import python_code_arg, render_python_code
 from cai.screen.overlays import config as overlay_config
 from cai.screen.overlays.config import Setting
 from cai.session import SessionsRegistry
@@ -141,6 +142,14 @@ class _Transcript:
             self.note(f"> {(event.text or '').rstrip()}\n", Screen.USER)
             return
         if event.type == EventType.TOOL_CALL:
+            code = python_code_arg(event.tool_name, event.tool_args)
+            if code is not None:
+                rest = dict(event.tool_args)
+                del rest["code"]
+                self._stream(f"-> {event.tool_name}({_short_args(rest)})\n",
+                             "tool", Screen.TOOL)
+                self._screen.write(render_python_code(code), kind=Screen.TOOL)
+                return
             self._stream(f"-> {event.tool_name}({_short_args(event.tool_args)})\n",
                          "tool", Screen.TOOL)
             return
@@ -794,7 +803,14 @@ def _replay_messages(screen, messages, cfg=None):
             name = function.get("name") or "?"
             call_names[call.get("id")] = name
             args = _stored_call_args(function)
-            screen.write(f"-> {name}({_short_args(args)})\n", kind=Screen.TOOL, block=block)
+            code = python_code_arg(name, args)
+            if code is not None:
+                rest = dict(args)
+                del rest["code"]
+                screen.write(f"-> {name}({_short_args(rest)})\n", kind=Screen.TOOL, block=block)
+                screen.write(render_python_code(code), kind=Screen.TOOL)
+            else:
+                screen.write(f"-> {name}({_short_args(args)})\n", kind=Screen.TOOL, block=block)
             block = False
 
 

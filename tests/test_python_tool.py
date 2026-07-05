@@ -19,6 +19,16 @@ def _fast_venv(monkeypatch):
     monkeypatch.setattr(pytool, "ensure_venv", lambda: sys.executable)
 
 
+def _force_sandbox(monkeypatch, mode):
+    """pin the python_sandbox mode - keeps the test independent of the
+    developer's real config.json."""
+    def fake_optional(key, default=None):
+        if key == "python_sandbox":
+            return mode
+        return default
+    monkeypatch.setattr(config, "load_optional", fake_optional)
+
+
 def _run(agent, code, timeout=20):
     return agent.tools_registry.dispatch("python", {"code": code, "timeout": timeout})
 
@@ -120,7 +130,7 @@ def test_reads_allowed_but_all_writes_denied(tmp_path, monkeypatch):
     "import cffi",
     "import subprocess; subprocess.Popen(['ls'])",
     "import os; os.system('ls')",
-    "import socket; socket.socket().connect(('example.com', 80))",
+    "import socket; socket.socket().connect(('127.0.0.1', 9))",
     # directory enumeration outside the cwd is a read too - must not leak the tree
     "import os; os.listdir('/')",
     "import os; os.scandir('/etc')",
@@ -168,6 +178,114 @@ def test_timeout(monkeypatch):
     agent = _agent_with_echo()
     try:
         assert _run(agent, "while True: pass", timeout=1) == "Error: run timed out after 1s"
+    finally:
+        agent.close()
+
+
+# --- kernel jail ------------------------------------------------------------
+
+STAT_PROBE = """import os
+try:
+    os.stat('/etc/passwd')
+    print('visible')
+except FileNotFoundError:
+    print('hidden')
+"""
+
+
+def test_kernel_jail_outside_paths_do_not_exist(tmp_path, monkeypatch):
+    # the stat family emits no audit event - only the kernel jail hides this
+    _fast_venv(monkeypatch)
+    _force_sandbox(monkeypatch, "kernel")
+    monkeypatch.chdir(tmp_path)
+    agent = _agent_with_echo()
+    try:
+        assert _run(agent, STAT_PROBE).strip() == "hidden"
+        assert _run(agent, "import os; print(os.path.exists('/etc'))").strip() == "False"
+    finally:
+        agent.close()
+
+
+NET_PROBE = """import socket
+s = socket.socket()
+try:
+    s.connect(('example.com', 80))
+    print('connected')
+except socket.gaierror:
+    print('no-network')
+"""
+
+
+def test_kernel_jail_has_no_network(tmp_path, monkeypatch):
+    # hostname resolution runs in libc, below the audit hook - inside the empty
+    # network namespace it always fails, however the snippet reaches for the net
+    _fast_venv(monkeypatch)
+    _force_sandbox(monkeypatch, "kernel")
+    monkeypatch.chdir(tmp_path)
+    agent = _agent_with_echo()
+    try:
+        assert _run(agent, NET_PROBE).strip() == "no-network"
+    finally:
+        agent.close()
+
+
+def test_kernel_jail_still_reads_cwd_and_scratch(tmp_path, monkeypatch):
+    _fast_venv(monkeypatch)
+    _force_sandbox(monkeypatch, "kernel")
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    (cwd / "in.txt").write_text("cwd-data")
+    (scratch / "s.txt").write_text("scratch-data")
+    monkeypatch.chdir(cwd)
+
+    @cai.tool
+    def noop2() -> str:
+        """noop."""
+        return ""
+    agent = Agent(model="m", api=object(), tools=["noop2"], scratch=str(scratch))
+    try:
+        assert _run(agent, "print(open('in.txt').read())").strip() == "cwd-data"
+        scratch_read = ("import os; p=os.path.join(os.environ['CAI_SCRATCH'],'s.txt');"
+                        " print(open(p).read())")
+        assert _run(agent, scratch_read).strip() == "scratch-data"
+    finally:
+        agent.close()
+
+
+def test_kernel_jail_staging_dir_is_cleaned_up(tmp_path, monkeypatch):
+    _fast_venv(monkeypatch)
+    _force_sandbox(monkeypatch, "kernel")
+    monkeypatch.chdir(tmp_path)
+    made = []
+    real_mkdtemp = pytool.tempfile.mkdtemp
+
+    def spy_mkdtemp(prefix=None):
+        path = real_mkdtemp(prefix=prefix)
+        if prefix == "cai-py-":
+            made.append(path)
+        return path
+    monkeypatch.setattr(pytool.tempfile, "mkdtemp", spy_mkdtemp)
+    agent = _agent_with_echo()
+    try:
+        assert _run(agent, "print('ok')").strip() == "ok"
+        assert len(made) == 1
+        assert not os.path.exists(made[0])
+    finally:
+        agent.close()
+
+
+def test_hook_mode_skips_the_kernel_jail(tmp_path, monkeypatch):
+    _fast_venv(monkeypatch)
+    _force_sandbox(monkeypatch, "hook")
+    monkeypatch.chdir(tmp_path)
+    agent = _agent_with_echo()
+    try:
+        # the host filesystem is visible again (the documented stat residual)...
+        assert _run(agent, STAT_PROBE).strip() == "visible"
+        # ...but the audit hook still confines opens
+        assert "PermissionError" in _run(agent, "open('/etc/hostname')")
     finally:
         agent.close()
 

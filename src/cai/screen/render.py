@@ -5,13 +5,22 @@ tools stay terminal-agnostic: a block carries plain text plus a render hint
 (cai/render MCP meta), and this module owns the ANSI. known hints are diff
 (unified diff), table (tab-separated rows, header first), and grep (vimgrep
 file:line:col:text matches). unknown hints fall back to dim plain text, so
-a misspelled hint degrades instead of breaking."""
+a misspelled hint degrades instead of breaking.
 
+the first-class `python` tool gets the same treatment on its CALL side: its
+input is always a python script, so the transcript shows the code argument as
+an indented, syntax-colored block (render_python_code) instead of squashing it
+into the one-line arg preview."""
+
+import io
+import keyword
 import re
+import tokenize
 
 from .ansi import (
     SGR_CYAN, SGR_DIM_GRAY, SGR_GREEN, SGR_RED, SGR_RESET,
     SGR_MAGENTA, SGR_YELLOW, ansi_strip)
+from cai.pytool import PY_TOOL_NAME
 
 
 _PREVIEW_ROLE_COLOR = {
@@ -139,6 +148,109 @@ _FORMATTERS = {
     'grep': _format_grep,
     'table': _format_table,
 }
+
+
+# python syntax colors, subtle on purpose: keywords magenta, strings green,
+# comments dim, numbers yellow, everything else the terminal's default.
+_PY_TOKEN_COLORS = {
+    tokenize.STRING:  SGR_GREEN,
+    tokenize.COMMENT: SGR_DIM_GRAY,
+    tokenize.NUMBER:  SGR_YELLOW,
+}
+
+# f-strings tokenize as their own kinds from 3.12 on; absent members just
+# don't get an entry (the inner expressions still color normally).
+for _fstring in ('FSTRING_START', 'FSTRING_MIDDLE', 'FSTRING_END'):
+    _kind = getattr(tokenize, _fstring, None)
+    if _kind is not None:
+        _PY_TOKEN_COLORS[_kind] = SGR_GREEN
+
+
+def _py_token_color(kind, text):
+    if kind == tokenize.NAME and keyword.iskeyword(text):
+        return SGR_MAGENTA
+    return _PY_TOKEN_COLORS.get(kind)
+
+
+def _python_spans(code):
+    """per-line color spans {line_index: [(start_col, end_col, color)]} from
+    tokenize; end_col None means to end of line (a multi-line token). None as
+    a whole when the code does not tokenize (an unfinished snippet)."""
+    spans = {}
+    reader = io.StringIO(code).readline
+    try:
+        for tok in tokenize.generate_tokens(reader):
+            color = _py_token_color(tok.type, tok.string)
+            if not color: continue
+            srow, scol = tok.start
+            erow, ecol = tok.end
+            row = srow
+            while row <= erow:
+                start = 0
+                if row == srow:
+                    start = scol
+                end = None
+                if row == erow:
+                    end = ecol
+                spans.setdefault(row - 1, []).append((start, end, color))
+                row += 1
+    except (tokenize.TokenError, IndentationError, SyntaxError, ValueError):
+        return None
+    return spans
+
+
+def _format_python(lines, spans):
+    """apply the color spans to their lines; tokens never overlap and arrive
+    in source order, so each line is a simple left-to-right stitch."""
+    out = []
+    for i, line in enumerate(lines):
+        pieces = []
+        pos = 0
+        for start, end, color in spans.get(i, []):
+            if end is None:
+                end = len(line)
+            if start > pos:
+                pieces.append(line[pos:start])
+            pieces.append(f"{color}{line[start:end]}{SGR_RESET}")
+            pos = end
+        pieces.append(line[pos:])
+        out.append(''.join(pieces))
+    return out
+
+
+def python_code_arg(tool_name, tool_args):
+    """the script of a `python` tool call, or None when the call isn't one
+    (or carries no usable code) - the caller then falls back to the plain
+    one-line arg preview."""
+    if tool_name != PY_TOOL_NAME:
+        return None
+    code = (tool_args or {}).get('code')
+    if not isinstance(code, str):
+        return None
+    if not code.strip():
+        return None
+    return code
+
+
+def render_python_code(code):
+    """ANSI view of a python tool call's script, shaped like a display block:
+    indented under the '->' line, syntax-colored. deliberately NOT capped at
+    DISPLAY_MAX_LINES - the script IS the tool call, so the transcript always
+    shows all of it. a snippet that does not tokenize renders dim plain
+    instead; ends with '\\n' when non-empty."""
+    text = code.strip('\n')
+    if not text:
+        return ''
+    lines = text.split('\n')
+    spans = _python_spans(text)
+    if spans is None:
+        styled = _format_plain(lines)
+    else:
+        styled = _format_python(lines, spans)
+    out = []
+    for line in styled:
+        out.append(f"{SGR_RESET}{_INDENT}{line}\n")
+    return ''.join(out)
 
 
 def render_display(blocks):

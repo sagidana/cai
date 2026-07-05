@@ -122,16 +122,23 @@ conversation plus the settings needed to resume it.
 - The `python` skill gives the agent a `python(code, timeout=60)` tool that
   runs a snippet in a subprocess of a cai-managed virtualenv
   (`~/.config/cai/venv/`, created on first use, empty by default — stdlib only).
-  A `sys.addaudithook` jail makes it **read-only**: it can read files and list
-  directories under the working directory + scratch, but cannot create, modify or
-  delete anything, and subprocess/network/`ctypes`/`cffi` are blocked. The snippet
-  also gets a `call(name, **kwargs)` builtin that dispatches the agent's *own*
-  selected tools in-process — through the same `before_tool_call` gates — so a
-  script can read a large tool result, reduce it in Python, and return only the
+  The snippet is jailed at the **kernel level**: it enters fresh user + mount +
+  network namespaces and pivots onto a root containing only the working
+  directory, the session scratch dir and the interpreter — no other path
+  exists, and there is no network interface. On top of that, a
+  `sys.addaudithook` jail makes it **read-only**: it can read files and list
+  directories inside the jail but cannot create, modify or delete anything, and
+  subprocess/`ctypes`/`cffi` are blocked. The snippet also gets a
+  `call(name, **kwargs)` builtin that dispatches the agent's *own* selected
+  tools in-process — through the same `before_tool_call` gates — so a script
+  can read a large tool result, reduce it in Python, and return only the
   answer, the intermediate data never entering model context (and any file
   changes go through a write tool like `fs__create_file`, under its own gate).
-  Point it at a different base interpreter with the optional `python_base` key in
-  `config.json`.
+  Point it at a different base interpreter with the optional `python_base` key
+  in `config.json`; on hosts that forbid unprivileged user namespaces (e.g.
+  default-hardened Docker) the tool fails closed — there the optional
+  `python_sandbox` key set to `"hook"` runs the audit-hook jail only, the
+  container itself being the boundary.
 
 ## Extensions
 

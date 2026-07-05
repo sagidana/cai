@@ -34,6 +34,9 @@ listing, or fanning out to sub-agents (`call("launch_agent", ...)`).
   directory and the session scratch dir (`os.environ['CAI_SCRATCH']`), but you
   **cannot create, modify, or delete files** — to change a file, `call()` a write
   tool such as `fs__create_file` / `fs__edit_file` instead.
+- **Nothing else exists.** The snippet runs in its own kernel namespace jail:
+  paths outside the working directory, scratch and the interpreter are not
+  denied, they are simply absent, and there is no network interface.
 - `subprocess`, network, `ctypes` and `cffi` are blocked; a denied op raises
   `PermissionError` (its traceback comes back as the result).
 - The interpreter is a managed virtualenv with the **standard library only** — no
