@@ -3,41 +3,36 @@ tools: python
 ---
 # Skill: Python
 
-Run Python to compute, transform data, or orchestrate your other tools from a
-script — reach for it when a task is awkward as a chain of tool calls but easy as
-a few lines of code.
+`python(code="...", timeout=60)` runs a snippet and returns its stdout/stderr.
+Use it when a task is easier as a few lines of code than as a chain of tool
+calls. `print()` what you want back.
 
-`python(code="...", timeout=60)` runs the snippet in a fresh interpreter and
-returns its combined stdout/stderr. Each call is one-shot — variables do NOT
-survive between calls; persist state via files. `print()` what you want to see.
+## Rules
 
-## Calling your other tools
+- One-shot: fresh interpreter every call, no variables survive between calls.
+- Standard library only. No network. `input()` sees EOF.
+- Read-only: read/list the working dir and scratch (`os.environ['CAI_SCRATCH']`);
+  every other path does not exist.
+- Writes, `subprocess`, `ctypes`, `cffi` raise `PermissionError`. To change a
+  file, `call()` a write tool.
 
-The snippet gets a `call(name, **kwargs) -> str` builtin that runs one of your
-own currently-available tools and returns its result as a string:
+## call() — drive your other tools
+
+`call(name, **kwargs) -> str` runs one of your selected tools (by its exact
+name, not `python`) and returns its result. Reduce big results in Python; only
+what you `print()` reaches you:
 
 ```python
 text = call("fs__read_file", file_path="big.log")
 print(text.count("ERROR"))
 ```
 
-The tool call runs inside cai (with its normal confinement and gates); only what
-you `print()` becomes the result. So read a large result, reduce it in Python,
-and return just the answer — the intermediate data never enters the conversation.
-`call` reaches the tools you already have selected, by their exact schema names
-(not `python` itself). Use it for map/reduce over files, filtering a big
-listing, or fanning out to sub-agents (`call("launch_agent", ...)`).
+Do writes inside the call — never `print()` a payload and re-type it into a
+write tool. To write 1638 bytes of `0x36`:
 
-## Sandbox
+```python
+print(call("fs__create_file", file_path="C", content="36" * 1638, encoding="hex"))
+```
 
-- **Read-only.** You can read files and list directories under the working
-  directory and the session scratch dir (`os.environ['CAI_SCRATCH']`), but you
-  **cannot create, modify, or delete files** — to change a file, `call()` a write
-  tool such as `fs__create_file` / `fs__edit_file` instead.
-- **Nothing else exists.** The snippet runs in its own kernel namespace jail:
-  paths outside the working directory, scratch and the interpreter are not
-  denied, they are simply absent, and there is no network interface.
-- `subprocess`, network, `ctypes` and `cffi` are blocked; a denied op raises
-  `PermissionError` (its traceback comes back as the result).
-- The interpreter is a managed virtualenv with the **standard library only** — no
-  third-party packages. `input()` sees EOF.
+`fs__create_file` takes `encoding="hex"`, so build any binary in Python and
+hand off `bytes.hex()` — a PNG, WAV, zip, fixed header.

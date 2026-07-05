@@ -14,19 +14,20 @@ the working directory and the session scratch dir - every other path does not
 exist, at the kernel level, no matter how the snippet issues the syscall (this
 also closes the stat-probe leak the audit hook alone had). The empty network
 namespace has no interfaces (not even loopback), so no network, and abstract
-unix sockets die with it too. Capabilities are dropped after the mounts, so
-the snippet cannot rearrange its own jail. Enforcement is confinement, not
-read-only-ness: within cwd and scratch, unix permissions still apply but the
-kernel does not forbid writes - that is the hook layer's job.
+unix sockets die with it too. The whole mount tree is flipped READ-ONLY
+(mount_setattr, kernel >= 5.12) before capabilities are dropped, so the
+snippet can neither write anywhere nor rearrange its own jail: confinement
+AND read-only-ness are both kernel-enforced.
 
-HOOK layer (UX + read-only policy). A sys.addaudithook jail makes the tool
-READ-ONLY: reads and directory listings are confined to cwd + scratch + the
-interpreter prefixes, every write - create, modify, delete, rename, anywhere -
-is denied, as are subprocess/exec/fork, sockets, ctypes and cffi. A denied op
-raises PermissionError, whose traceback is the result. Audit hooks are
+HOOK layer (UX + defense in depth). A sys.addaudithook jail enforces the same
+read-only policy in userspace: reads and directory listings are confined to
+cwd + scratch + the interpreter prefixes, every write - create, modify,
+delete, rename, anywhere - is denied, as are subprocess/exec/fork, sockets,
+ctypes and cffi. A denied op raises PermissionError, whose traceback is the
+result (a mount-level EROFS would be raw and confusing). Audit hooks are
 python-level and evadable by determined code - but anything that slips past
-them is still inside the kernel jail, so the blast radius is "writes under
-cwd/scratch", never "anywhere else".
+them is still inside the read-only kernel jail, so the blast radius is
+nothing.
 
 Hosts that forbid unprivileged user namespaces (e.g. default-hardened Docker
 seccomp/AppArmor) fail closed with a clear message; there the operator - whose

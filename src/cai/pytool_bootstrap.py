@@ -7,10 +7,11 @@ the audit-hook jail, wires call() over the two inherited RPC fds, and execs
 the snippet. stdlib-only, so it runs under the empty managed venv.
 
 The kernel jail (default) pivots into a mount namespace where ONLY cwd +
-CAI_SCRATCH + the interpreter prefixes exist, inside an empty network
-namespace. The hook jail is READ-ONLY: reads (and directory listings) are
-confined to the same roots; ALL writes - anywhere, cwd and scratch included -
-are denied, as are subprocess/exec/fork, sockets, ctypes and cffi. raw
+CAI_SCRATCH + the interpreter prefixes exist - all mounted READ-ONLY - inside
+an empty network namespace. The hook jail enforces the same policy in
+userspace: reads (and directory listings) are confined to the same roots; ALL
+writes - anywhere, cwd and scratch included - are denied, as are
+subprocess/exec/fork, sockets, ctypes and cffi. raw
 os.read/os.write on the inherited fds emit no audit events and namespaces do
 not sever inherited fds, so call() needs no exception in either jail."""
 import sys
@@ -37,12 +38,13 @@ def compute_read_roots():
 
 # --- kernel jail: user+mount+net namespaces --------------------------------
 # the mount namespace is pivoted onto a tmpfs holding recursive bind mounts of
-# read_roots ONLY - every other path does not exist at the kernel level, however
-# the syscall is issued. the fresh network namespace has no interfaces (not even
+# read_roots ONLY, the whole tree then flipped read-only - every other path
+# does not exist and no path is writable at the kernel level, however the
+# syscall is issued. the fresh network namespace has no interfaces (not even
 # loopback) so there is no network, and abstract unix sockets are per-netns so
 # they die with it. inherited fds (stdin, the RPC pipes, the stdout tempfile)
-# are untouched. runs before the audit hook exists, so its own opens/mkdirs are
-# unrestricted.
+# are untouched - read-only mounts do not affect already-open fds. runs before
+# the audit hook exists, so its own opens/mkdirs are unrestricted.
 
 CLONE_NEWNS = 0x00020000
 CLONE_NEWUSER = 0x10000000
@@ -56,6 +58,10 @@ PR_SET_NO_NEW_PRIVS = 38
 PR_CAP_AMBIENT = 47
 PR_CAP_AMBIENT_CLEAR_ALL = 4
 EINVAL = 22
+AT_FDCWD = -100
+AT_RECURSIVE = 0x8000
+MOUNT_ATTR_RDONLY = 1
+MOUNT_SETATTR_NR = 442
 PIVOT_ROOT_NR = {}
 PIVOT_ROOT_NR["x86_64"] = 155
 PIVOT_ROOT_NR["aarch64"] = 41
@@ -138,6 +144,21 @@ def enter_kernel_jail():
         os.makedirs(target, exist_ok=True)
         need(libc.mount(root.encode(), target.encode(), None, MS_BIND | MS_REC, None),
              f"bind {root}")
+
+    class MountAttr(ctypes.Structure):
+        _fields_ = [("attr_set", ctypes.c_uint64),
+                    ("attr_clr", ctypes.c_uint64),
+                    ("propagation", ctypes.c_uint64),
+                    ("userns_fd", ctypes.c_uint64)]
+
+    # MS_RDONLY on the initial bind is silently ignored by the kernel; making
+    # a bind read-only takes a second step. one recursive mount_setattr over
+    # the staging tmpfs flips it and every bind under it atomically (needs
+    # kernel >= 5.12, same era as unprivileged userns hosts that get here).
+    attr = MountAttr()
+    attr.attr_set = MOUNT_ATTR_RDONLY
+    need(libc.syscall(MOUNT_SETATTR_NR, AT_FDCWD, staging.encode(), AT_RECURSIVE,
+                      ctypes.byref(attr), ctypes.sizeof(attr)), "make jail read-only")
     os.chdir(staging)
     need(libc.syscall(PIVOT_ROOT_NR[machine], b".", b"."), "pivot_root")
     need(libc.umount2(b".", MNT_DETACH), "detach old root")
