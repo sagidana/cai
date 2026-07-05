@@ -107,11 +107,21 @@ def _venv_usable(python):
 
 
 def ensure_venv():
-    """the managed venv's python, materialized on first use. lazy and idempotent -
-    created under a lock so two agents first-using at once don't collide."""
+    """the venv's python, materialized on first use. lazy and idempotent -
+    created under a lock so two agents first-using at once don't collide.
+
+    a user-supplied `python_venv` is never built, rebuilt or deleted here: it
+    is the user's own env (e.g. a pyenv one), so a broken one raises rather
+    than getting silently wiped. only the cai-managed ~/.config/cai/venv is
+    created."""
     python = config.venv_python()
     if _venv_usable(python):
         return python
+    if config.load_optional("python_venv"):
+        raise RuntimeError(
+            f"configured python_venv interpreter is missing or unusable: {python}\n"
+            "cai does not build or repair a user-supplied env - check the path, or "
+            "drop the python_venv setting to use the managed venv.")
     with _venv_lock:
         if _venv_usable(python):
             return python

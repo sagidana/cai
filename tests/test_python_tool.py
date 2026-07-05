@@ -77,6 +77,40 @@ def test_ensure_venv_rebuilds_a_broken_venv(tmp_path, monkeypatch):
     assert os.path.exists(python)
 
 
+def test_ensure_venv_uses_a_user_supplied_python_venv(tmp_path, monkeypatch):
+    # python_venv points at an existing env: ensure_venv just returns its
+    # interpreter, never running `python -m venv`.
+    monkeypatch.setattr(config, "config_dir", lambda: str(tmp_path / "cfg"))
+    env = tmp_path / "myenv"
+    monkeypatch.setattr(config, "load_optional",
+                        lambda key, default=None: str(env) if key == "python_venv" else default)
+    monkeypatch.setattr(config, "venv_dir", lambda: str(env))
+    built = pytool.subprocess.run([sys.executable, "-m", "venv", str(env)])
+    assert built.returncode == 0
+
+    real_run = pytool.subprocess.run
+    calls = []
+
+    def record(cmd, *a, **k):
+        calls.append(cmd)
+        return real_run(cmd, *a, **k)
+    monkeypatch.setattr(pytool.subprocess, "run", record)
+
+    assert pytool.ensure_venv() == config.venv_python()
+    for cmd in calls:
+        assert "venv" not in cmd, f"ensure_venv rebuilt a user-supplied env: {cmd}"
+
+
+def test_ensure_venv_refuses_to_rebuild_a_broken_python_venv(tmp_path, monkeypatch):
+    # a user-supplied env that is missing/unusable raises, never gets wiped.
+    monkeypatch.setattr(config, "config_dir", lambda: str(tmp_path / "cfg"))
+    monkeypatch.setattr(config, "venv_dir", lambda: str(tmp_path / "gone"))
+    monkeypatch.setattr(config, "load_optional",
+                        lambda key, default=None: str(tmp_path / "gone") if key == "python_venv" else default)
+    with pytest.raises(RuntimeError, match="python_venv"):
+        pytool.ensure_venv()
+
+
 # --- sandbox --------------------------------------------------------------
 
 def test_output_and_exit_code(monkeypatch):

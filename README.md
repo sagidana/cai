@@ -58,6 +58,13 @@ cai.settings.auto_save_sessions = True
 cai.settings.skills.append("fs")                  # auto-activated on CLI runs
 cai.settings.tools.append("github__search_issues")
 
+# any config.json field can be shadowed from here: a non-None cai.settings
+# attribute of the same name wins over the file (model, base_url, ssl_verify,
+# default_context_size, python_base, python_sandbox, python_venv).
+cai.settings.model = "anthropic/claude-sonnet-4"
+cai.settings.python_venv = "~/.pyenv/versions/cai-tools"  # run the python tool
+                                                          # under your own env
+
 # tools / hooks / commands - same decorators as the SDK
 @cai.tool
 def shout(text: str) -> str:
@@ -138,10 +145,13 @@ conversation plus the settings needed to resume it.
   answer, the intermediate data never entering model context (and any file
   changes go through a write tool like `fs__create_file`, under its own gate).
   Point it at a different base interpreter with the optional `python_base` key
-  in `config.json`; on hosts that forbid unprivileged user namespaces (e.g.
+  in `config.json`, or run it under an existing virtualenv of your own (e.g. a
+  `pyenv` one) with `python_venv` — cai never builds, rebuilds or deletes a
+  user-supplied env. On hosts that forbid unprivileged user namespaces (e.g.
   default-hardened Docker) the tool fails closed — there the optional
   `python_sandbox` key set to `"hook"` runs the audit-hook jail only, the
-  container itself being the boundary.
+  container itself being the boundary. Any of these keys can also be set from
+  `init.py` (`cai.settings.python_venv = "…"`), which shadows `config.json`.
 
 ## Extensions
 

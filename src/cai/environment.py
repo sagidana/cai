@@ -104,6 +104,16 @@ class Settings:
     max_sessions_mb: int = 500
     skills: list = field(default_factory=list)
     tools: list = field(default_factory=list)
+    # config.json shadows: None means "not set here - read config.json". a
+    # non-None value (set by init.py or an extension) wins over the config.json
+    # field of the same name, in every place cai reads it.
+    base_url: str = None
+    model: str = None
+    ssl_verify: bool = None
+    default_context_size: int = None
+    python_base: str = None
+    python_sandbox: str = None
+    python_venv: str = None
 
 
 def extensions_dir():
