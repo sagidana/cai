@@ -261,3 +261,83 @@ def test_copy_bytes_errors():
     # dst_offset_end smaller than the incoming range anchors before byte 0
     out = fs.copy_bytes("s.bin", "d.bin", dst_offset_end=1)
     assert out.startswith("Error: replace range")
+
+
+# --- search ---
+
+def test_search_text_still_works():
+    with open("a.txt", "w") as f:
+        f.write("alpha\nbeta\n")
+    out = fs.search("beta")
+    assert "a.txt:2:1:beta" in out
+
+
+def test_search_finds_a_string_inside_a_binary_file():
+    _write("app.bin", b"\x00" * 32 + b"needle" + b"\x00" * 32)
+    out = fs.search("needle")
+    line = out.split("\n")[0]
+    assert "app.bin:32: " in line
+    assert "6e65 6564 6c65" in line
+    assert "needle" in line
+
+
+def test_search_reports_text_and_binary_matches_together():
+    with open("a.txt", "w") as f:
+        f.write("needle\n")
+    _write("b.bin", b"\x00needle")
+    out = fs.search("needle")
+    assert "a.txt:1:1:needle" in out
+    assert "b.bin:1: " in out
+
+
+def test_search_binary_offset_plugs_into_read_file():
+    _write("app.bin", b"\x00" * 100 + b"MAGIC" + b"\x00" * 100)
+    out = fs.search("MAGIC", path="app.bin")
+    offset = int(out.split("\n")[0].split(":")[1])
+    assert offset == 100
+    dump = fs.read_file("app.bin", offset_start=offset, offset_end=offset + 5)
+    assert "MAGIC" in dump
+
+
+def test_search_regex_matches_bytes_in_binary():
+    _write("app.bin", b"\x00abc123xyz")
+    out = fs.search("abc[0-9]+", path="app.bin")
+    assert "app.bin:1: " in out
+
+
+def test_search_hex_finds_a_byte_sequence():
+    _write("app.bin", ELF)
+    out = fs.search("7f45 4c46", encoding="hex")
+    assert "app.bin:0: " in out
+    assert "7f45 4c46" in out
+
+
+def test_search_hex_searches_text_files_too():
+    with open("a.txt", "w") as f:
+        f.write("xhix\n")
+    out = fs.search("6869", encoding="hex")  # "hi"
+    assert "a.txt:1: " in out
+
+
+def test_search_hex_needle_may_span_a_newline_byte():
+    _write("ml.bin", b"\x00AB\nCD")
+    out = fs.search("42 0a 43", encoding="hex")  # "B\nC"
+    assert "ml.bin:2: " in out
+    # rg -U repeats the prefix on each line of the match; reported once
+    assert out.count("ml.bin:2:") == 1
+
+
+def test_search_file_glob_applies_to_binary_scan():
+    _write("keep.bin", b"\x00needle")
+    _write("skip.dat", b"\x00needle")
+    out = fs.search("needle", file_glob="*.bin")
+    assert "keep.bin" in out
+    assert "skip.dat" not in out
+
+
+def test_search_errors():
+    assert fs.search("") == "Error: empty pattern"
+    assert fs.search("zz", encoding="hex").startswith("Error: invalid hex")
+    assert fs.search("41", encoding="nope").startswith("Error: unknown encoding")
+    _write("a.bin", b"\x00\x01")
+    assert fs.search("77", encoding="hex") == "No matches found."
