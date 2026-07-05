@@ -1005,6 +1005,9 @@ def _open_config(screen, client, cfg, pending):
     settings = []
     settings.append(_bool_setting("show reasoning", cfg, "show_reasoning"))
     settings.append(_bool_setting("show chips", cfg, "show_chips"))
+    settings.append(_bool_setting("show chips skills", cfg, "show_chips_skills"))
+    settings.append(_bool_setting("show chips tools", cfg, "show_chips_tools"))
+    settings.append(_bool_setting("show chips subagents", cfg, "show_chips_subagents"))
     settings.append(_int_setting("tool result max chars", cfg, "tool_result_max_chars"))
     settings.append(_bool_setting("auto save sessions", cfg, "auto_save_sessions"))
     settings.append(_int_setting("max sessions mb", cfg, "max_sessions_mb"))
@@ -1205,12 +1208,17 @@ def _chip_lines(skills, tools):
 def _refresh_chips(screen, client, cfg):
     """rebuild the hover chips widget from the agent's live selection (over
     the wire): the active skills and tools, one pill per row. the show_chips
-    setting (:config) turns the widget off entirely."""
+    setting (:config) turns the widget off entirely; show_chips_skills and
+    show_chips_tools drop their column alone."""
     if not cfg.show_chips:
         screen.remove_widget("chips")
         return
-    skills = sorted(client.get_selected_skills())
-    tools = sorted(client.get_selected_tools())
+    skills = []
+    if cfg.show_chips_skills:
+        skills = sorted(client.get_selected_skills())
+    tools = []
+    if cfg.show_chips_tools:
+        tools = sorted(client.get_selected_tools())
     lines = _chip_lines(skills, tools)
     if not lines:
         screen.remove_widget("chips")
@@ -1367,7 +1375,9 @@ class _ChipsLoop(threading.Thread):
                 continue
             try:
                 steer = self._client.get_info().get("pending_steer", 0)
-                lines = _agent_chip_lines(_running_subagents(self._client))
+                lines = []
+                if self._cfg.show_chips_subagents:
+                    lines = _agent_chip_lines(_running_subagents(self._client))
             except OSError:
                 continue
             self._pending.set_steer(steer)
