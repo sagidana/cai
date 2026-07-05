@@ -10,7 +10,9 @@ it). The sandbox is two layers, both set up by the child script
 KERNEL layer (the boundary; default, `python_sandbox: "kernel"`). Before the
 snippet runs, the child enters fresh user + mount + network namespaces and
 pivot_roots onto a tmpfs holding bind mounts of ONLY the interpreter prefixes,
-the working directory and the session scratch dir - every other path does not
+the working directory, the session scratch dir and the system library dirs the
+dynamic loader needs (so stdlib C extensions like zlib can dlopen libz & co
+even when the interpreter is not /usr-based) - every other path does not
 exist, at the kernel level, no matter how the snippet issues the syscall (this
 also closes the stat-probe leak the audit hook alone had). The empty network
 namespace has no interfaces (not even loopback), so no network, and abstract
@@ -124,6 +126,21 @@ def install(packages):
     outside the sandbox (the jail has no network, so a snippet never can)."""
     python = ensure_venv()
     result = subprocess.run([python, "-m", "pip", "install"] + list(packages))
+    return result.returncode
+
+
+def uninstall(packages):
+    """`cai python uninstall` - pip-uninstall packages from the managed venv.
+    -y because there is no terminal to confirm on when scripted."""
+    python = ensure_venv()
+    result = subprocess.run([python, "-m", "pip", "uninstall", "-y"] + list(packages))
+    return result.returncode
+
+
+def list_packages():
+    """`cai python list-packages` - the packages installed in the managed venv."""
+    python = ensure_venv()
+    result = subprocess.run([python, "-m", "pip", "list"])
     return result.returncode
 
 

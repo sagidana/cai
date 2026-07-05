@@ -148,6 +148,20 @@ def _add_python_subparser(sub):
                                 metavar="PACKAGE",
                                 help="pip requirement specifiers "
                                      "(e.g. requests, 'numpy>=2').")
+    uninstall_parser = python_sub.add_parser(
+        "uninstall",
+        help="pip-uninstall packages from the managed virtualenv.",
+        description="pip-uninstall packages from the managed virtualenv "
+                    "(no confirmation prompt).")
+    uninstall_parser.add_argument("packages",
+                                  nargs="+",
+                                  metavar="PACKAGE",
+                                  help="package names to remove.")
+    python_sub.add_parser(
+        "list-packages",
+        help="list the packages installed in the managed virtualenv.",
+        description="list the packages installed in the managed virtualenv "
+                    "(created first if needed).")
 
 
 def build_parser():
@@ -385,7 +399,11 @@ def main(argv=None):
         return extend.run(args, parser)
     if args.command == "python":
         from cai import pytool
-        return pytool.install(args.packages)
+        if args.python_command == "install":
+            return pytool.install(args.packages)
+        if args.python_command == "uninstall":
+            return pytool.uninstall(args.packages)
+        return pytool.list_packages()
 
     # --cwd: move the whole process before any config/file/tool work, so --file,
     # the fs tool sandbox (which resolves against os.getcwd()) and every other

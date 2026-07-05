@@ -7,9 +7,10 @@ the audit-hook jail, wires call() over the two inherited RPC fds, and execs
 the snippet. stdlib-only, so it runs under the empty managed venv.
 
 The kernel jail (default) pivots into a mount namespace where ONLY cwd +
-CAI_SCRATCH + the interpreter prefixes exist - mounted READ-ONLY, except the
-scratch dir, which is re-bound read-write on top: the one writable island -
-inside an empty network namespace. The hook jail enforces the same policy in
+CAI_SCRATCH + the interpreter prefixes + the system library dirs the dynamic
+loader needs (LOADER_DIRS + ld.so.cache) exist - mounted READ-ONLY, except
+the scratch dir, which is re-bound read-write on top: the one writable
+island - inside an empty network namespace. The hook jail enforces the same policy in
 userspace: reads (and directory listings) are confined to the same roots;
 writes are allowed under the scratch dir only and denied everywhere else, as
 are subprocess/exec/fork, sockets, ctypes and cffi. raw
@@ -77,6 +78,28 @@ PIVOT_ROOT_NR = {}
 PIVOT_ROOT_NR["x86_64"] = 155
 PIVOT_ROOT_NR["aarch64"] = 41
 
+# the dynamic loader's world. stdlib C extensions (zlib, _ssl, ...) dlopen
+# system shared libraries (libz, libssl, ...), and on hosts whose base
+# interpreter is not /usr-based (pyenv, uv) those live outside every
+# read_root - the import then dies with "libz.so.1: cannot open shared object
+# file". bound at their LITERAL paths, because that is how the loader spells
+# its search dirs; a merged-usr symlink (/lib -> usr/lib) is recreated as a
+# symlink so both spellings resolve. /etc/ld.so.cache rides along so
+# distro-specific dirs (multiarch) resolve without the fallback guesswork.
+LOADER_DIRS = ("/lib", "/lib64", "/usr/lib", "/usr/lib64")
+LOADER_CACHE = "/etc/ld.so.cache"
+
+
+def covered(path, roots):
+    """True when path is one of roots or sits under one - it then already
+    exists in the jail through that root's recursive bind."""
+    for root in roots:
+        if path == root:
+            return True
+        if path.startswith(root + os.sep):
+            return True
+    return False
+
 
 def bind_roots():
     """read_roots with nested paths folded away - a recursive bind of a parent
@@ -84,14 +107,41 @@ def bind_roots():
     ordered = sorted(read_roots, key=len)
     kept = []
     for root in ordered:
-        covered = False
-        for prev in kept:
-            if root == prev or root.startswith(prev + os.sep):
-                covered = True
-                break
-        if covered: continue
+        if covered(root, kept): continue
         kept.append(root)
     return kept
+
+
+def bind_loader_world(libc, need, staging, kept):
+    """make dlopen work inside the jail: bind LOADER_DIRS + LOADER_CACHE,
+    skipping whatever a read root's recursive bind already carries. runs
+    before the read-only flip, so these end up read-only like everything
+    else."""
+    for lib_dir in LOADER_DIRS:
+        if not os.path.lexists(lib_dir): continue
+        if covered(lib_dir, kept): continue
+        target = staging + lib_dir
+        if os.path.islink(lib_dir):
+            os.symlink(os.readlink(lib_dir), target)
+            continue
+        os.makedirs(target, exist_ok=True)
+        need(libc.mount(lib_dir.encode(),
+                        target.encode(),
+                        None,
+                        MS_BIND | MS_REC,
+                        None),
+             f"bind {lib_dir}")
+
+    if not os.path.isfile(LOADER_CACHE):
+        return
+    if covered(LOADER_CACHE, kept):
+        return
+    target = staging + LOADER_CACHE
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    with open(target, "w"):
+        pass
+    need(libc.mount(LOADER_CACHE.encode(), target.encode(), None, MS_BIND, None),
+         f"bind {LOADER_CACHE}")
 
 
 def drop_caps(ctypes, libc, need):
@@ -154,7 +204,8 @@ def enter_kernel_jail():
     need(libc.mount(b"none", b"/", None, MS_REC | MS_PRIVATE, None), "make / private")
     need(libc.mount(b"tmpfs", staging.encode(), b"tmpfs", 0, None), "mount tmpfs")
 
-    for root in bind_roots():
+    kept = bind_roots()
+    for root in kept:
         target = staging + root
         os.makedirs(target, exist_ok=True)
 
@@ -164,6 +215,7 @@ def enter_kernel_jail():
                         MS_BIND | MS_REC,
                         None),
              f"bind {root}")
+    bind_loader_world(libc, need, staging, kept)
 
     class MountAttr(ctypes.Structure):
         _fields_ = [("attr_set", ctypes.c_uint64),

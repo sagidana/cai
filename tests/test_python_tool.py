@@ -203,14 +203,17 @@ except FileNotFoundError:
 
 
 def test_kernel_jail_outside_paths_do_not_exist(tmp_path, monkeypatch):
-    # the stat family emits no audit event - only the kernel jail hides this
+    # the stat family emits no audit event - only the kernel jail hides this.
+    # /etc itself exists in the jail (a tmpfs dir carrying only ld.so.cache
+    # for the dynamic loader) - everything else in it must not.
     _fast_venv(monkeypatch)
     _force_sandbox(monkeypatch, "kernel")
     monkeypatch.chdir(tmp_path)
     agent = _agent_with_echo()
     try:
         assert _run(agent, STAT_PROBE).strip() == "hidden"
-        assert _run(agent, "import os; print(os.path.exists('/etc'))").strip() == "False"
+        probe = "import os; print(os.path.exists('/etc/hostname'), os.path.exists('/root'))"
+        assert _run(agent, probe).strip() == "False False"
     finally:
         agent.close()
 
@@ -234,6 +237,27 @@ def test_kernel_jail_has_no_network(tmp_path, monkeypatch):
     agent = _agent_with_echo()
     try:
         assert _run(agent, NET_PROBE).strip() == "no-network"
+    finally:
+        agent.close()
+
+
+def test_kernel_jail_carries_the_loader_world(tmp_path, monkeypatch):
+    # stdlib C extensions dlopen system shared libraries (libssl, libz, ...)
+    # that live outside the interpreter prefixes on pyenv/uv-style hosts - the
+    # jail must carry the loader's dirs + ld.so.cache. the cache probe is the
+    # regression signal: it was absent from the jail before the loader-world
+    # binds existed (os.path.isfile is stat-family, no audit event fires).
+    _fast_venv(monkeypatch)
+    _force_sandbox(monkeypatch, "kernel")
+    monkeypatch.chdir(tmp_path)
+    agent = _agent_with_echo()
+    probe = """import os
+import _ssl
+import zlib
+print('extensions-ok', os.path.isfile('/etc/ld.so.cache'))
+"""
+    try:
+        assert _run(agent, probe).strip() == "extensions-ok True"
     finally:
         agent.close()
 
@@ -435,14 +459,45 @@ def test_install_runs_pip_in_the_managed_venv(monkeypatch):
                          "requests", "numpy>=2"]]
 
 
-def test_cli_python_install_dispatches(monkeypatch):
+def test_uninstall_runs_pip_without_prompting(monkeypatch):
+    monkeypatch.setattr(pytool, "ensure_venv", lambda: "/venv/bin/python")
+    recorded = []
+
+    class FakeResult:
+        returncode = 0
+
+    def fake_run(cmd):
+        recorded.append(cmd)
+        return FakeResult()
+    monkeypatch.setattr(pytool.subprocess, "run", fake_run)
+
+    assert pytool.uninstall(["requests"]) == 0
+    assert recorded == [["/venv/bin/python", "-m", "pip", "uninstall", "-y",
+                         "requests"]]
+
+
+def test_cli_python_subcommands_dispatch(monkeypatch):
     from cai import cli
     recorded = []
 
     def fake_install(packages):
-        recorded.append(packages)
+        recorded.append(("install", packages))
+        return 0
+
+    def fake_uninstall(packages):
+        recorded.append(("uninstall", packages))
+        return 0
+
+    def fake_list_packages():
+        recorded.append(("list-packages", None))
         return 0
     monkeypatch.setattr(pytool, "install", fake_install)
+    monkeypatch.setattr(pytool, "uninstall", fake_uninstall)
+    monkeypatch.setattr(pytool, "list_packages", fake_list_packages)
 
     assert cli.main(["python", "install", "requests"]) == 0
-    assert recorded == [["requests"]]
+    assert cli.main(["python", "uninstall", "requests"]) == 0
+    assert cli.main(["python", "list-packages"]) == 0
+    assert recorded == [("install", ["requests"]),
+                        ("uninstall", ["requests"]),
+                        ("list-packages", None)]
