@@ -80,12 +80,13 @@ def test_output_and_exit_code(monkeypatch):
         agent.close()
 
 
-def test_write_confined_to_cwd_and_scratch(tmp_path, monkeypatch):
+def test_reads_allowed_but_all_writes_denied(tmp_path, monkeypatch):
     _fast_venv(monkeypatch)
     cwd = tmp_path / "cwd"
     cwd.mkdir()
     scratch = tmp_path / "scratch"
     scratch.mkdir()
+    (cwd / "existing.txt").write_text("data")
     monkeypatch.chdir(cwd)
 
     @cai.tool
@@ -94,14 +95,20 @@ def test_write_confined_to_cwd_and_scratch(tmp_path, monkeypatch):
         return ""
     agent = Agent(model="m", api=object(), tools=["noop"], scratch=str(scratch))
     try:
-        out = _run(agent, "open('a.txt','w').write('x'); print('ok')")
-        assert out.strip() == "ok"
-        assert (cwd / "a.txt").exists()
-        out = _run(agent,
-                   "import os; p=os.path.join(os.environ['CAI_SCRATCH'],'s.txt');"
-                   " open(p,'w').write('y'); print('ok')")
-        assert out.strip() == "ok"
-        assert (scratch / "s.txt").exists()
+        # reading inside the jail is fine
+        assert _run(agent, "print(open('existing.txt').read())").strip() == "data"
+        # the tool is read-only: no write, even under cwd or scratch
+        assert "read-only" in _run(agent, "open('new.txt','w').write('x')")
+        assert not (cwd / "new.txt").exists()
+        scratch_write = ("import os; p=os.path.join(os.environ['CAI_SCRATCH'],'s.txt');"
+                         " open(p,'w').write('y')")
+        assert "read-only" in _run(agent, scratch_write)
+        assert not (scratch / "s.txt").exists()
+        # and no delete / rename of the existing file
+        assert "read-only" in _run(agent, "import os; os.remove('existing.txt')")
+        assert (cwd / "existing.txt").exists()
+        assert "read-only" in _run(agent, "import os; os.rename('existing.txt','r.txt')")
+        assert "read-only" in _run(agent, "import shutil; shutil.rmtree('.')")
     finally:
         agent.close()
 
@@ -114,6 +121,10 @@ def test_write_confined_to_cwd_and_scratch(tmp_path, monkeypatch):
     "import subprocess; subprocess.Popen(['ls'])",
     "import os; os.system('ls')",
     "import socket; socket.socket().connect(('example.com', 80))",
+    # directory enumeration outside the cwd is a read too - must not leak the tree
+    "import os; os.listdir('/')",
+    "import os; os.scandir('/etc')",
+    "import pathlib; list(pathlib.Path('/').iterdir())",
 ])
 def test_sandbox_denials(snippet, tmp_path, monkeypatch):
     _fast_venv(monkeypatch)
@@ -121,6 +132,33 @@ def test_sandbox_denials(snippet, tmp_path, monkeypatch):
     agent = _agent_with_echo()
     try:
         assert "PermissionError" in _run(agent, snippet)
+    finally:
+        agent.close()
+
+
+def test_masked_traversal_leaks_nothing(tmp_path, monkeypatch):
+    # os.walk / glob swallow the scandir denial (onerror ignores it), so they
+    # don't raise - but they must come back EMPTY, never the outside listing.
+    _fast_venv(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    agent = _agent_with_echo()
+    try:
+        assert _run(agent, "import os; print(list(os.walk('/etc')))").strip() == "[]"
+        assert _run(agent, "import glob; print(glob.glob('/etc/*'))").strip() == "[]"
+    finally:
+        agent.close()
+
+
+def test_reading_and_listing_allowed_inside_the_jail(tmp_path, monkeypatch):
+    _fast_venv(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "a.txt").write_text("x")
+    agent = _agent_with_echo()
+    try:
+        out = _run(agent, "import os; print(sorted(os.listdir('.')))")
+        assert "a.txt" in out
+        out = _run(agent, "import glob; print(glob.glob('*.txt'))")
+        assert "a.txt" in out
     finally:
         agent.close()
 

@@ -84,6 +84,15 @@ WRITE_EVENTS = (
     "shutil.move",
 )
 
+# listing a directory is a read too - confine it to read_roots, or the jail leaks
+# the whole filesystem tree via os.listdir/scandir (and glob/os.walk/pathlib,
+# which build on scandir). the stat family emits no audit event, so existence/size
+# of one known outside path stays probeable - a residual, guardrail not boundary.
+READ_EVENTS = (
+    "os.listdir",
+    "os.scandir",
+)
+
 WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC
 
 in_hook = [False]
@@ -130,6 +139,11 @@ def check(event, args):
             roots = write_roots
         if not under(path, roots):
             raise PermissionError(f"cai sandbox: open outside the working directory: {path!r}")
+        return
+    if event in READ_EVENTS:
+        for arg in args:
+            if under(arg, read_roots): continue
+            raise PermissionError(f"cai sandbox: {event} outside the working directory: {arg!r}")
         return
     if event in WRITE_EVENTS:
         for arg in args:

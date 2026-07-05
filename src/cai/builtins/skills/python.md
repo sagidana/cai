@@ -30,8 +30,10 @@ listing, or fanning out to sub-agents (`call("launch_agent", ...)`).
 
 ## Sandbox
 
-- Writing files is confined to the working directory and the session scratch dir
-  — address scratch as `os.environ['CAI_SCRATCH']`.
+- **Read-only.** You can read files and list directories under the working
+  directory and the session scratch dir (`os.environ['CAI_SCRATCH']`), but you
+  **cannot create, modify, or delete files** — to change a file, `call()` a write
+  tool such as `fs__create_file` / `fs__edit_file` instead.
 - `subprocess`, network, `ctypes` and `cffi` are blocked; a denied op raises
   `PermissionError` (its traceback comes back as the result).
 - The interpreter is a managed virtualenv with the **standard library only** — no

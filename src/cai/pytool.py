@@ -4,10 +4,16 @@ callback into the agent's own tools.
 `python(code, timeout=60)` runs a snippet in a subprocess of a cai-MANAGED
 virtualenv (config.venv_dir(), created lazily, empty by default - stdlib only,
 so its package surface is well-defined and no compiled escape hatch ships in
-it). Before the snippet runs, the child installs a sys.addaudithook jail - the
-same confinement cai.safe_path gives the fs tools: writes only under the working
-directory and the session scratch dir; subprocess/exec/fork, sockets, ctypes and
-cffi blocked. A denied op raises PermissionError, whose traceback is the result.
+it). Before the snippet runs, the child installs a sys.addaudithook jail. The
+tool is READ-ONLY: it may read files and list directories under the working
+directory and the session scratch dir (and read the interpreter's own prefixes,
+so imports work), but every write - create, modify, delete, rename, anywhere,
+cwd and scratch included - is denied, as are subprocess/exec/fork, sockets,
+ctypes and cffi. A denied op raises PermissionError, whose traceback is the
+result. (The snippet's own filesystem is read-only; it can still cause writes
+only by call()ing a write-capable tool, which runs under that tool's own gates.
+One residual: the stat family emits no audit event, so a snippet can test one
+known outside path for existence/size - not its contents, and not list dirs.)
 
 The snippet is also handed a `call(name, **kwargs) -> str` builtin: it names one
 of the agent's OWN selected tools, and the call is dispatched IN the cai process
@@ -44,10 +50,11 @@ PY_TOOL_NAME = "python"
 
 # the child bootstrap: read code from stdin, install the audit-hook jail, wire
 # call() over the two inherited RPC fds, exec the code. stdlib-only so it runs
-# under the managed venv. the jail mirrors cai.safe_path - cwd + CAI_SCRATCH for
-# writes, plus the interpreter prefixes for reads (imports open files there).
-# raw os.read/os.write on the inherited fds emit no audit events, so call()
-# needs no exception carved into the jail.
+# under the managed venv. the jail is READ-ONLY: reads (and directory listings)
+# are confined to cwd + CAI_SCRATCH + the interpreter prefixes (imports open
+# files there); ALL writes - anywhere, cwd and scratch included - are denied, as
+# are subprocess/exec/fork, sockets, ctypes and cffi. raw os.read/os.write on the
+# inherited fds emit no audit events, so call() needs no exception in the jail.
 _BOOTSTRAP = r'''
 import sys
 import os
@@ -55,11 +62,10 @@ import json
 
 code = sys.stdin.read()
 
-write_roots = [os.path.realpath(os.getcwd())]
+read_roots = [os.path.realpath(os.getcwd())]
 scratch = os.environ.get("CAI_SCRATCH", "")
 if scratch:
-    write_roots.append(os.path.realpath(scratch))
-read_roots = list(write_roots)
+    read_roots.append(os.path.realpath(scratch))
 for prefix in (sys.prefix, sys.exec_prefix, sys.base_prefix, sys.base_exec_prefix):
     real = os.path.realpath(prefix)
     if real in read_roots: continue
@@ -98,6 +104,17 @@ WRITE_EVENTS = (
     "os.utime",
     "shutil.rmtree",
     "shutil.move",
+)
+
+# listing a directory's entries is still a read - confine it to read_roots the
+# same way open-for-read is, or the jail leaks the whole filesystem tree
+# (os.listdir/scandir, and glob/os.walk/pathlib.iterdir which build on scandir).
+# note the stat family (os.stat, os.path.exists/getsize) emits NO audit event, so
+# probing one KNOWN path outside the cwd for existence/size cannot be blocked here
+# - a residual leak, consistent with the guardrail (not hard-boundary) posture.
+READ_EVENTS = (
+    "os.listdir",
+    "os.scandir",
 )
 
 WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC
@@ -141,16 +158,18 @@ def check(event, args):
         raise PermissionError(f"cai sandbox: {event} is blocked")
     if event == "open":
         path, mode, flags = args
-        roots = read_roots
         if wants_write(mode, flags):
-            roots = write_roots
-        if not under(path, roots):
+            raise PermissionError(f"cai sandbox: the python tool is read-only - cannot open {path!r} for writing")
+        if not under(path, read_roots):
             raise PermissionError(f"cai sandbox: open outside the working directory: {path!r}")
         return
-    if event in WRITE_EVENTS:
+    if event in READ_EVENTS:
         for arg in args:
-            if under(arg, write_roots): continue
+            if under(arg, read_roots): continue
             raise PermissionError(f"cai sandbox: {event} outside the working directory: {arg!r}")
+        return
+    if event in WRITE_EVENTS:
+        raise PermissionError(f"cai sandbox: the python tool is read-only - {event} is disabled")
 
 
 def hook(event, args):
@@ -356,9 +375,8 @@ def _run_python(agent, code, timeout):
 
 _DOC = """Run a Python snippet in cai's sandbox and return its output (stdout + stderr).
 
-    Each call is a fresh interpreter - variables do NOT carry over between calls;
-    persist state via files. print() what you want to see, e.g.
-    code="print(2 ** 100)".
+    Each call is a fresh interpreter - variables do NOT carry over between calls.
+    print() what you want to see, e.g. code="print(2 ** 100)".
 
     The snippet also gets a call(name, **kwargs) builtin that runs one of YOUR
     OWN currently-available tools and returns its result as a string - the call
@@ -367,10 +385,12 @@ _DOC = """Run a Python snippet in cai's sandbox and return its output (stdout + 
     keeping the intermediate data out of the conversation. Example:
     code="text = call('fs__read_file', file_path='big.log')\\nprint(text.count('ERROR'))".
 
-    Sandbox: writing files is confined to the working directory plus the session
-    scratch dir (os.environ['CAI_SCRATCH']); subprocess, network, ctypes and cffi
-    are blocked; a denied op raises PermissionError. The interpreter is a managed
-    virtualenv with the standard library only.
+    Sandbox: this tool is READ-ONLY. It can read files and list directories under
+    the working directory and the session scratch dir, but cannot create, modify
+    or delete any file (do file changes by call()ing a write tool like
+    fs__create_file instead). subprocess, network, ctypes and cffi are blocked; a
+    denied op raises PermissionError. The interpreter is a managed virtualenv with
+    the standard library only.
 
     Args:
         code:    Python source to execute.
