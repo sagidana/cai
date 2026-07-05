@@ -12,8 +12,8 @@ read_file returns an xxd-style hexdump addressed by byte offsets, create_file
 takes hex/base64 content via encoding=, edit_file replaces byte spans via
 encoding='hex', copy_file is byte-exact anyway, and copy_bytes moves a byte
 range between files (extract, append, patch) without the bytes ever passing
-through the model. search matches binary contents too - hits come back as
-byte offsets with a hexdump - and encoding='hex' finds literal byte sequences.
+through the model. search covers binary files too - a binary hit comes back
+as its byte offset plus a hexdump of the match with context.
 
 Pair them with the ``fs-read-only`` skill for inspection, or the ``fs`` skill
 which adds the mutating tools. Every path is confined via ``cai.safe_path`` to
@@ -86,9 +86,8 @@ def _paginate(lines, start, end, unit):
 
 
 def _rg(cmd):
-    """run an rg command; returns (stdout_lines, error) - exactly one is
-    None. Match text can be arbitrary bytes, so stdout is decoded with
-    replacement rather than trusted to be UTF-8."""
+    """run an rg command; returns (stdout_bytes, error) - exactly one is
+    None. stdout stays bytes because binary match text can be anything."""
     import subprocess
     try:
         result = subprocess.run(cmd, capture_output=True, timeout=60)
@@ -96,21 +95,38 @@ def _rg(cmd):
         return None, "Error: ripgrep (rg) is not installed or not on PATH."
     except subprocess.TimeoutExpired:
         return None, "Error: search timed out"
-    stderr = result.stderr.decode("utf-8", errors="replace").strip()
     if result.returncode not in (0, 1):
+        stderr = result.stderr.decode("utf-8", errors="replace").strip()
         return None, f"Error: {stderr or 'rg exited with code ' + str(result.returncode)}"
-    output = result.stdout.decode("utf-8", errors="replace").strip()
-    if not output:
-        return [], None
-    return output.split("\n"), None
+    return result.stdout, None
+
+
+def _binary_match_lines(path, offset, length):
+    """render one binary match: a '<file>:<offset>: <n>-byte match' header,
+    then an xxd-style hexdump of the match with 32 bytes of context either
+    side (aligned to 16 so offsets line up with read_file pages)."""
+    start = offset - 32
+    if start < 0:
+        start = 0
+    start = start - (start % 16)
+    end = offset + length + 32
+    try:
+        with open(path, "rb") as f:
+            f.seek(start)
+            data = f.read(end - start)
+    except (IOError, OSError):
+        return []
+    lines = [f"{path}:{offset}: {length}-byte match"]
+    lines += _hexdump(data, start).split("\n")
+    lines.append("")
+    return lines
 
 
 def _search_binary(pattern, safe, file_glob, binary_only):
-    """rg pass over binary content: 'rg -a -o -b' reports the byte offset of
-    each match as '<path>NUL<offset>:<match>'; the raw match bytes are
-    discarded and the offset re-read from the file as a 16-byte hexdump.
-    Returns (lines, error) - exactly one is None."""
-    cmd = ["rg", "--text", "--multiline", "--only-matching", "--byte-offset",
+    """rg pass over binary content: 'rg -a -o -b' reports each match as
+    '<path>NUL<offset>:<match bytes>', parsed as bytes so the match length
+    is exact. Returns (lines, error) - exactly one is None."""
+    cmd = ["rg", "--text", "--only-matching", "--byte-offset",
            "--no-line-number", "--with-filename", "--null"]
     if file_glob:
         cmd += ["--glob", file_glob]
@@ -119,21 +135,15 @@ def _search_binary(pattern, safe, file_glob, binary_only):
     if err:
         return None, err
     out = []
-    last_key = None
     binary_cache = {}
-    for line in raw:
-        # a multi-line match repeats its 'path NUL offset:' prefix on every
-        # line of the match; lines without the prefix shape are match noise.
-        if "\x00" not in line:
+    for line in raw.split(b"\n"):
+        if b"\x00" not in line:
             continue
-        path, _, rest = line.partition("\x00")
-        offset, sep, _ = rest.partition(":")
+        path, _, rest = line.partition(b"\x00")
+        offset, sep, match = rest.partition(b":")
         if not sep or not offset.isdigit():
             continue
-        key = (path, offset)
-        if key == last_key:
-            continue
-        last_key = key
+        path = path.decode("utf-8", errors="replace")
         if binary_only:
             known = binary_cache.get(path)
             if known is None:
@@ -144,35 +154,28 @@ def _search_binary(pattern, safe, file_glob, binary_only):
                 binary_cache[path] = known
             if not known:
                 continue
-        offset = int(offset)
-        try:
-            with open(path, "rb") as f:
-                f.seek(offset)
-                chunk = f.read(16)
-        except (IOError, OSError):
-            continue
-        if not chunk:
-            continue
-        out.append(f"{path}:{offset}: {_hexline(chunk)}")
+        out += _binary_match_lines(path, int(offset), len(match))
     return out, None
 
 
 @mcp.tool()
-def search(pattern: str, path: str = ".", file_glob: str = "",
-           encoding: str = "text",
-           start: Optional[int] = None, end: Optional[int] = None) -> str:
-    """Regex-search file CONTENTS, text and binary alike (to find files by
-    NAME use list_files, not this). Matches in text files are vimgrep lines
-    <file>:<line>:<col>:<text>; matches in binary files are
-    <file>:<byte-offset>: <hexdump of the 16 bytes there>.
+def search(pattern: str,
+           path: str = ".",
+           file_glob: str = "",
+           start: Optional[int] = None,
+           end: Optional[int] = None) -> str:
+    """Regex-search file CONTENTS - every file, text and binary alike (to
+    find files by NAME use list_files, not this). A match in a text file is
+    a vimgrep line <file>:<line>:<col>:<text>; a match in a binary file is
+    a '<file>:<byte-offset>: <n>-byte match' line followed by an xxd-style
+    hexdump of the match with 32 bytes of context either side.
 
     Args:
-        pattern:   Regex (ripgrep syntax; applied to raw bytes in binary
-                   files). With encoding='hex': a literal byte sequence
-                   instead, e.g. '7f45 4c46' (whitespace ignored).
+        pattern:   Regex (ripgrep syntax). In binary files it matches raw
+                   bytes: e.g. '\\x7fELF', or '(?-u:\\xde\\xad\\xbe\\xef)'
+                   for byte sequences that aren't valid UTF-8.
         path:      Dir or file to search (default ".").
         file_glob: Optional glob, e.g. "*.py".
-        encoding:  'text' (default) or 'hex' (find literal bytes in any file).
         start/end: 1-based result-line window (default 1..100; paginate
                    with start=101 etc, or ask for a larger range).
     """
@@ -182,26 +185,6 @@ def search(pattern: str, path: str = ".", file_glob: str = "",
         return str(e)
     if not pattern:
         return "Error: empty pattern"
-
-    if encoding == "hex":
-        try:
-            needle = bytes.fromhex(pattern)
-        except ValueError as e:
-            return f"Error: invalid hex pattern: {e}"
-        if not needle:
-            return "Error: empty hex pattern"
-        escaped = ""
-        for byte in needle:
-            escaped += f"\\x{byte:02x}"
-        # (?-u:...) turns unicode off so \xNN escapes match raw bytes.
-        lines, err = _search_binary(f"(?-u:{escaped})", safe, file_glob, binary_only=False)
-        if err:
-            return err
-        if not lines:
-            return "No matches found."
-        return _paginate(lines, start, end, "matches")
-    if encoding != "text":
-        return f"Error: unknown encoding {encoding!r} (use 'text' or 'hex')"
 
     lines = []
     single_binary = False
@@ -216,19 +199,24 @@ def search(pattern: str, path: str = ".", file_glob: str = "",
             cmd += ["--glob", file_glob]
         # '--' ends options so a pattern/path starting with '-' is never parsed as a flag.
         cmd += ["--", pattern, safe]
-        lines, err = _rg(cmd)
+        raw, err = _rg(cmd)
         if err:
             return err
+        output = raw.decode("utf-8", errors="replace").strip()
+        if output:
+            lines = output.split("\n")
 
     # second pass for the binary files the vimgrep pass skipped.
     bin_lines, err = _search_binary(pattern, safe, file_glob, binary_only=not single_binary)
     if err:
         return err
     lines += bin_lines
+    if lines and lines[-1] == "":
+        lines.pop()
 
     if not lines:
         return "No matches found."
-    return _paginate(lines, start, end, "matches")
+    return _paginate(lines, start, end, "lines")
 
 
 @mcp.tool()

@@ -275,10 +275,19 @@ def test_search_text_still_works():
 def test_search_finds_a_string_inside_a_binary_file():
     _write("app.bin", b"\x00" * 32 + b"needle" + b"\x00" * 32)
     out = fs.search("needle")
-    line = out.split("\n")[0]
-    assert "app.bin:32: " in line
-    assert "6e65 6564 6c65" in line
-    assert "needle" in line
+    assert "app.bin:32: 6-byte match" in out
+    assert "6e65 6564 6c65" in out
+    assert "needle" in out
+
+
+def test_search_binary_match_shows_32_bytes_of_context_each_side():
+    _write("app.bin", b"\x00" * 100 + b"MAGIC" + b"\x00" * 100)
+    out = fs.search("MAGIC")
+    dump = out.split("\n")
+    assert dump[0].endswith("app.bin:100: 5-byte match")
+    # context starts at 100-32=68 aligned down to 64, ends past 100+5+32=137
+    assert dump[1].startswith("00000040:")
+    assert dump[-1].startswith("00000080:")
 
 
 def test_search_reports_text_and_binary_matches_together():
@@ -287,7 +296,7 @@ def test_search_reports_text_and_binary_matches_together():
     _write("b.bin", b"\x00needle")
     out = fs.search("needle")
     assert "a.txt:1:1:needle" in out
-    assert "b.bin:1: " in out
+    assert "b.bin:1: 6-byte match" in out
 
 
 def test_search_binary_offset_plugs_into_read_file():
@@ -302,29 +311,14 @@ def test_search_binary_offset_plugs_into_read_file():
 def test_search_regex_matches_bytes_in_binary():
     _write("app.bin", b"\x00abc123xyz")
     out = fs.search("abc[0-9]+", path="app.bin")
-    assert "app.bin:1: " in out
+    assert "app.bin:1: 6-byte match" in out
 
 
-def test_search_hex_finds_a_byte_sequence():
+def test_search_byte_escapes_match_raw_bytes():
     _write("app.bin", ELF)
-    out = fs.search("7f45 4c46", encoding="hex")
-    assert "app.bin:0: " in out
+    out = fs.search(r"(?-u:\x7f\x45\x4c\x46)")
+    assert "app.bin:0: 4-byte match" in out
     assert "7f45 4c46" in out
-
-
-def test_search_hex_searches_text_files_too():
-    with open("a.txt", "w") as f:
-        f.write("xhix\n")
-    out = fs.search("6869", encoding="hex")  # "hi"
-    assert "a.txt:1: " in out
-
-
-def test_search_hex_needle_may_span_a_newline_byte():
-    _write("ml.bin", b"\x00AB\nCD")
-    out = fs.search("42 0a 43", encoding="hex")  # "B\nC"
-    assert "ml.bin:2: " in out
-    # rg -U repeats the prefix on each line of the match; reported once
-    assert out.count("ml.bin:2:") == 1
 
 
 def test_search_file_glob_applies_to_binary_scan():
@@ -337,7 +331,8 @@ def test_search_file_glob_applies_to_binary_scan():
 
 def test_search_errors():
     assert fs.search("") == "Error: empty pattern"
-    assert fs.search("zz", encoding="hex").startswith("Error: invalid hex")
-    assert fs.search("41", encoding="nope").startswith("Error: unknown encoding")
+    assert fs.search("[unclosed").startswith("Error:")
+    # line-oriented like text search: a pattern matching \n is rejected
+    assert fs.search(r"(?-u:\x42\x0a\x43)").startswith("Error:")
     _write("a.bin", b"\x00\x01")
-    assert fs.search("77", encoding="hex") == "No matches found."
+    assert fs.search("nothing-here") == "No matches found."
