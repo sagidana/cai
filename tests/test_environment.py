@@ -286,12 +286,12 @@ def test_importing_agent_does_not_pull_the_serving_stack():
     assert proc.returncode == 0
 
 
-def test_agent_tools_default_is_the_subagent_tools():
+def test_agent_tools_default_is_the_subagent_and_python_tools():
     tools = Environment().agent_tools(object())
     names = []
     for tool in tools:
         names.append(tool.__name__)
-    assert names == ["launch_agent", "wait_agent", "list_agents", "kill_agent"]
+    assert names == ["launch_agent", "wait_agent", "list_agents", "kill_agent", "python"]
 
 
 def test_env_without_agent_tools_builds_bare_agents():

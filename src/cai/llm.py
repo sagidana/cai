@@ -28,7 +28,8 @@ import logging
 import threading
 
 from cai.events import Event, EventType
-from cai.hooks import HookContext, HookEvent, HooksRegistry, ToolCall
+from cai.hooks import HookContext, HookEvent, HooksRegistry, RunGate, ToolCall
+from cai.hooks import reset_gate, set_gate
 from cai.ui import NULL_UI
 
 
@@ -268,68 +269,86 @@ def _handle_tool_calls(calls,
         assistant_msg['_reasoning'] = reasoning
     messages.append(assistant_msg)
 
-    for call in calls:
-        call_id = call['id']
-        name = call['name']
-        arguments = call['arguments']
-        args = call['args']
+    # publish the run gate for the duration of the dispatch loop, so an in-process
+    # tool that calls another tool on the model's behalf (the python tool) routes
+    # through the same before/after_tool_call hooks - a gate vetoes an inner call
+    # too. the loop below still fires its own hooks inline (its event ordering,
+    # message append and messages_mutated, is unchanged); the gate is only read by
+    # tools that dispatch during their own call.
+    gate = RunGate(hooks=hooks,
+                   dispatch=tools_dispatch,
+                   model=model,
+                   config=config,
+                   ui=ui,
+                   messages=messages,
+                   usage=usage,
+                   hooks_data=hooks_data)
+    token = set_gate(gate)
+    try:
+        for call in calls:
+            call_id = call['id']
+            name = call['name']
+            arguments = call['arguments']
+            args = call['args']
 
-        yield Event(type=EventType.TOOL_CALL, tool_name=name, tool_args=args, tool_call_id=call_id)
+            yield Event(type=EventType.TOOL_CALL, tool_name=name, tool_args=args, tool_call_id=call_id)
 
-        tool_call = ToolCall(name=name, arguments=arguments, args=args, id=call_id)
-        hook_ctx = HookContext(event=HookEvent.BEFORE_TOOL_CALL,
-                               messages=messages,
-                               model=model,
-                               config=config,
-                               ui=ui,
-                               usage=usage,
-                               tool_call=tool_call,
-                               data=_merge_data(hooks_data))
-        vetoed = False
-        for response in hooks.fire(HookEvent.BEFORE_TOOL_CALL, hook_ctx):
-            if response is False:
-                vetoed = True
+            tool_call = ToolCall(name=name, arguments=arguments, args=args, id=call_id)
+            hook_ctx = HookContext(event=HookEvent.BEFORE_TOOL_CALL,
+                                   messages=messages,
+                                   model=model,
+                                   config=config,
+                                   ui=ui,
+                                   usage=usage,
+                                   tool_call=tool_call,
+                                   data=_merge_data(hooks_data))
+            vetoed = False
+            for response in hooks.fire(HookEvent.BEFORE_TOOL_CALL, hook_ctx):
+                if response is False:
+                    vetoed = True
 
-        if vetoed:
-            result = f"Error: tool '{name}' was aborted by a before_tool_call hook"
-            log.info("tool call: %s vetoed by hook", name)
-        elif not call['valid']:
-            result = f"Error: arguments for tool '{name}' were not valid JSON: {arguments}"
-            log.info("tool call: %s had unparseable arguments", name)
-        else:
-            result = _dispatch_tool(tools_dispatch, name, args)
+            if vetoed:
+                result = f"Error: tool '{name}' was aborted by a before_tool_call hook"
+                log.info("tool call: %s vetoed by hook", name)
+            elif not call['valid']:
+                result = f"Error: arguments for tool '{name}' were not valid JSON: {arguments}"
+                log.info("tool call: %s had unparseable arguments", name)
+            else:
+                result = _dispatch_tool(tools_dispatch, name, args)
 
-        is_error = result.startswith('Error:')
-        yield Event(type=EventType.TOOL_RESULT,
-                    tool_name=name,
-                    tool_result=result,
-                    tool_call_id=call_id,
-                    is_error=is_error)
+            is_error = result.startswith('Error:')
+            yield Event(type=EventType.TOOL_RESULT,
+                        tool_name=name,
+                        tool_result=result,
+                        tool_call_id=call_id,
+                        is_error=is_error)
 
-        tool_msg = {}
-        tool_msg['role'] = 'tool'
-        tool_msg['tool_call_id'] = call_id
-        tool_msg['content'] = result
-        messages.append(tool_msg)
+            tool_msg = {}
+            tool_msg['role'] = 'tool'
+            tool_msg['tool_call_id'] = call_id
+            tool_msg['content'] = result
+            messages.append(tool_msg)
 
-        mutated_ctx = HookContext(event=HookEvent.MESSAGES_MUTATED,
-                                  messages=messages,
-                                  model=model,
-                                  config=config,
-                                  ui=ui,
-                                  data=_merge_data(hooks_data, name=name, id=call_id))
-        hooks.fire(HookEvent.MESSAGES_MUTATED, mutated_ctx)
+            mutated_ctx = HookContext(event=HookEvent.MESSAGES_MUTATED,
+                                      messages=messages,
+                                      model=model,
+                                      config=config,
+                                      ui=ui,
+                                      data=_merge_data(hooks_data, name=name, id=call_id))
+            hooks.fire(HookEvent.MESSAGES_MUTATED, mutated_ctx)
 
-        after_ctx = HookContext(event=HookEvent.AFTER_TOOL_CALL,
-                                messages=messages,
-                                model=model,
-                                config=config,
-                                ui=ui,
-                                usage=usage,
-                                tool_call=tool_call,
-                                content=result,
-                                data=_merge_data(hooks_data))
-        hooks.fire(HookEvent.AFTER_TOOL_CALL, after_ctx)
+            after_ctx = HookContext(event=HookEvent.AFTER_TOOL_CALL,
+                                    messages=messages,
+                                    model=model,
+                                    config=config,
+                                    ui=ui,
+                                    usage=usage,
+                                    tool_call=tool_call,
+                                    content=result,
+                                    data=_merge_data(hooks_data))
+            hooks.fire(HookEvent.AFTER_TOOL_CALL, after_ctx)
+    finally:
+        reset_gate(token)
 
 
 def call_llm(messages,

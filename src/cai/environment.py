@@ -199,6 +199,13 @@ def _subagent_tools(agent):
     return subagent_tools(agent)
 
 
+def _python_tools(agent):
+    """the python tool bound to `agent`; deferred import, same reason
+    as _subagent_tools - so an env never pulls the tool's subprocess machinery."""
+    from cai.pytool import python_tools
+    return python_tools(agent)
+
+
 class Environment:
     """one install catalogue: extensions, function tools, declared MCP servers,
     hooks, commands, and the live Settings. see the module docstring for how
@@ -219,7 +226,7 @@ class Environment:
         # factories called with each new Agent to produce tools bound to it -
         # registered on the agent (unselected) until a skill or the user
         # selects them. default: the sub-agent tools.
-        self._agent_tools = [_subagent_tools]
+        self._agent_tools = [_subagent_tools, _python_tools]
         # the bundle load() is importing right now: an extension name, 'user'
         # for the top-level init.py, or None outside a load. register_tool
         # reads it to namespace extension tools.

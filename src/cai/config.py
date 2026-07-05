@@ -44,6 +44,20 @@ def api_key_path():
     return os.path.join(config_dir(), "api_key")
 
 
+def venv_dir():
+    """the managed virtualenv the python tool runs snippets under - separate
+    from cai's own interpreter so its package surface is well-defined (empty by
+    default). materialized lazily by cai.pytool, not here."""
+    return os.path.join(config_dir(), "venv")
+
+
+def venv_python():
+    """the python interpreter inside the managed venv."""
+    if os.name == "nt":
+        return os.path.join(venv_dir(), "Scripts", "python.exe")
+    return os.path.join(venv_dir(), "bin", "python")
+
+
 def load_config():
     """read ~/.config/cai/config.json into a Config. it must exist and must
     define every required field."""

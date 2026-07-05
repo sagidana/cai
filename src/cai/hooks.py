@@ -13,7 +13,9 @@ carries for the *_tool_call events. ctx.ui is the live frontend during a run
 apply to the firing event are None."""
 from __future__ import annotations
 
+import json
 import logging
+from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import Enum
 from typing import Mapping, Optional
@@ -118,6 +120,83 @@ class HooksRegistry:
                 log.exception("hook %r for %s raised",
                               getattr(fn, '__name__', repr(fn)), event)
         return responses
+
+
+# the run-scoped state an in-process tool needs to dispatch another tool the way
+# the loop does. a ContextVar - not a global - so two agents dispatching on two
+# threads stay isolated, matching paths._scratch_provider.
+_run_gate = ContextVar("cai_run_gate", default=None)
+
+
+@dataclass(frozen=True)
+class RunGate:
+    """what call_llm publishes around its dispatch loop so an in-process tool can
+    call another tool on the agent's behalf and still be gated. a tool that
+    dispatches for the model (the python tool's call()) reads it with
+    current_gate() and routes through gated_dispatch, so an inner call fires the
+    same before/after_tool_call hooks a top-level call does - a gate can veto it -
+    without the inner result ever entering the conversation."""
+    hooks: HooksRegistry
+    dispatch: object   # callable(name, args) -> str, the run's tools_dispatch
+    model: str
+    config: Optional[Mapping]
+    ui: UI
+    messages: list
+    usage: Optional[dict]
+    hooks_data: Optional[dict]
+
+
+def set_gate(gate):
+    """publish the run gate for the current context; returns a reset token."""
+    return _run_gate.set(gate)
+
+
+def reset_gate(token):
+    _run_gate.reset(token)
+
+
+def current_gate():
+    """the run gate for the current context, or None outside a run loop."""
+    return _run_gate.get()
+
+
+def gated_dispatch(gate, name, args, call_id="tool"):
+    """dispatch one tool through the before/after_tool_call hooks: fire before (a
+    False response vetoes, returning the same Error string the loop uses),
+    dispatch, fire after, return the result. unlike the loop it does NOT append a
+    tool message or fire messages_mutated - an inner call's result goes back to
+    its caller, never into the conversation."""
+    tool_call = ToolCall(name=name, arguments=json.dumps(args), args=args, id=call_id)
+    data = dict(gate.hooks_data or {})
+    before = HookContext(event=HookEvent.BEFORE_TOOL_CALL,
+                         messages=gate.messages,
+                         model=gate.model,
+                         config=gate.config,
+                         ui=gate.ui,
+                         usage=gate.usage,
+                         tool_call=tool_call,
+                         data=data)
+    vetoed = False
+    for response in gate.hooks.fire(HookEvent.BEFORE_TOOL_CALL, before):
+        if response is False:
+            vetoed = True
+    if vetoed:
+        return f"Error: tool '{name}' was aborted by a before_tool_call hook"
+    result = gate.dispatch(name, args)
+    if result is None:
+        result = ""
+    result = str(result)
+    after = HookContext(event=HookEvent.AFTER_TOOL_CALL,
+                        messages=gate.messages,
+                        model=gate.model,
+                        config=gate.config,
+                        ui=gate.ui,
+                        usage=gate.usage,
+                        tool_call=tool_call,
+                        content=result,
+                        data=data)
+    gate.hooks.fire(HookEvent.AFTER_TOOL_CALL, after)
+    return result
 
 
 def hook(event):

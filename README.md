@@ -119,6 +119,17 @@ conversation plus the settings needed to resume it.
 - The `subagents` skill gives the agent launch / wait / list / kill tools;
   each child runs on its own unix socket with a reduce-only subset of the
   parent's tools.
+- The `python` skill gives the agent a `python(code, timeout=60)` tool that
+  runs a snippet in a subprocess of a cai-managed virtualenv
+  (`~/.config/cai/venv/`, created on first use, empty by default — stdlib only).
+  A `sys.addaudithook` jail confines it the way `safe_path` confines the fs
+  tools: writes stay under the working directory + scratch, and
+  subprocess/network/`ctypes`/`cffi` are blocked. The snippet also gets a
+  `call(name, **kwargs)` builtin that dispatches the agent's *own* selected
+  tools in-process — through the same `before_tool_call` gates — so a script can
+  read a large tool result, reduce it in Python, and return only the answer, the
+  intermediate data never entering model context. Point it at a different base
+  interpreter with the optional `python_base` key in `config.json`.
 
 ## Extensions
 
