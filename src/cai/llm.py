@@ -355,7 +355,10 @@ def call_llm(messages,
     interrupt  - a threading.Event; when set the loop winds down at the next
                  safe boundary and returns the partial text. None = no kill.
     steer      - callable() -> list of pending steering texts; drained at each
-                 turn boundary and folded in as user turns. None = no steering.
+                 turn boundary and folded in as user turns. a would-be final
+                 answer with steers pending is not final: they fold in and the
+                 loop re-enters, so a steer lands at the closest boundary
+                 instead of waiting for the next run. None = no steering.
     Returns the final assistant text (as the generator's return value).
 
     a model call that fails for good raises cai.api.ApiError (the api layer
@@ -414,9 +417,26 @@ def call_llm(messages,
 
         if not calls:
             # no usable tool call: either a plain answer, or the model sent only
-            # malformed calls that normalization dropped. treat the turn as the
-            # final answer so a bad batch ends the run cleanly instead of
-            # re-looping on identical state until max_steps.
+            # malformed calls that normalization dropped. before treating the
+            # turn as final, drain the steer queue one last time: a steer that
+            # landed while this answer streamed would otherwise sit queued until
+            # the next run (arriving after that run's prompt - reversed order).
+            # a pending steer means the answer is not final: append it, fold the
+            # steered texts in as user turns, and re-enter the loop. best
+            # effort - a steer pushed after this drain waits for the next run.
+            if steer is not None:
+                steered = steer()
+                if steered:
+                    assistant_msg = {}
+                    assistant_msg['role'] = 'assistant'
+                    assistant_msg['content'] = content
+                    if reasoning:
+                        assistant_msg['_reasoning'] = reasoning
+                    messages.append(assistant_msg)
+                    for text in steered:
+                        messages.append({"role": "user", "content": text})
+                        yield Event(type=EventType.USER, text=text)
+                    continue
             # let on_final_response hooks rewrite it, append it to the transcript,
             # fire after_run, and hand it back.
             final_ctx = HookContext(event=HookEvent.ON_FINAL_RESPONSE,

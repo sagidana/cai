@@ -514,9 +514,11 @@ class Agent:
           so the caller (a serving WiredAgent) can drive the turn its own way -
           the text stays queued for whichever run comes next.
 
-        a text pushed after a run's final drain point stays queued and is
-        delivered at the next run's first turn boundary. safe to call from any
-        thread."""
+        call_llm drains once more before accepting a final answer and re-enters
+        its loop on anything pending, so a steer pushed any time before the run
+        ends is delivered by that run. best effort: a text pushed in the sliver
+        between that last drain and the run winding down stays queued for the
+        next run's first turn boundary. safe to call from any thread."""
         self._steer.push(text)
         if self._run_lock.locked():
             return True

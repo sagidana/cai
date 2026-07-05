@@ -136,6 +136,43 @@ def test_call_llm_folds_steer_in_at_turn_boundary():
     assert messages[3] == {"role": "user", "content": "also consider Y"}
 
 
+def test_call_llm_reenters_loop_when_steer_lands_during_final_answer():
+    # a steer that arrives while the final answer streams is not left queued
+    # for the next run: call_llm drains once more before accepting the answer
+    # as final, folds the text in as a user turn, and re-enters the loop.
+    pending = []
+    def steer():
+        out = list(pending)
+        pending.clear()
+        return out
+
+    class SteerDuringFinalApi:
+        def __init__(self):
+            self.calls = 0
+        def chat(self, messages, model, **kwargs):
+            self.calls += 1
+            n = self.calls
+            def gen():
+                if n == 1:
+                    pending.append("one more thing")   # lands mid-answer
+                    yield ("first", None, None, {})
+                else:
+                    yield ("second", None, None, {})
+            return gen()
+
+    api = SteerDuringFinalApi()
+    messages = [{"role": "user", "content": "do X"}]
+    events, text = drain(call_llm(messages, "m", api, steer=steer))
+    assert text == "second"
+    assert api.calls == 2
+    roles = []
+    for m in messages:
+        roles.append(m["role"])
+    assert roles == ["user", "assistant", "user", "assistant"]
+    assert messages[1] == {"role": "assistant", "content": "first"}
+    assert messages[2] == {"role": "user", "content": "one more thing"}
+
+
 def test_call_llm_without_steer_is_unaffected():
     class Api:
         def chat(self, messages, model, **kwargs):
@@ -205,6 +242,49 @@ def test_agent_steer_run_on_idle_false_queues_without_running():
     assert agent.messages == []                  # nothing ran
     assert agent.steer_pending() is True
     assert agent._steer.drain() == ["x"]         # queued for the next run
+
+
+def test_agent_steer_from_another_thread_during_final_answer():
+    # the SDK scenario: one thread drives the run, another steers while the
+    # model is producing what would be the final answer. the run itself must
+    # deliver the steer (as a user turn, in order) instead of leaving it
+    # queued for the next run.
+    started = threading.Event()
+    release = threading.Event()
+
+    class HeldFinalApi:
+        def __init__(self):
+            self.calls = 0
+        def chat(self, messages, model, **kwargs):
+            self.calls += 1
+            n = self.calls
+            def gen():
+                if n == 1:
+                    started.set()
+                    release.wait(2)           # hold the answer until the steer lands
+                    yield ("first", None, None, {})
+                else:
+                    yield ("second", None, None, {})
+            return gen()
+
+    agent = bare_agent(ToolsRegistry.for_tools([]), HeldFinalApi())
+    run = agent.run("do X")
+    thread = threading.Thread(target=run.wait, daemon=True)
+    thread.start()
+    assert started.wait(2)
+    assert agent.steer("one more thing") is True   # run in flight: it delivers
+    release.set()
+    thread.join(2)
+
+    assert run.text == "second"
+    assert agent.api.calls == 2
+    seen = []
+    for m in agent.messages:
+        seen.append((m["role"], m.get("content")))
+    assert seen == [("user", "do X"),
+                    ("assistant", "first"),
+                    ("user", "one more thing"),
+                    ("assistant", "second")]
 
 
 def test_agent_steer_while_running_queues_and_returns_true():
