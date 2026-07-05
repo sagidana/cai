@@ -34,7 +34,14 @@ Agent and a path instead of wiring up the listener, accept, and channels.
 
 One run at a time (the single conversation is driven by one worker thread), many
 clients per agent in a broadcast. The agent (and its conversation) persists across
-(re)connects. The Agent itself is never modified to make this work."""
+(re)connects. The Agent itself is never modified to make this work.
+
+The one op that changes WHICH agent is served is 'clone': it swaps the wrapped
+agent for a fresh branch of itself (Agent.clone) behind the same socket, closing
+the retiree - the served endpoint outlives any one agent, but there is only ever
+one agent behind it. The op's optional value is an overrides dict of the branch's
+nameable state (model, system_prompt, messages, tools, skills, ...), so 'branch a
+copy' and 'replace with fresh' are the same op with different specs."""
 from __future__ import annotations
 
 import itertools
@@ -61,6 +68,7 @@ log = logging.getLogger("cai")
 # served even while a turn is running.
 _DEFERRED_OPS = ("set_messages",
                  "load",
+                 "clone",
                  "set_selected_tools",
                  "set_selected_skills",
                  "set_system_prompt_base")
@@ -541,6 +549,28 @@ class WiredAgent:
             value["system_prompt_base"] = agent.system_prompt_base
             value["pending_steer"] = agent.steer_count()
             return True, value, None
+        if op == "clone":
+            # swap the served agent for a fresh branch of itself: same socket,
+            # same wires, same WireUI - every connected client now observes the
+            # clone, so nothing migrates on the client side. value is an
+            # optional overrides dict (Agent.clone's nameable state - model,
+            # system_prompt, messages, ...) so a client can shape what the
+            # branch is in the same op; an unknown key fails the op and leaves
+            # the incumbent serving. the retired agent is closed here (deferred
+            # op: this runs on the worker, serial with turns), after handing
+            # over the session scratch it may own - the cloned conversation can
+            # reference paths inside it, so it must outlive the retiree and die
+            # with the branch instead.
+            branch = agent.clone(overrides=value)
+            branch.set_ui(self.ui)
+            if agent._scratch_owned:
+                agent._scratch_owned = False
+                branch._scratch_owned = True
+            self.agent = branch
+            agent.close()
+            info = {}
+            info["name"] = branch.name
+            return True, info, None
         if op == "save":
             # value is the target path, or None for the agent's own <name>.flow;
             # the path written comes back to the client. answered inline, even
@@ -571,9 +601,14 @@ class UnixWiredAgent:
         if path is None:
             AgentsRegistry.ensure_dir()
             path = AgentsRegistry.sock_path(agent.name)
-        self.agent = agent
         self.server = UnixSocketServer(path, backlog=backlog)
         self.wired = WiredAgent(agent)
+
+    @property
+    def agent(self):
+        """the agent currently served - read through to the hub, since the
+        'clone' op swaps it for a branch mid-serve."""
+        return self.wired.agent
 
     @property
     def path(self):

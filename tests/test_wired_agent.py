@@ -380,6 +380,168 @@ def test_control_unknown_op_errs(serve):
 
 
 # --------------------------------------------------------------------------
+# the clone control op: swap the served agent for a branch of itself
+# --------------------------------------------------------------------------
+
+def wired_pair(agent):
+    """a WiredAgent served on a background thread + the client-side Wire, with
+    the hub exposed so a test can inspect the (possibly swapped) agent."""
+    server_sock, client_sock = socket.socketpair()
+    wired = WiredAgent(agent, server_sock)
+    thread = threading.Thread(target=wired.serve, daemon=True)
+    thread.start()
+    return wired, Wire(client_sock)
+
+
+def test_clone_op_swaps_in_a_branch_carrying_the_conversation():
+    agent = make_agent(api=FakeApi(chunks=["first"]))
+    wired, wire = wired_pair(agent)
+    run_turn(wire, "one")
+
+    ok, info, error = wire.control("clone")
+    assert ok is True
+    assert error is None
+    assert info["name"] != agent.name          # a fresh identity
+    assert wired.agent is not agent            # the hub serves the branch now
+    assert wired.agent.name == info["name"]
+
+    ok, messages, error = wire.control("get_messages")
+    assert messages[0]["content"] == "one"     # conversation carried over
+    assert messages[-1]["content"] == "first"
+    wired.shutdown()
+
+
+def test_turn_after_clone_lands_on_the_branch_not_the_checkpoint():
+    agent = make_agent(api=FakeApi(chunks=["first"]))
+    wired, wire = wired_pair(agent)
+    run_turn(wire, "one")
+    frozen = len(agent.messages)
+
+    wire.control("clone")
+    wired.agent.api = FakeApi(chunks=["second"])
+    run_turn(wire, "two")
+
+    assert len(agent.messages) == frozen       # the checkpoint never moved
+    assert wired.agent.messages[-1]["content"] == "second"
+    wired.shutdown()
+
+
+def test_clone_op_hands_the_owned_scratch_to_the_branch():
+    agent = make_agent()
+    wired, wire = wired_pair(agent)
+    path = agent.scratch()                     # created -> owned by the original
+
+    ok, _info, error = wire.control("clone")
+    assert ok is True
+    branch = wired.agent
+    assert branch._scratch == path             # same dir, referenced paths survive
+    assert branch._scratch_owned is True       # ownership rode the swap
+    assert agent._scratch_owned is False
+    assert os.path.isdir(path)                 # closing the retiree spared it
+    branch.close()
+    assert not os.path.isdir(path)             # the branch's close deletes it
+    wired.shutdown()
+
+
+def test_clone_op_defers_until_the_turn_ends():
+    started = threading.Event()
+    release = threading.Event()
+
+    class BlockApi:
+        def chat(self, messages, model, **kwargs):
+            started.set()
+            def gen():
+                release.wait(2)
+                yield ("done", None, None, {})
+            return gen()
+
+    agent = make_agent(api=BlockApi())
+    wired, wire = wired_pair(agent)
+    wire.send_submit("hi")
+    assert started.wait(2)
+    wire.send_control("clone")
+    release.set()
+
+    kinds = []
+    answered = False
+    while not answered:
+        for msg in wire.recv():
+            kinds.append(msg["type"])
+            if msg["type"] != Wire.CONTROL_RESULT: continue
+            assert msg["ok"] is True
+            answered = True
+    assert kinds.index(Wire.RESULT) < kinds.index(Wire.CONTROL_RESULT)
+    assert wired.agent is not agent            # swapped only after the turn
+    assert agent.messages[-1]["content"] == "done"
+    wired.shutdown()
+
+
+def test_agent_clone_overrides_take_and_absent_keys_inherit():
+    agent = make_agent()
+    agent._system_prompt = "base"
+    agent.reasoning_effort = "high"
+    agent.messages = [{"role": "user", "content": "old"}]
+    seed = [{"role": "user", "content": "seed"}]
+    overrides = {}
+    overrides["messages"] = seed
+    overrides["model"] = "m2"
+    overrides["system_prompt"] = None          # present None = explicit clear
+    branch = agent.clone(overrides=overrides)
+    assert branch.model == "m2"
+    assert branch._system_prompt is None
+    assert branch.get_messages() == seed
+    assert branch.reasoning_effort == "high"   # absent key inherits
+    assert agent.messages[-1]["content"] == "old"
+
+
+def test_agent_clone_unknown_override_raises():
+    agent = make_agent()
+    with pytest.raises(ValueError):
+        agent.clone(overrides={"frobnicate": 1})
+
+
+def test_clone_op_spec_shapes_the_branch():
+    agent = make_agent(api=FakeApi(chunks=["first"]))
+    wired, wire = wired_pair(agent)
+    run_turn(wire, "one")
+
+    seed = [{"role": "user", "content": "[summary]"}]
+    spec = {}
+    spec["messages"] = seed
+    spec["model"] = "m2"
+    ok, info, error = wire.control("clone", spec)
+    assert ok is True
+    assert wired.agent.model == "m2"
+    ok, messages, error = wire.control("get_messages")
+    assert messages == seed                    # replaced, not carried over
+    wired.shutdown()
+
+
+def test_clone_op_rejects_an_unknown_spec_key_and_keeps_the_incumbent():
+    agent = make_agent()
+    wired, wire = wired_pair(agent)
+    ok, _value, error = wire.control("clone", {"frobnicate": 1})
+    assert ok is False
+    assert "frobnicate" in error
+    assert wired.agent is agent                # no swap on a bad spec
+    wired.shutdown()
+
+
+def test_agent_clone_borrows_scratch_and_carries_the_result_cap():
+    agent = make_agent()
+    agent.tool_result_max_chars = 9
+    path = agent.scratch()
+    branch = agent.clone()
+    assert branch.tool_result_max_chars == 9
+    assert branch._scratch == path
+    assert branch._scratch_owned is False      # borrowed: the original owns it
+    branch.close()
+    assert os.path.isdir(path)                 # closing the borrower spares it
+    agent.close()
+    assert not os.path.isdir(path)
+
+
+# --------------------------------------------------------------------------
 # save / load (the .flow format)
 # --------------------------------------------------------------------------
 
@@ -562,6 +724,29 @@ def test_agent_client_drives_runs_and_controls_over_the_wire(tmp_path):
                     result = msg["text"]
         assert result == "hi there"
         assert client.get_messages()[-1]["content"] == "hi there"
+    finally:
+        client.close()
+        served.close()
+        thread.join(timeout=5)
+
+
+def test_agent_client_clone_swaps_behind_the_same_socket(tmp_path):
+    from cai.tui import AgentClient
+
+    path = str(tmp_path / "c.sock")
+    agent = make_agent(api=FakeApi(chunks=["hi"]))
+    served = UnixWiredAgent(agent, path)
+    thread = threading.Thread(target=served.serve, daemon=True)
+    thread.start()
+    client = AgentClient(path)
+    try:
+        info = client.clone()
+        assert info["name"] != agent.name
+        assert served.agent.name == info["name"]   # .agent reads through the swap
+        # the same client on the same socket now drives the branch.
+        client.set_model("m2")
+        assert served.agent.model == "m2"
+        assert agent.model == "m"
     finally:
         client.close()
         served.close()

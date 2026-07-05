@@ -215,3 +215,65 @@ def test_user_trailing_whitespace_is_stripped():
     t = _Transcript(screen, Settings())
     t.event(_Event(EventType.USER, text="hello\n\n"))
     assert screen.writes == [("> hello\n", True)]
+
+
+# --- replay (:redraw / :load / :history repaint) ---
+
+from cai.tui import _replay_messages
+
+
+class _KindScreen:
+    def __init__(self):
+        self.writes = []                    # (text, kind) per write
+
+    def write(self, text, kind=None, block=False):
+        self.writes.append((text, kind))
+
+
+def _convo():
+    call = {"id": "c1",
+            "type": "function",
+            "function": {"name": "ls", "arguments": '{"path": "/tmp"}'}}
+    messages = []
+    messages.append({"role": "user", "content": "hi"})
+    messages.append({"role": "assistant",
+                     "content": "",
+                     "tool_calls": [call],
+                     "_reasoning": "let me look"})
+    messages.append({"role": "tool", "tool_call_id": "c1", "content": "12345"})
+    messages.append({"role": "assistant", "content": "done", "_reasoning": "ok"})
+    return messages
+
+
+def test_replay_renders_turns_tools_and_reasoning_when_shown():
+    screen = _KindScreen()
+    cfg = Settings()
+    cfg.show_reasoning = True
+    _replay_messages(screen, _convo(), cfg)
+    assert screen.writes == [("> hi\n", Screen.USER),
+                             ("let me look\n", Screen.REASONING),
+                             ("-> ls(path=/tmp)\n", Screen.TOOL),
+                             ("<- ls: 5 chars\n", Screen.TOOL),
+                             ("ok\n", Screen.REASONING),
+                             ("done\n", Screen.LLM)]
+
+
+def test_replay_skips_reasoning_when_hidden_or_unconfigured():
+    hidden = _KindScreen()
+    cfg = Settings()
+    cfg.show_reasoning = False
+    _replay_messages(hidden, _convo(), cfg)
+    bare = _KindScreen()
+    _replay_messages(bare, _convo())
+    for screen in (hidden, bare):
+        kinds = []
+        for _text, kind in screen.writes:
+            kinds.append(kind)
+        assert Screen.REASONING not in kinds
+        assert kinds == [Screen.USER, Screen.TOOL, Screen.TOOL, Screen.LLM]
+
+
+def test_replay_maps_a_tool_reply_without_a_known_call_to_a_placeholder():
+    screen = _KindScreen()
+    _replay_messages(screen, [{"role": "tool", "tool_call_id": "gone", "content": "x"}])
+    assert screen.writes == [("<- ?: 1 chars\n", Screen.TOOL)]

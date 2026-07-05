@@ -103,6 +103,20 @@ def _tool_name(tool):
     return tool
 
 
+# the nameable state clone() lets a caller override on the branch instead of
+# inheriting - everything an Agent is made of that can cross a wire as JSON.
+# the rest (env, api, hooks, ui, scratch) is plumbing only a live agent can
+# provide, and is always inherited.
+_OVERRIDABLE = ("model",
+                "system_prompt",
+                "messages",
+                "tools",
+                "skills",
+                "reasoning_effort",
+                "temperature",
+                "max_steps")
+
+
 class RunHandle:
     """the handle Agent.run() returns: a lazy, single-consumption stream over one
     turn on the agent's live conversation. iterate it for Event objects; once it
@@ -374,17 +388,32 @@ class Agent:
         here."""
         self._ui = ui
 
-    def clone(self, name=None, ui=None):
+    def clone(self, name=None, ui=None, overrides=None):
         """build a new Agent carrying this one's state - a deep copy of the
         conversation plus the model, base prompt, active tools and skills, hooks,
         and run parameters - so an SDK caller can fork a conversation and drive
         the branch independently without disturbing this agent.
+
+        overrides is a dict of nameable state the branch takes INSTEAD of
+        inheriting - any of _OVERRIDABLE (model, system_prompt, messages,
+        tools, skills, reasoning_effort, temperature, max_steps). a key that is
+        present wins even when its value is None or empty (an explicit 'none');
+        an absent key inherits. tools and skills are the usual constructor
+        lists (names, or callables for function tools); an overriding messages
+        list is taken as given, not deep-copied. an unknown key raises
+        ValueError. this makes clone the one replace-with-fresh primitive: the
+        caller specifies what the branch should be, and the plumbing that can
+        only come from a live agent - the env, the api, the hooks - is
+        inherited, so autosave and friends keep working on the branch.
 
         the clone is a separate agent: it gets its own name (a fresh id unless
         one is given), its own interrupt Event, and an empty children list, so
         its autosave file and any sub-agents it launches are its own. function
         tools carry over by callable and MCP tools by name (the clone spawns its
         own servers on first use), the way a sub-agent inherits a parent's tools.
+        the scratch directory is borrowed, also the sub-agent convention: the
+        cloned conversation can reference paths inside it, so the branch must
+        keep seeing them; this agent still owns (and deletes) it.
         the messages are assigned directly rather than through set_messages so no
         MESSAGES_MUTATED hook fires on the fresh clone - the branch persists on
         its first run, not at the moment it is forked.
@@ -395,25 +424,40 @@ class Agent:
         the fork's prompts onto the parent's clients. pass ui= to give the branch
         its own surface (the serving layer sets one of its own when it wraps the
         clone)."""
+        if overrides is None:
+            overrides = {}
+        for key in overrides:
+            if key in _OVERRIDABLE: continue
+            raise ValueError(f"clone override {key!r} is not one of {_OVERRIDABLE}")
         tools = []
         for selected in self.tools_registry.selected():
             tool = self.tools_registry.get(selected)
             if tool is None: continue
             tools.append(tool)
+        if "tools" in overrides:
+            tools = overrides["tools"] or []
+        skills = self.skills_registry.names()
+        if "skills" in overrides:
+            skills = overrides["skills"] or []
         clone = Agent(name=name,
-                      model=self.model,
+                      model=overrides.get("model", self.model),
                       api=self.api,
                       env=self.env,
-                      system_prompt=self._system_prompt,
+                      system_prompt=overrides.get("system_prompt", self._system_prompt),
                       tools=tools,
-                      skills=self.skills_registry.names(),
+                      skills=skills,
                       hooks=self._hooks,
                       ui=ui,
-                      reasoning_effort=self.reasoning_effort,
-                      temperature=self.temperature,
-                      max_steps=self.max_steps,
-                      stream=self.stream)
-        clone.messages = copy.deepcopy(self.messages)
+                      reasoning_effort=overrides.get("reasoning_effort", self.reasoning_effort),
+                      temperature=overrides.get("temperature", self.temperature),
+                      max_steps=overrides.get("max_steps", self.max_steps),
+                      tool_result_max_chars=self.tool_result_max_chars,
+                      stream=self.stream,
+                      scratch=self._scratch)
+        if "messages" in overrides:
+            clone.messages = list(overrides["messages"] or [])
+        else:
+            clone.messages = copy.deepcopy(self.messages)
         return clone
 
     def save(self, path=None):

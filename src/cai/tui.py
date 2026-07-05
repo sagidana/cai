@@ -17,10 +17,13 @@ to trigger it.
 
 The `:`-commands cover the session: :models / :messages / :history / :sessions /
 :save / :load, plus :tools and :skills to toggle which tools and skills the agent
-uses. Each picker is a screen overlay; the mutating ones (:messages, :history,
-:sessions, :load, :tools, :skills) are refused while a run is in flight so they
-never race the worker's view of the conversation or the tool registry.
+uses, and :redraw to repaint the viewport from the conversation (e.g. after
+flipping 'show reasoning' in :config). Each picker is a screen overlay; the
+mutating ones (:messages, :history, :sessions, :load, :tools, :skills) and
+:redraw are refused while a run is in flight so they never race the worker's
+view of the conversation or the tool registry.
 """
+import json
 import logging
 import os
 import queue
@@ -63,6 +66,7 @@ _PALETTE_COMMANDS = [
     ("save", "save the session (optional path)"),
     ("load", "load a session file (path)"),
     ("clear", "clear the conversation view"),
+    ("redraw", "repaint the view from the conversation"),
     ("quit", "exit the interactive session"),
 ]
 # commands that take an argument: picking them in the palette pre-fills command
@@ -405,6 +409,17 @@ class AgentClient:
     def save(self, path):
         return self._call("save", path)
 
+    def clone(self, spec=None):
+        """swap the served agent for a fresh branch of itself (the 'clone' op).
+        the socket and this client stay put - only the agent behind them
+        changes. spec is an optional overrides dict of the branch's nameable
+        state (model, system_prompt, messages, tools, skills,
+        reasoning_effort, temperature, max_steps): a key present overrides -
+        even with a None/empty value - and an absent key inherits, so
+        clone({'messages': [...]}) is 'replace with fresh, seeded with these'.
+        returns the branch's info dict ({'name': ...}), or None on failure."""
+        return self._call("clone", spec)
+
     def load(self, path):
         with self._ctrl_lock:
             ok, _result, error = self._ctrl.control("load", path)
@@ -630,7 +645,7 @@ def _history_node_preview(tree, node, width, max_lines):
     return lines[:max_lines]
 
 
-def _open_history(screen, client, status, jobs):
+def _open_history(screen, client, status, jobs, cfg):
     """open the :history fork view over a snapshot of the conversation. on Enter,
     rewind the live conversation to the chosen node, repaint the viewport to match,
     and - unless the snapshot ends on a final assistant reply - re-enter the
@@ -672,7 +687,7 @@ def _open_history(screen, client, status, jobs):
         return
     client.set_messages(tree.prefix_messages(sel))
     screen.clear_buffer()
-    _replay_messages(screen, client.get_messages())
+    _replay_messages(screen, client.get_messages(), cfg)
     if tree.should_continue(sel):
         jobs.put(_CONTINUE)
 
@@ -728,18 +743,59 @@ def _open_models(screen, client, status, registry):
         status.set_model(picked)
 
 
-def _replay_messages(screen, messages):
-    """write a loaded conversation into the (cleared) viewport so the user sees
-    what they switched to. only user/assistant turns are rendered."""
+def _stored_call_args(function):
+    """the parsed args of a stored tool call, for a replayed '->' line; a blob
+    that doesn't parse renders as empty args rather than raising."""
+    try:
+        args = json.loads(function.get("arguments") or "{}")
+    except ValueError:
+        return {}
+    if not isinstance(args, dict):
+        return {}
+    return args
+
+
+def _replay_messages(screen, messages, cfg=None):
+    """write a conversation into the (cleared) viewport so the user sees what
+    they switched to - the painting :redraw, :load, and a :history fork share.
+    turns render like the live transcript: the assistant's stored reasoning
+    first (dimmed, only when cfg - the live env Settings - says to show it),
+    then its content, then its tool calls as '->' lines, each tool reply
+    chaining on as '<- name: N chars' (the name mapped back through the
+    call id, which is all a tool message carries)."""
+    show_reasoning = False
+    if cfg is not None:
+        show_reasoning = cfg.show_reasoning
+    call_names = {}
     for message in messages:
         role = message.get("role")
         content = message.get("content")
+        if content is None:
+            content = ""
         if not isinstance(content, str):
             content = str(content)
         if role == "user":
             screen.write(f"> {content}\n", kind=Screen.USER, block=True)
-        elif role == "assistant":
+            continue
+        if role == "tool":
+            name = call_names.get(message.get("tool_call_id"), "?")
+            screen.write(f"<- {name}: {len(content)} chars\n", kind=Screen.TOOL)
+            continue
+        if role != "assistant":
+            continue
+        reasoning = message.get("_reasoning")
+        if reasoning and show_reasoning:
+            screen.write(reasoning + "\n", kind=Screen.REASONING, block=True)
+        if content.strip():
             screen.write(content + "\n", kind=Screen.LLM, block=True)
+        block = True
+        for call in (message.get("tool_calls") or []):
+            function = call.get("function") or {}
+            name = function.get("name") or "?"
+            call_names[call.get("id")] = name
+            args = _stored_call_args(function)
+            screen.write(f"-> {name}({_short_args(args)})\n", kind=Screen.TOOL, block=block)
+            block = False
 
 
 def _session_preview(path, width, max_lines):
@@ -777,7 +833,7 @@ def _load_session(screen, client, status, path, cfg):
         return
     status.set_model(client.get_info().get("model", ""))
     screen.clear_buffer()
-    _replay_messages(screen, client.get_messages())
+    _replay_messages(screen, client.get_messages(), cfg)
     _refresh_chips(screen, client, cfg)
     screen.write(f"[loaded {os.path.basename(path)}]\n", kind=Screen.META, block=True)
 
@@ -1449,6 +1505,13 @@ def _handle_command(screen, client, status, registry, jobs, env, cmd, pending):
         screen.clear_buffer()
         _refresh_tokens(status)
         return False
+    if head == "redraw":
+        if screen._busy:
+            screen.write("[busy — :redraw when idle]\n", kind=Screen.META, block=True)
+            return False
+        screen.clear_buffer()
+        _replay_messages(screen, client.get_messages(), env.settings)
+        return False
     if head == "save":
         path = ""
         if arg:
@@ -1492,7 +1555,7 @@ def _handle_command(screen, client, status, registry, jobs, env, cmd, pending):
         if screen._busy:
             screen.write("[busy — open :history when idle]\n", kind=Screen.META, block=True)
             return False
-        _open_history(screen, client, status, jobs)
+        _open_history(screen, client, status, jobs, env.settings)
         return False
     if head == "continue":
         if screen._busy:
@@ -1736,5 +1799,8 @@ def run(*,
         agents_chips.join(timeout=2)
         client.close()
         screen.close()
-        agent.close()
+        # through the server, not the local variable: a :clone swapped the
+        # served agent, and the current one owns the live scratch (retirees
+        # were closed at swap time).
+        server.agent.close()
     return 0

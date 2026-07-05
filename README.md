@@ -94,7 +94,8 @@ only the clean answer is printed. LLM knobs: `--model`, `--reasoning-effort`,
 `cai` with no prompt (and a terminal attached) opens the full-screen
 interactive TUI; `-i` forces it. It is vim-modal, with `:`-commands for the
 session: `:models`, `:messages`, `:history`, `:sessions`, `:save`, `:load`,
-`:tools`, `:skills`.
+`:tools`, `:skills`, `:redraw` (repaint the view from the conversation, e.g.
+after flipping *show reasoning* in `:config`).
 
 ```sh
 cai                 # new interactive session
@@ -132,8 +133,14 @@ cai extend --list
 cai extend --remove my-bundle
 ```
 
-See `examples/extensions/compact` — context compaction as a `:compact` command
-plus an `after_turn` auto-compact hook, in one `init.py`.
+See `examples/extensions/`:
+
+- `compact` — context compaction as a `:compact` command plus an `after_turn`
+  auto-compact hook, in one `init.py`.
+- `clone` — `:clone`, a session checkpoint: save the session, then swap the
+  served agent for a fresh branch of itself and keep going.
+- `summarize` — `:summarize`, branch and continue reduced: checkpoint, branch,
+  and carry forward only a one-message summary of the session.
 
 ## SDK
 
