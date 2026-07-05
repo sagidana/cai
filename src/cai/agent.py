@@ -539,6 +539,13 @@ class Agent:
             return False
         return self._steer.pending()
 
+    def steer_count(self):
+        """how many steered texts are queued and not yet folded into the
+        conversation - the count a UI shows as 'pending'. counts whether or not
+        a run is consuming: a run in flight drains them at its next turn
+        boundary, so they are pending until it does."""
+        return self._steer.count()
+
     def _stream(self, stream, prompt=None, strict_format=None):
         """the orchestration: stream one call_llm turn over the live conversation.
         yields Event objects and returns the final answer text. combines the

@@ -10,7 +10,7 @@ from cai.screen.ansi import ansi_strip, cur_move
 from cai.screen.chip import Chip
 from cai.screen.layout import Layout
 from cai.screen.screen import Screen
-from cai.tui import _agent_chip_lines, _chip_lines
+from cai.tui import _agent_chip_lines, _chip_lines, _pending_chip_lines, _Pending
 
 
 # --- the Chip primitive ---
@@ -84,6 +84,94 @@ def test_agent_chip_lines_share_a_width():
 
 def test_agent_chip_lines_empty():
     assert _agent_chip_lines([]) == []
+
+
+# --- the pending chip builder ---
+
+
+def test_pending_chip_lines_empty_when_both_zero():
+    assert _pending_chip_lines(0, 0) == []
+
+
+def test_pending_chip_lines_steer_above_user():
+    lines = _pending_chip_lines(1, 2)
+    assert len(lines) == 2
+    assert "2 steering" in ansi_strip(lines[0])
+    assert "1 queued" in ansi_strip(lines[1])
+
+
+def test_pending_chip_lines_one_row_each():
+    assert len(_pending_chip_lines(3, 0)) == 1
+    assert "3 queued" in ansi_strip(_pending_chip_lines(3, 0)[0])
+    assert len(_pending_chip_lines(0, 4)) == 1
+    assert "4 steering" in ansi_strip(_pending_chip_lines(0, 4)[0])
+
+
+def test_pending_chip_lines_rows_share_a_width():
+    lines = _pending_chip_lines(1, 10)
+    assert len(ansi_strip(lines[0])) == len(ansi_strip(lines[1]))
+
+
+# --- the _Pending widget owner ---
+
+
+class _WidgetHost:
+    """a Screen stand-in that just records the last add/remove of a widget."""
+
+    def __init__(self):
+        self.widgets = {}
+
+    def add_widget(self, name, lines):
+        self.widgets[name] = lines
+
+    def remove_widget(self, name):
+        self.widgets.pop(name, None)
+
+
+class _Cfg:
+    def __init__(self, show_chips=True):
+        self.show_chips = show_chips
+
+
+def test_pending_counts_user_turns_up_and_down():
+    host = _WidgetHost()
+    pending = _Pending(host, _Cfg())
+    pending.user_queued()
+    pending.user_queued()
+    assert "2 queued" in ansi_strip(host.widgets["pending"][0])
+    pending.user_started()
+    assert "1 queued" in ansi_strip(host.widgets["pending"][0])
+    pending.user_started()
+    assert "pending" not in host.widgets
+
+
+def test_pending_user_started_never_goes_negative():
+    host = _WidgetHost()
+    pending = _Pending(host, _Cfg())
+    pending.user_started()
+    assert "pending" not in host.widgets
+
+
+def test_pending_tracks_the_steer_count():
+    host = _WidgetHost()
+    pending = _Pending(host, _Cfg())
+    pending.set_steer(3)
+    assert "3 steering" in ansi_strip(host.widgets["pending"][0])
+    pending.set_steer(0)
+    assert "pending" not in host.widgets
+
+
+def test_pending_hidden_when_show_chips_off():
+    host = _WidgetHost()
+    cfg = _Cfg(show_chips=False)
+    pending = _Pending(host, cfg)
+    pending.user_queued()
+    pending.set_steer(2)
+    assert "pending" not in host.widgets
+    # turning chips back on and refreshing restores the widget
+    cfg.show_chips = True
+    pending.refresh()
+    assert "pending" in host.widgets
 
 
 def test_render_widgets_right_aligns_each_line(capsys):

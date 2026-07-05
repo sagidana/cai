@@ -539,6 +539,7 @@ class WiredAgent:
             value["children"] = children
             value["system_prompt"] = agent.system_prompt
             value["system_prompt_base"] = agent.system_prompt_base
+            value["pending_steer"] = agent.steer_count()
             return True, value, None
         if op == "save":
             # value is the target path, or None for the agent's own <name>.flow;

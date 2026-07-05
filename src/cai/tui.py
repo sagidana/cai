@@ -485,13 +485,14 @@ class _Worker(threading.Thread):
     interrupt gate know a response is in flight; the _Status signals it updates
     drive the status line, painted by the status thread."""
 
-    def __init__(self, client, screen, jobs, stop, status, settings):
+    def __init__(self, client, screen, jobs, stop, status, settings, pending):
         super().__init__(daemon=True, name="cai-tui-worker")
         self._client = client
         self._screen = screen
         self._jobs = jobs
         self._stop_event = stop
         self._status = status
+        self._pending = pending
         self._transcript = _Transcript(screen, settings)
         self._ui = ScreenUI(screen, status, self._transcript)
         self._sample_tokens = 0
@@ -511,6 +512,11 @@ class _Worker(threading.Thread):
                 continue
             if text is None:
                 break
+            # a real user turn was counted as pending when it entered the queue;
+            # now that it starts running it is in flight, not pending. _CONTINUE
+            # turns were never counted, so they never decrement.
+            if text is not _CONTINUE:
+                self._pending.user_started()
             self._run_one(text)
 
     def _update_status(self, event):
@@ -921,7 +927,7 @@ def _list_setting(label, obj, attr):
                    set=write)
 
 
-def _open_config(screen, client, cfg):
+def _open_config(screen, client, cfg, pending):
     """the :config overlay - edit the env's live Settings (cai.settings) in
     place. edits apply to this session only; permanent config lives in init.py."""
     settings = []
@@ -934,6 +940,8 @@ def _open_config(screen, client, cfg):
     settings.append(_list_setting("tools", cfg, "tools"))
     screen.prompt_config_overlay(settings)
     _refresh_chips(screen, client, cfg)
+    # toggling show_chips off must drop the pending widget too; on, restore it.
+    pending.refresh()
 
 
 def _save_session(screen, client, path, cfg):
@@ -1183,33 +1191,114 @@ def _agent_chip_lines(names):
     return lines
 
 
-# how often the agents-chips loop re-reads the agents sockets.
+def _pending_chip_lines(user, steer):
+    """the pending widget body: an azure pill counting steer texts the agent
+    has taken but not yet folded into the run, above a green pill counting user
+    turns queued locally behind the running one. each row shows only while its
+    count is non-zero; an all-zero pair paints nothing. both pills share one
+    width so the block reads as a column."""
+    from cai.screen.ansi import SGR_AZURE_ON_DGRAY, SGR_GREEN_ON_DGRAY
+    from cai.screen.chip import Chip
+
+    rows = []
+    if steer > 0:
+        rows.append((f"{steer} steering", SGR_AZURE_ON_DGRAY))
+    if user > 0:
+        rows.append((f"{user} queued", SGR_GREEN_ON_DGRAY))
+    width = 0
+    for text, _sgr in rows:
+        width = max(width, len(text))
+    lines = []
+    for text, sgr in rows:
+        chip = Chip(text.ljust(width), sgr=sgr)
+        lines.extend(chip.lines())
+    return lines
+
+
+class _Pending:
+    """the live counts behind the 'pending' hover widget: user turns queued
+    locally while a run is in flight, and steer texts the agent has accepted
+    but not yet folded into the run. the input loop and worker move the user
+    count (client-side, instant); the chips loop polls the agent for the steer
+    count. this object alone touches the widget, repainting only on a change so
+    an idle session paints nothing."""
+
+    def __init__(self, screen, cfg):
+        self._screen = screen
+        self._cfg = cfg
+        self._lock = threading.Lock()
+        self._user = 0
+        self._steer = 0
+
+    def user_queued(self):
+        with self._lock:
+            self._user += 1
+        self.refresh()
+
+    def user_started(self):
+        with self._lock:
+            if self._user > 0:
+                self._user -= 1
+        self.refresh()
+
+    def set_steer(self, count):
+        with self._lock:
+            if count == self._steer: return
+            self._steer = count
+        self.refresh()
+
+    def refresh(self):
+        """rebuild the widget from the current counts, honouring show_chips. safe
+        to call from any thread; add_widget/remove_widget take the render lock."""
+        with self._lock:
+            user = self._user
+            steer = self._steer
+        if not self._cfg.show_chips:
+            self._screen.remove_widget("pending")
+            return
+        lines = _pending_chip_lines(user, steer)
+        if not lines:
+            self._screen.remove_widget("pending")
+            return
+        self._screen.add_widget("pending", lines)
+
+
+# how often the chips loop re-reads the agents sockets for polled chip state.
 _AGENTS_REFRESH = 1.0
 
 
-class _AgentsChipsLoop(threading.Thread):
-    """keeps the 'agents' hover widget in sync with the live sub-agents by
-    polling the agents sockets every _AGENTS_REFRESH seconds. polling is the
-    only source: a sub-agent starting or finishing is not an event on this
-    run's stream. the widget is only touched when the pill lines actually
-    change, so an idle session repaints nothing."""
+class _ChipsLoop(threading.Thread):
+    """keeps the chips that mirror polled agent state in sync every
+    _AGENTS_REFRESH seconds: the 'agents' widget (live sub-agents, walked over
+    the agents sockets) and the steer count of the 'pending' widget (read from
+    this agent's get_info). polling is the only source - a sub-agent starting or
+    a steer draining is not an event on this run's stream. the agents widget is
+    only touched when its pill lines change, so an idle session repaints
+    nothing; _Pending does the same for its own widget."""
 
-    def __init__(self, screen, client, cfg, stop):
-        super().__init__(daemon=True, name="cai-tui-agents-chips")
+    def __init__(self, screen, client, cfg, stop, pending):
+        super().__init__(daemon=True, name="cai-tui-chips")
         self._screen = screen
         self._client = client
         self._cfg = cfg
         self._stop_event = stop
+        self._pending = pending
         self._last = []
 
     def run(self):
         while not self._stop_event.wait(_AGENTS_REFRESH):
-            lines = []
-            if self._cfg.show_chips:
-                try:
-                    lines = _agent_chip_lines(_running_subagents(self._client))
-                except OSError:
-                    continue
+            if not self._cfg.show_chips:
+                self._pending.set_steer(0)
+                if self._last:
+                    self._screen.remove_widget("agents")
+                    self._last = []
+                continue
+            try:
+                steer = self._client.get_info().get("pending_steer", 0)
+                lines = _agent_chip_lines(_running_subagents(self._client))
+            except OSError:
+                continue
+            self._pending.set_steer(steer)
             if lines == self._last: continue
             self._last = lines
             if not lines:
@@ -1337,7 +1426,7 @@ def _refresh_tokens(status):
     status.set_tokens(0)
 
 
-def _handle_command(screen, client, status, registry, jobs, env, cmd):
+def _handle_command(screen, client, status, registry, jobs, env, cmd, pending):
     """dispatch a `:`-command. returns True to quit the loop, else False.
 
     cmd is the raw command string (the text after ':'); the first token is the
@@ -1379,7 +1468,7 @@ def _handle_command(screen, client, status, registry, jobs, env, cmd):
         _open_models(screen, client, status, registry)
         return False
     if head == "config":
-        _open_config(screen, client, env.settings)
+        _open_config(screen, client, env.settings, pending)
         return False
     if head == "tools":
         if screen._busy:
@@ -1587,11 +1676,12 @@ def run(*,
 
     screen.set_recall_handler(_on_recall)
 
-    worker = _Worker(client, screen, jobs, stop, status, env.settings)
+    pending = _Pending(screen, env.settings)
+    worker = _Worker(client, screen, jobs, stop, status, env.settings, pending)
     worker.start()
     status_loop = _StatusLoop(status, stop)
     status_loop.start()
-    agents_chips = _AgentsChipsLoop(screen, client, env.settings, stop)
+    agents_chips = _ChipsLoop(screen, client, env.settings, stop, pending)
     agents_chips.start()
 
     screen.write(f"cai — model {model}. type to chat; :q to quit.\n",
@@ -1609,6 +1699,7 @@ def run(*,
     # first turn. the worker echoes the USER event and streams the answer just
     # as if the user had typed it, then the input loop below takes over.
     if initial_prompt and initial_prompt.strip():
+        pending.user_queued()
         jobs.put(initial_prompt)
 
     try:
@@ -1619,7 +1710,7 @@ def run(*,
             if screen._command_result is not None:
                 cmd = screen._command_result
                 screen._command_result = None
-                if _handle_command(screen, client, status, registry, jobs, env, cmd):
+                if _handle_command(screen, client, status, registry, jobs, env, cmd, pending):
                     break
                 continue
             # '!text' steers the in-flight run; with nothing running it is just
@@ -1632,6 +1723,7 @@ def run(*,
                 user_input = steer_text
             if not user_input.strip():
                 continue
+            pending.user_queued()
             jobs.put(user_input)
     except (KeyboardInterrupt, EOFError):
         pass

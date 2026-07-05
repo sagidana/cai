@@ -83,6 +83,11 @@ class SteerQueue:
         with self._lock:
             return len(self._messages) > 0
 
+    def count(self):
+        """how many steered texts are queued (0 when a drain would return none)."""
+        with self._lock:
+            return len(self._messages)
+
 
 def _parse_args(arguments):
     """parse a tool call's raw argument blob into a dict. returns (ok, args): ok
