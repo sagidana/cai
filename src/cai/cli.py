@@ -127,6 +127,29 @@ def _add_extend_subparser(sub):
     remove_arg.completer = _extension_completer
 
 
+def _add_python_subparser(sub):
+    """`cai python` - manage the managed virtualenv the python tool runs
+    snippets in. only `install` for now: the sandbox has no network, so
+    packages must be installed from out here."""
+    python_parser = sub.add_parser(
+        "python",
+        help="manage the python tool's virtualenv, then exit.",
+        description="manage the cai-managed virtualenv the python tool runs "
+                    "snippets in (~/.config/cai/venv/). the sandbox has no "
+                    "network, so packages are installed from here, outside it.")
+    python_sub = python_parser.add_subparsers(dest="python_command", required=True)
+    install_parser = python_sub.add_parser(
+        "install",
+        help="pip-install packages into the managed virtualenv.",
+        description="pip-install packages into the managed virtualenv "
+                    "(created first if needed).")
+    install_parser.add_argument("packages",
+                                nargs="+",
+                                metavar="PACKAGE",
+                                help="pip requirement specifiers "
+                                     "(e.g. requests, 'numpy>=2').")
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="cai",
@@ -198,6 +221,7 @@ def build_parser():
     # so the top level keeps no free positional that would clash with these.
     sub = parser.add_subparsers(dest="command")
     _add_extend_subparser(sub)
+    _add_python_subparser(sub)
     return parser
 
 
@@ -359,6 +383,9 @@ def main(argv=None):
     if args.command == "extend":
         from cai import extend
         return extend.run(args, parser)
+    if args.command == "python":
+        from cai import pytool
+        return pytool.install(args.packages)
 
     # --cwd: move the whole process before any config/file/tool work, so --file,
     # the fs tool sandbox (which resolves against os.getcwd()) and every other

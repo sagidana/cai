@@ -119,6 +119,14 @@ def ensure_venv():
         return config.venv_python()
 
 
+def install(packages):
+    """`cai python install` - pip-install packages into the managed venv, from
+    outside the sandbox (the jail has no network, so a snippet never can)."""
+    python = ensure_venv()
+    result = subprocess.run([python, "-m", "pip", "install"] + list(packages))
+    return result.returncode
+
+
 def _dispatch_gated(agent, name, kwargs):
     """dispatch a tool the snippet asked for, on the agent's behalf. refuses the
     python tool itself (recursion) and any tool not currently offered to the

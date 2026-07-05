@@ -121,7 +121,8 @@ conversation plus the settings needed to resume it.
   parent's tools.
 - The `python` skill gives the agent a `python(code, timeout=60)` tool that
   runs a snippet in a subprocess of a cai-managed virtualenv
-  (`~/.config/cai/venv/`, created on first use, empty by default — stdlib only).
+  (`~/.config/cai/venv/`, created on first use, empty by default — stdlib only;
+  add packages with `cai python install <package…>`).
   The snippet is jailed at the **kernel level**: it enters fresh user + mount +
   network namespaces and pivots onto a root containing only the working
   directory, the session scratch dir and the interpreter — no other path

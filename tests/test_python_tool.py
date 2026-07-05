@@ -416,3 +416,33 @@ def test_inner_call_without_a_gate_still_dispatches(monkeypatch):
         assert _run(agent, "print(call('echo', x=9))").strip() == "echo:9"
     finally:
         agent.close()
+
+
+def test_install_runs_pip_in_the_managed_venv(monkeypatch):
+    monkeypatch.setattr(pytool, "ensure_venv", lambda: "/venv/bin/python")
+    recorded = []
+
+    class FakeResult:
+        returncode = 3
+
+    def fake_run(cmd):
+        recorded.append(cmd)
+        return FakeResult()
+    monkeypatch.setattr(pytool.subprocess, "run", fake_run)
+
+    assert pytool.install(["requests", "numpy>=2"]) == 3
+    assert recorded == [["/venv/bin/python", "-m", "pip", "install",
+                         "requests", "numpy>=2"]]
+
+
+def test_cli_python_install_dispatches(monkeypatch):
+    from cai import cli
+    recorded = []
+
+    def fake_install(packages):
+        recorded.append(packages)
+        return 0
+    monkeypatch.setattr(pytool, "install", fake_install)
+
+    assert cli.main(["python", "install", "requests"]) == 0
+    assert recorded == [["requests"]]
