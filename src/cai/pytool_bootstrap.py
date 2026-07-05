@@ -7,11 +7,12 @@ the audit-hook jail, wires call() over the two inherited RPC fds, and execs
 the snippet. stdlib-only, so it runs under the empty managed venv.
 
 The kernel jail (default) pivots into a mount namespace where ONLY cwd +
-CAI_SCRATCH + the interpreter prefixes exist - all mounted READ-ONLY - inside
-an empty network namespace. The hook jail enforces the same policy in
-userspace: reads (and directory listings) are confined to the same roots; ALL
-writes - anywhere, cwd and scratch included - are denied, as are
-subprocess/exec/fork, sockets, ctypes and cffi. raw
+CAI_SCRATCH + the interpreter prefixes exist - mounted READ-ONLY, except the
+scratch dir, which is re-bound read-write on top: the one writable island -
+inside an empty network namespace. The hook jail enforces the same policy in
+userspace: reads (and directory listings) are confined to the same roots;
+writes are allowed under the scratch dir only and denied everywhere else, as
+are subprocess/exec/fork, sockets, ctypes and cffi. raw
 os.read/os.write on the inherited fds emit no audit events and namespaces do
 not sever inherited fds, so call() needs no exception in either jail."""
 import sys
@@ -20,8 +21,10 @@ import json
 
 
 # the jail roots - what the snippet may see (kernel jail) and read (audit
-# hook). computed by main() before either jail goes up.
+# hook), and the subset it may write (the scratch dir). computed by main()
+# before either jail goes up.
 read_roots = []
+write_roots = []
 
 
 def compute_read_roots():
@@ -36,14 +39,22 @@ def compute_read_roots():
     return roots
 
 
+def compute_write_roots():
+    scratch = os.environ.get("CAI_SCRATCH", "")
+    if not scratch:
+        return []
+    return [os.path.realpath(scratch)]
+
+
 # --- kernel jail: user+mount+net namespaces --------------------------------
 # the mount namespace is pivoted onto a tmpfs holding recursive bind mounts of
-# read_roots ONLY, the whole tree then flipped read-only - every other path
-# does not exist and no path is writable at the kernel level, however the
-# syscall is issued. the fresh network namespace has no interfaces (not even
-# loopback) so there is no network, and abstract unix sockets are per-netns so
-# they die with it. inherited fds (stdin, the RPC pipes, the stdout tempfile)
-# are untouched - read-only mounts do not affect already-open fds. runs before
+# read_roots ONLY, the whole tree then flipped read-only, and the scratch dir
+# alone re-bound read-write on top - every other path does not exist and no
+# path outside scratch is writable at the kernel level, however the syscall is
+# issued. the fresh network namespace has no interfaces (not even loopback) so
+# there is no network, and abstract unix sockets are per-netns so they die
+# with it. inherited fds (stdin, the RPC pipes, the stdout tempfile) are
+# untouched - read-only mounts do not affect already-open fds. runs before
 # the audit hook exists, so its own opens/mkdirs are unrestricted.
 
 CLONE_NEWNS = 0x00020000
@@ -130,19 +141,28 @@ def enter_kernel_jail():
     uid = os.getuid()
     gid = os.getgid()
     cwd = os.path.realpath(os.getcwd())
+
     need(libc.unshare(CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWNET), "unshare")
+
     with open("/proc/self/setgroups", "w") as f:
         f.write("deny")
     with open("/proc/self/uid_map", "w") as f:
         f.write(f"{uid} {uid} 1")
     with open("/proc/self/gid_map", "w") as f:
         f.write(f"{gid} {gid} 1")
+
     need(libc.mount(b"none", b"/", None, MS_REC | MS_PRIVATE, None), "make / private")
     need(libc.mount(b"tmpfs", staging.encode(), b"tmpfs", 0, None), "mount tmpfs")
+
     for root in bind_roots():
         target = staging + root
         os.makedirs(target, exist_ok=True)
-        need(libc.mount(root.encode(), target.encode(), None, MS_BIND | MS_REC, None),
+
+        need(libc.mount(root.encode(),
+                        target.encode(),
+                        None,
+                        MS_BIND | MS_REC,
+                        None),
              f"bind {root}")
 
     class MountAttr(ctypes.Structure):
@@ -164,6 +184,15 @@ def enter_kernel_jail():
                       ctypes.byref(attr),
                       ctypes.sizeof(attr)),
         "make jail read-only")
+    # the scratch dir is the one writable island: re-bind it over the
+    # read-only tree - a fresh bind mount is read-write by default and stacks
+    # on top of the read-only one below. its staging path always exists:
+    # scratch is a read root, so it was either bound above or carried inside a
+    # parent's recursive bind.
+    for root in write_roots:
+        target = staging + root
+        need(libc.mount(root.encode(), target.encode(), None, MS_BIND | MS_REC, None),
+             f"bind {root} read-write")
     os.chdir(staging)
     need(libc.syscall(PIVOT_ROOT_NR[machine], b".", b"."), "pivot_root")
     need(libc.umount2(b".", MNT_DETACH), "detach old root")
@@ -266,7 +295,9 @@ def check(event, args):
     if event == "open":
         path, mode, flags = args
         if wants_write(mode, flags):
-            raise PermissionError(f"cai sandbox: the python tool is read-only - cannot open {path!r} for writing")
+            if under(path, write_roots):
+                return
+            raise PermissionError(f"cai sandbox: writes are allowed under the scratch dir only - cannot open {path!r} for writing")
         if not under(path, read_roots):
             raise PermissionError(f"cai sandbox: open outside the working directory: {path!r}")
         return
@@ -276,7 +307,9 @@ def check(event, args):
             raise PermissionError(f"cai sandbox: {event} outside the working directory: {arg!r}")
         return
     if event in WRITE_EVENTS:
-        raise PermissionError(f"cai sandbox: the python tool is read-only - {event} is disabled")
+        for arg in args:
+            if under(arg, write_roots): continue
+            raise PermissionError(f"cai sandbox: writes are allowed under the scratch dir only - {event}: {arg!r}")
 
 
 def hook(event, args):
@@ -322,10 +355,11 @@ def call(name, **kwargs):
 
 
 def main():
-    global read_roots, _RPC_RD, _RPC_WR
+    global read_roots, write_roots, _RPC_RD, _RPC_WR
 
     code = sys.stdin.read()
     read_roots = compute_read_roots()
+    write_roots = compute_write_roots()
 
     if os.environ.get("CAI_PY_SANDBOX", "kernel") != "hook":
         try:

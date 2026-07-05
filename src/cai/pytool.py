@@ -15,19 +15,20 @@ exist, at the kernel level, no matter how the snippet issues the syscall (this
 also closes the stat-probe leak the audit hook alone had). The empty network
 namespace has no interfaces (not even loopback), so no network, and abstract
 unix sockets die with it too. The whole mount tree is flipped READ-ONLY
-(mount_setattr, kernel >= 5.12) before capabilities are dropped, so the
-snippet can neither write anywhere nor rearrange its own jail: confinement
-AND read-only-ness are both kernel-enforced.
+(mount_setattr, kernel >= 5.12), then the scratch dir alone is re-bound
+read-write on top - the one writable island - before capabilities are
+dropped, so the snippet can neither write outside scratch nor rearrange its
+own jail: confinement AND the write policy are both kernel-enforced.
 
 HOOK layer (UX + defense in depth). A sys.addaudithook jail enforces the same
-read-only policy in userspace: reads and directory listings are confined to
-cwd + scratch + the interpreter prefixes, every write - create, modify,
-delete, rename, anywhere - is denied, as are subprocess/exec/fork, sockets,
-ctypes and cffi. A denied op raises PermissionError, whose traceback is the
-result (a mount-level EROFS would be raw and confusing). Audit hooks are
-python-level and evadable by determined code - but anything that slips past
-them is still inside the read-only kernel jail, so the blast radius is
-nothing.
+policy in userspace: reads and directory listings are confined to cwd +
+scratch + the interpreter prefixes, every write - create, modify, delete,
+rename - is denied outside the scratch dir, as are subprocess/exec/fork,
+sockets, ctypes and cffi. A denied op raises PermissionError, whose traceback
+is the result (a mount-level EROFS would be raw and confusing). Audit hooks
+are python-level and evadable by determined code - but anything that slips
+past them is still inside the kernel jail, so the blast radius is the scratch
+dir.
 
 Hosts that forbid unprivileged user namespaces (e.g. default-hardened Docker
 seccomp/AppArmor) fail closed with a clear message; there the operator - whose
@@ -257,14 +258,15 @@ _DOC = """Run a Python snippet in cai's sandbox and return its output (stdout + 
     keeping the intermediate data out of the conversation. Example:
     code="text = call('fs__read_file', file_path='big.log')\\nprint(text.count('ERROR'))".
 
-    Sandbox: this tool is READ-ONLY. It can read files and list directories under
-    the working directory and the session scratch dir, but cannot create, modify
-    or delete any file (do file changes by call()ing a write tool like
-    fs__create_file instead). subprocess, network, ctypes and cffi are blocked; a
-    denied op raises PermissionError. The snippet runs in its own kernel
-    namespace jail: no path outside the working directory, the scratch dir and
-    the interpreter exists at all, and there is no network interface. The
-    interpreter is a managed virtualenv with the standard library only.
+    Sandbox: the tool can read files and list directories under the working
+    directory and the session scratch dir, and WRITE only under the scratch dir
+    (os.environ['CAI_SCRATCH']) - everywhere else is read-only (do project file
+    changes by call()ing a write tool like fs__create_file instead). subprocess,
+    network, ctypes and cffi are blocked; a denied op raises PermissionError.
+    The snippet runs in its own kernel namespace jail: no path outside the
+    working directory, the scratch dir and the interpreter exists at all, and
+    there is no network interface. The interpreter is a managed virtualenv with
+    the standard library only.
 
     Args:
         code:    Python source to execute.

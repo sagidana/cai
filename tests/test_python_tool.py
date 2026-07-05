@@ -90,7 +90,7 @@ def test_output_and_exit_code(monkeypatch):
         agent.close()
 
 
-def test_reads_allowed_but_all_writes_denied(tmp_path, monkeypatch):
+def test_reads_allowed_writes_confined_to_scratch(tmp_path, monkeypatch):
     _fast_venv(monkeypatch)
     cwd = tmp_path / "cwd"
     cwd.mkdir()
@@ -107,18 +107,27 @@ def test_reads_allowed_but_all_writes_denied(tmp_path, monkeypatch):
     try:
         # reading inside the jail is fine
         assert _run(agent, "print(open('existing.txt').read())").strip() == "data"
-        # the tool is read-only: no write, even under cwd or scratch
-        assert "read-only" in _run(agent, "open('new.txt','w').write('x')")
+        # writes outside scratch are denied - cwd included
+        assert "scratch dir only" in _run(agent, "open('new.txt','w').write('x')")
         assert not (cwd / "new.txt").exists()
+        # scratch is the one writable island - the write really lands
         scratch_write = ("import os; p=os.path.join(os.environ['CAI_SCRATCH'],'s.txt');"
                          " open(p,'w').write('y')")
-        assert "read-only" in _run(agent, scratch_write)
+        _run(agent, scratch_write)
+        assert (scratch / "s.txt").read_text() == "y"
+        # deleting / renaming under scratch works too
+        scratch_remove = ("import os; os.remove(os.path.join(os.environ['CAI_SCRATCH'],'s.txt'))")
+        _run(agent, scratch_remove)
         assert not (scratch / "s.txt").exists()
-        # and no delete / rename of the existing file
-        assert "read-only" in _run(agent, "import os; os.remove('existing.txt')")
+        # but no delete / rename / mkdir of anything outside it
+        assert "scratch dir only" in _run(agent, "import os; os.remove('existing.txt')")
         assert (cwd / "existing.txt").exists()
-        assert "read-only" in _run(agent, "import os; os.rename('existing.txt','r.txt')")
-        assert "read-only" in _run(agent, "import shutil; shutil.rmtree('.')")
+        assert "scratch dir only" in _run(agent, "import os; os.rename('existing.txt','r.txt')")
+        assert "scratch dir only" in _run(agent, "import shutil; shutil.rmtree('.')")
+        # a rename may not smuggle a file across the boundary either way
+        cross = ("import os; os.rename('existing.txt',"
+                 " os.path.join(os.environ['CAI_SCRATCH'],'stolen.txt'))")
+        assert "scratch dir only" in _run(agent, cross)
     finally:
         agent.close()
 
@@ -250,6 +259,65 @@ def test_kernel_jail_still_reads_cwd_and_scratch(tmp_path, monkeypatch):
         scratch_read = ("import os; p=os.path.join(os.environ['CAI_SCRATCH'],'s.txt');"
                         " print(open(p).read())")
         assert _run(agent, scratch_read).strip() == "scratch-data"
+    finally:
+        agent.close()
+
+
+def test_kernel_jail_scratch_is_writable_but_cwd_is_not(tmp_path, monkeypatch):
+    # the write must land on the real disk through the read-write scratch bind,
+    # while a cwd write still fails (the hook answers first with PermissionError,
+    # an OSError; had it been evaded, the read-only mount answers with EROFS -
+    # another OSError - so the probe holds for both layers).
+    _fast_venv(monkeypatch)
+    _force_sandbox(monkeypatch, "kernel")
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.chdir(cwd)
+
+    @cai.tool
+    def noop3() -> str:
+        """noop."""
+        return ""
+    agent = Agent(model="m", api=object(), tools=["noop3"], scratch=str(scratch))
+    try:
+        scratch_write = ("import os; p=os.path.join(os.environ['CAI_SCRATCH'],'w.txt');"
+                         " open(p,'w').write('landed'); print('ok')")
+        assert _run(agent, scratch_write).strip() == "ok"
+        assert (scratch / "w.txt").read_text() == "landed"
+        cwd_probe = """import os
+try:
+    os.open('raw.txt', os.O_WRONLY | os.O_CREAT)
+    print('writable')
+except OSError:
+    print('read-only')
+"""
+        assert _run(agent, cwd_probe).strip() == "read-only"
+        assert not (cwd / "raw.txt").exists()
+    finally:
+        agent.close()
+
+
+def test_kernel_jail_scratch_nested_under_cwd_still_writable(tmp_path, monkeypatch):
+    # scratch inside cwd: the recursive cwd bind already carries it, so it gets
+    # no read bind of its own - the read-write bind must still stack on top.
+    _fast_venv(monkeypatch)
+    _force_sandbox(monkeypatch, "kernel")
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.chdir(tmp_path)
+
+    @cai.tool
+    def noop4() -> str:
+        """noop."""
+        return ""
+    agent = Agent(model="m", api=object(), tools=["noop4"], scratch=str(scratch))
+    try:
+        scratch_write = ("import os; p=os.path.join(os.environ['CAI_SCRATCH'],'n.txt');"
+                         " open(p,'w').write('nested'); print('ok')")
+        assert _run(agent, scratch_write).strip() == "ok"
+        assert (scratch / "n.txt").read_text() == "nested"
     finally:
         agent.close()
 

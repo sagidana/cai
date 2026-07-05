@@ -11,10 +11,11 @@ calls. `print()` what you want back.
 
 - One-shot: fresh interpreter every call, no variables survive between calls.
 - Standard library only. No network. `input()` sees EOF.
-- Read-only: read/list the working dir and scratch (`os.environ['CAI_SCRATCH']`);
+- Read/list the working dir and scratch (`os.environ['CAI_SCRATCH']`);
   every other path does not exist.
-- Writes, `subprocess`, `ctypes`, `cffi` raise `PermissionError`. To change a
-  file, `call()` a write tool.
+- Writes land under scratch ONLY - everywhere else is read-only. Use scratch to
+  pass state between calls. Writes elsewhere, `subprocess`, `ctypes`, `cffi`
+  raise `PermissionError`. To change a project file, `call()` a write tool.
 
 ## call() — drive your other tools
 

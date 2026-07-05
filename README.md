@@ -125,10 +125,11 @@ conversation plus the settings needed to resume it.
   The snippet is jailed at the **kernel level**: it enters fresh user + mount +
   network namespaces and pivots onto a root containing only the working
   directory, the session scratch dir and the interpreter — no other path
-  exists, and there is no network interface. On top of that, a
-  `sys.addaudithook` jail makes it **read-only**: it can read files and list
-  directories inside the jail but cannot create, modify or delete anything, and
-  subprocess/`ctypes`/`cffi` are blocked. The snippet also gets a
+  exists, and there is no network interface. The whole tree is mounted
+  **read-only except the scratch dir**, the one writable island. On top of
+  that, a `sys.addaudithook` jail enforces the same policy: it can read files
+  and list directories inside the jail but create, modify or delete only under
+  scratch, and subprocess/`ctypes`/`cffi` are blocked. The snippet also gets a
   `call(name, **kwargs)` builtin that dispatches the agent's *own* selected
   tools in-process — through the same `before_tool_call` gates — so a script
   can read a large tool result, reduce it in Python, and return only the
