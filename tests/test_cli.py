@@ -1,5 +1,7 @@
-"""Tests for cai.cli helpers - the headless run driver."""
+"""Tests for cai.cli helpers - the headless run driver and flag validation."""
 import threading
+
+import pytest
 
 from cai import cli
 from cai.events import Event, EventType
@@ -36,3 +38,23 @@ def test_drive_respects_show_reasoning_off(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "pondering" not in out
     assert "answer" in out
+
+
+def test_line_by_line_needs_a_prompt():
+    with pytest.raises(SystemExit):
+        cli.main(["--line-by-line"])
+
+
+def test_line_by_line_rejects_watch():
+    with pytest.raises(SystemExit):
+        cli.main(["--line-by-line", "--watch", "-p", "x"])
+
+
+def test_line_by_line_rejects_interactive():
+    with pytest.raises(SystemExit):
+        cli.main(["--line-by-line", "-i", "-p", "x"])
+
+
+def test_cores_must_be_positive():
+    with pytest.raises(SystemExit):
+        cli.main(["--line-by-line", "-p", "x", "--cores", "0"])

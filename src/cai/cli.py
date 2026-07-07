@@ -272,6 +272,17 @@ def build_parser():
                         metavar="BYTES",
                         help="sliding window: a triggered run sees the last BYTES "
                              "of the stream (default 64KiB)")
+    parser.add_argument("--line-by-line",
+                        action="store_true",
+                        help="run the prompt as a one-shot agent over each line of "
+                             "the input (--file, or piped stdin) and print the "
+                             "answers in input order")
+    parser.add_argument("--cores",
+                        type=int,
+                        default=1,
+                        metavar="NUM",
+                        help="how many --line-by-line agents run in parallel "
+                             "(default 1)")
 
     # subcommands. the prompt is pulled out before argparse (see _split_dashdash)
     # so the top level keeps no free positional that would clash with these.
@@ -463,6 +474,21 @@ def main(argv=None):
         if sys.stdin.isatty():
             parser.error("--watch reads piped stdin, but stdin is a terminal")
 
+    # --line-by-line preconditions, same early-fail treatment as --watch.
+    if args.line_by_line:
+        if args.interactive or args.continue_session or args.sessions:
+            parser.error("--line-by-line cannot combine with -i/--continue/--sessions")
+        if args.watch:
+            parser.error("--line-by-line cannot combine with --watch")
+        if args.prompt is None and dashdash_prompt is None:
+            parser.error("--line-by-line needs a prompt (-p/--prompt or after '--'): "
+                         "it is the task run against each line")
+        if args.file is None and sys.stdin.isatty():
+            parser.error("--line-by-line reads --file or piped stdin, "
+                         "but stdin is a terminal and no --file was given")
+        if args.cores < 1:
+            parser.error("--cores must be >= 1")
+
     # --cwd: move the whole process before any config/file/tool work, so --file,
     # the fs tool sandbox (which resolves against os.getcwd()) and every other
     # tool see paths relative to the requested directory.
@@ -592,6 +618,41 @@ def main(argv=None):
                          _driver,
                          threshold=args.watch_threshold,
                          window=args.watch_window)
+
+    if args.line_by_line:
+        from cai import lines
+
+        # the input to iterate: --file's lines when given (the file IS the
+        # input, not context), else piped stdin's - consumed as a stream, so
+        # runs start on the first line while the producer is still writing.
+        if args.file:
+            try:
+                source = open(args.file)
+            except OSError as e:
+                parser.error(f"cannot read --file: {e}")
+        else:
+            source = sys.stdin
+
+        def _line_source():
+            for raw in source:
+                line = raw.rstrip("\r\n")
+                if not line.strip(): continue
+                yield line
+
+        def _make_line_run(line):
+            messages = []
+            messages.append({"role": "user", "content": line})
+            messages.append({"role": "user", "content": prompt})
+            return _spawn(messages)
+
+        try:
+            return lines.run(_make_line_run,
+                             _line_source(),
+                             cores=args.cores,
+                             show_reasoning=env.settings.show_reasoning)
+        finally:
+            if source is not sys.stdin:
+                source.close()
 
     messages = _build_messages(args, prompt, parser)
     if not messages:
