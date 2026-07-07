@@ -40,12 +40,16 @@ def _wait_for(predicate, message, timeout=5.0):
 # live_names / completion
 # --------------------------------------------------------------------------
 
-def test_live_names_skips_stale_sockets(monkeypatch, tmp_path):
+def _stale_socket(path):
+    """a crash leftover: a socket file whose listener is long gone."""
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.bind(str(path))
+    sock.close()
+
+
+def test_live_names_skips_and_reaps_stale_sockets(monkeypatch, tmp_path):
     _registry_at(monkeypatch, tmp_path)
-    # a stale socket file: bound once, listener long gone.
-    stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    stale.bind(str(tmp_path / "dead.sock"))
-    stale.close()
+    _stale_socket(tmp_path / "dead.sock")
 
     agent = make_agent(api=FakeApi(chunks=["hello"]))
     served = UnixWiredAgent(agent, str(tmp_path / "alive.sock"))
@@ -53,7 +57,34 @@ def test_live_names_skips_stale_sockets(monkeypatch, tmp_path):
     thread.start()
 
     assert tail.live_names() == ["alive"]
+    # the probe that found the corpse also buried it.
+    assert not (tmp_path / "dead.sock").exists()
 
+    served.close()
+    thread.join(timeout=5)
+
+
+def test_registry_connect_reaps_only_on_refused(monkeypatch, tmp_path):
+    _registry_at(monkeypatch, tmp_path)
+    _stale_socket(tmp_path / "dead.sock")
+
+    # refused: the definitive stale signal - raised through, file reaped.
+    with pytest.raises(ConnectionRefusedError):
+        AgentsRegistry.connect("dead")
+    assert not (tmp_path / "dead.sock").exists()
+
+    # missing: plain OSError, nothing to reap, nothing created.
+    with pytest.raises(OSError):
+        AgentsRegistry.connect("ghost")
+
+    # live: connects, and the socket file stays.
+    agent = make_agent(api=FakeApi(chunks=["hello"]))
+    served = UnixWiredAgent(agent, str(tmp_path / "alive.sock"))
+    thread = threading.Thread(target=served.serve, daemon=True)
+    thread.start()
+    conn = AgentsRegistry.connect("alive")
+    conn.close()
+    assert (tmp_path / "alive.sock").exists()
     served.close()
     thread.join(timeout=5)
 

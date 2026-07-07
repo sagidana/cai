@@ -177,7 +177,7 @@ def _push_result_to_parent(parent_name, child_name, result, error, delivery=None
     if delivery is not None and delivery.claimed():
         return
     try:
-        client = connect(AgentsRegistry.sock_path(parent_name))
+        client = AgentsRegistry.connect(parent_name)
     except OSError:
         return
     try:
@@ -325,7 +325,7 @@ def _send_kill(agent_id):
     """send the kill control op to a child over a short-lived connection. returns
     False when there is no socket to reach (the child already tore down)."""
     try:
-        client = connect(AgentsRegistry.sock_path(agent_id))
+        client = AgentsRegistry.connect(agent_id)
     except OSError:
         return False
     try:
@@ -418,7 +418,7 @@ def _wait_agent(parent, agent_id, timeout=30, kill=False, deliveries=None):
     if delivery is not None and delivery.done:
         return _finished(agent_id, delivery)
     try:
-        client = connect(AgentsRegistry.sock_path(agent_id))
+        client = AgentsRegistry.connect(agent_id)
     except OSError:
         # the socket is gone: the child tore down. the owner parks the record
         # before closing the socket, so a recheck reads the ending it left; a

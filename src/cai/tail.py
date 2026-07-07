@@ -10,8 +10,8 @@ every attached wire, and this one may come and go freely.
 
 bare `--tail` offers the live agents in an fzf picker (the fzf binary must be
 on PATH). the flag's tab completion lists the same live agents; a stale
-socket file left by a crash is skipped by both (a connect() probe tells the
-two apart).
+socket file left by a crash is skipped by both - and reaped by the registry's
+connect() the moment the probe finds it refusing connections.
 
 kept import-light on purpose: the CLI dispatches --tail before the heavy LLM
 bootstrap, so tailing (and completing) needs neither config nor an API key."""
@@ -21,7 +21,6 @@ import subprocess
 import sys
 
 from cai.agents_registry import AgentsRegistry
-from cai.channel import connect
 from cai.events import EventType
 from cai.wire import Wire
 
@@ -36,7 +35,7 @@ def live_names():
     names = []
     for name in AgentsRegistry.list_names():
         try:
-            probe = connect(AgentsRegistry.sock_path(name))
+            probe = AgentsRegistry.connect(name)
         except OSError:
             continue
         probe.close()
@@ -187,7 +186,7 @@ def _control(name, op):
     """run one read-only control op over a short-lived connection; None when
     the socket is gone or the op fails (the :agents view reads the same way)."""
     try:
-        conn = connect(AgentsRegistry.sock_path(name))
+        conn = AgentsRegistry.connect(name)
     except OSError:
         return None
     wire = Wire(conn)
@@ -267,7 +266,7 @@ def run(name):
         if name is None:
             return 1
     try:
-        conn = connect(AgentsRegistry.sock_path(name))
+        conn = AgentsRegistry.connect(name)
     except OSError:
         print(f"no running agent named {name!r}", file=sys.stderr)
         return 1

@@ -1089,7 +1089,7 @@ def _agent_control(name, op):
     from cai.agents_registry import AgentsRegistry
 
     try:
-        channel = connect(AgentsRegistry.sock_path(name))
+        channel = AgentsRegistry.connect(name)
     except OSError:
         return None
     wire = Wire(channel)
@@ -1121,7 +1121,7 @@ def _attach_agent(screen, node, cfg, stop_fn):
 
     name = node["id"]
     try:
-        channel = connect(AgentsRegistry.sock_path(name))
+        channel = AgentsRegistry.connect(name)
     except OSError:
         return False
     stream = Wire(channel)
@@ -1252,7 +1252,7 @@ def _open_agents(screen, client, cfg):
         if name == self_name:
             return
         try:
-            channel = connect(AgentsRegistry.sock_path(name))
+            channel = AgentsRegistry.connect(name)
         except OSError:
             return
         try:

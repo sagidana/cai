@@ -3,9 +3,10 @@ unix socket - ~/.config/cai/agents/<agent_name>.sock.
 
 the socket file IS the registry entry: a served agent creates it on bind and
 the UnixSocketServer unlinks it on close (deterministic cleanup); a crashed
-agent leaves a stale socket, which reap() clears once it is known dead. no
-metadata lives on disk - the file name carries the agent's name and nothing
-else. kept free of heavy imports so it stays cheap to pull in.
+agent leaves a stale socket, which connect() reaps the moment any caller
+finds it refusing connections. no metadata lives on disk - the file name
+carries the agent's name and nothing else. kept free of heavy imports so it
+stays cheap to pull in.
 
 AgentsRegistry is a static class (no instances): it owns the folder, not any
 one agent, so its methods read like AgentsRegistry.sock_path(name)."""
@@ -45,6 +46,21 @@ class AgentsRegistry:
                 continue
             names.append(entry[:-len(".sock")])
         return names
+
+    @staticmethod
+    def connect(name):
+        """connect to a served agent's socket - the one way callers should
+        reach a registry agent. a refused connection is the definitive stale
+        signal (the file exists, nobody listens: a crash leftover), so it is
+        reaped here before the error propagates - every probe doubles as the
+        registry's garbage collection. other failures (already gone, transient)
+        raise untouched."""
+        from cai.channel import connect
+        try:
+            return connect(AgentsRegistry.sock_path(name))
+        except ConnectionRefusedError:
+            AgentsRegistry.reap(name)
+            raise
 
     @staticmethod
     def reap(name):
