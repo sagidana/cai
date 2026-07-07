@@ -75,11 +75,12 @@ class _Printer:
     a TTY). tracks whether the cursor sits mid-stream so a line never glues
     onto a half-written content chunk."""
 
-    def __init__(self, out=None):
+    def __init__(self, out=None, show_reasoning=True):
         if out is None:
             out = sys.stdout
         self.out = out
         self.tty = out.isatty()
+        self.show_reasoning = show_reasoning
         self.midline = False
 
     def stream(self, text, dim=False):
@@ -125,6 +126,7 @@ class _Printer:
             self.stream(event.text or "")
             return
         if event.type == EventType.REASONING:
+            if not self.show_reasoning: return
             self.stream(event.text or "", dim=True)
             return
         if event.type == EventType.TOOL_CALL:
@@ -165,6 +167,20 @@ def _replay(printer, messages):
             name = function.get("name") or "?"
             call_names[call.get("id")] = name
             printer.tool_call(name, _stored_call_args(function))
+
+
+def _show_reasoning():
+    """the user's show_reasoning setting, the same one the TUI honors. loading
+    the environment runs extension/init.py registrations - what every CLI run
+    does anyway; still no config.json or API key needed. a broken init.py must
+    not take a passive tail down with it, so any load failure means the
+    default."""
+    from cai.environment import Environment
+
+    try:
+        return Environment.default().load().settings.show_reasoning
+    except Exception:
+        return True
 
 
 def _control(name, op):
@@ -258,7 +274,7 @@ def run(name):
     # the stream attaches before the snapshot is read, so a message completing
     # in between renders twice at worst - never gets lost.
     wire = Wire(conn)
-    printer = _Printer()
+    printer = _Printer(show_reasoning=_show_reasoning())
     _replay(printer, _control(name, "get_messages") or [])
     try:
         return _follow(printer, name, wire)

@@ -64,6 +64,8 @@ def test_live_names_skips_stale_sockets(monkeypatch, tmp_path):
 
 def test_tail_replays_backlog_then_streams_live(monkeypatch, tmp_path):
     _registry_at(monkeypatch, tmp_path)
+    # keep the test hermetic: the real settings read imports ~/.config/cai.
+    monkeypatch.setattr(tail, "_show_reasoning", lambda: True)
     agent = make_agent(api=FakeApi(chunks=["hello"]))
     served = UnixWiredAgent(agent, str(tmp_path / "a.sock"))
     serve_thread = threading.Thread(target=served.serve, daemon=True)
@@ -179,6 +181,15 @@ def test_replay_renders_the_stored_conversation():
     assert "-> fs__read(path=x)" in text
     assert "<- fs__read: 5 chars" in text
     assert "done" in text
+
+
+def test_printer_honors_show_reasoning():
+    out = io.StringIO()
+    printer = tail._Printer(out, show_reasoning=False)
+    printer.event(Event(type=EventType.REASONING, text="pondering"))
+    printer.event(Event(type=EventType.CONTENT, text="answer"))
+    assert "pondering" not in out.getvalue()
+    assert "answer" in out.getvalue()
 
 
 def test_printer_closes_a_midstream_line_before_a_tool_line():

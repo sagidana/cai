@@ -383,7 +383,7 @@ def _diag_tool_call(tool_name, tool_args):
     sys.stderr.flush()
 
 
-def _drive(run):
+def _drive(run, show_reasoning=True):
     """consume the run, routing output, and print the final answer. returns the
     process exit code. a run that fails for good (ApiError after the api layer's
     retries, or an LLMError like max_steps / strict-format exhaustion) prints
@@ -397,7 +397,8 @@ def _drive(run):
             if event.type == EventType.CONTENT:
                 _stream_out(event.text or "")
             elif event.type == EventType.REASONING:
-                _stream_out(event.text or "")
+                if show_reasoning:
+                    _stream_out(event.text or "")
             elif event.type == EventType.TOOL_CALL:
                 _diag_tool_call(event.tool_name, event.tool_args)
             elif event.type == EventType.TOOL_RESULT:
@@ -541,6 +542,10 @@ def main(argv=None):
                     api_key,
                     ssl_verify=config.load_optional("ssl_verify", True))
 
+    def _driver(run):
+        # the settings flag the TUI honors gates the headless stream too.
+        return _drive(run, show_reasoning=env.settings.show_reasoning)
+
     def _spawn(messages):
         return Run(messages,
                    model,
@@ -584,7 +589,7 @@ def main(argv=None):
             return _spawn(messages)
 
         return watch.run(_make_run,
-                         _drive,
+                         _driver,
                          threshold=args.watch_threshold,
                          window=args.watch_window)
 
@@ -592,4 +597,4 @@ def main(argv=None):
     if not messages:
         parser.error("no prompt: pass -p/--prompt, a prompt after '--', --file, or piped stdin")
 
-    return _drive(_spawn(messages))
+    return _driver(_spawn(messages))
