@@ -132,7 +132,7 @@ _run_gate = ContextVar("cai_run_gate", default=None)
 class RunGate:
     """what call_llm publishes around its dispatch loop so an in-process tool can
     call another tool on the agent's behalf and still be gated. a tool that
-    dispatches for the model (the python tool's call()) reads it with
+    dispatches for the model (the python tool's tool_call()) reads it with
     current_gate() and routes through gated_dispatch, so an inner call fires the
     same before/after_tool_call hooks a top-level call does - a gate can veto it -
     without the inner result ever entering the conversation."""

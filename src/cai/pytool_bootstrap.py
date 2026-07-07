@@ -3,7 +3,7 @@ managed venv's interpreter (as `python -c` SOURCE TEXT, read by cai.pytool;
 this module is never imported, and importing it by accident runs nothing).
 
 It reads the snippet from stdin, enters the kernel namespace jail, installs
-the audit-hook jail, wires call() over the two inherited RPC fds, and execs
+the audit-hook jail, wires tool_call() over the two inherited RPC fds, and execs
 the snippet. stdlib-only, so it runs under the empty managed venv.
 
 The kernel jail (default) pivots into a mount namespace where ONLY cwd +
@@ -15,7 +15,7 @@ userspace: reads (and directory listings) are confined to the same roots;
 writes are allowed under the scratch dir only and denied everywhere else, as
 are subprocess/exec/fork, sockets, ctypes and cffi. raw
 os.read/os.write on the inherited fds emit no audit events and namespaces do
-not sever inherited fds, so call() needs no exception in either jail."""
+not sever inherited fds, so tool_call() needs no exception in either jail."""
 import sys
 import os
 import json
@@ -374,7 +374,7 @@ def hook(event, args):
         in_hook[0] = False
 
 
-# --- the call() tool proxy ---------------------------------------------------
+# --- the tool_call() tool proxy ----------------------------------------------
 
 _RPC_RD = -1
 _RPC_WR = -1
@@ -394,7 +394,7 @@ def _rpc_readline():
         _rpc_buf.extend(chunk)
 
 
-def call(name, **kwargs):
+def tool_call(name, **kwargs):
     """dispatch one of the agent's own tools and return its result string. the
     call runs in the cai process, through cai's tool gates; only what you
     print() reaches the model, so reduce a big result here first."""
@@ -429,7 +429,7 @@ def main():
     _RPC_WR = int(os.environ["CAI_PY_RPC_WRITE"])
 
     sys.addaudithook(hook)
-    exec(compile(code, "<python>", "exec"), {"__name__": "__main__", "call": call})
+    exec(compile(code, "<python>", "exec"), {"__name__": "__main__", "tool_call": tool_call})
 
 
 if __name__ == "__main__":

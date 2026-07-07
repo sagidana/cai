@@ -1,5 +1,5 @@
 """Tests for the builtin `python` tool: the audit-hook sandbox, the managed
-venv, and the call() tool-proxy that dispatches the agent's own tools in-process
+venv, and the tool_call() tool-proxy that dispatches the agent's own tools in-process
 through the run's gates. The child is really spawned; for speed most tests point
 the venv at the current interpreter (the sandbox blocks cffi regardless), and one
 test exercises real venv creation."""
@@ -423,7 +423,7 @@ def test_call_proxies_a_tool_and_only_print_reaches_output(monkeypatch):
     agent = _agent_with_echo()
     try:
         # the raw result is computed but NOT printed; only the derived value is
-        out = _run(agent, "r = call('echo', x=7)\nprint(r.split(':')[1])")
+        out = _run(agent, "r = tool_call('echo', x=7)\nprint(r.split(':')[1])")
         assert out.strip() == "7"
         assert "echo:7" not in out
     finally:
@@ -434,8 +434,8 @@ def test_call_recursion_and_unavailable_guards(monkeypatch):
     _fast_venv(monkeypatch)
     agent = _agent_with_echo()
     try:
-        assert "cannot call itself" in _run(agent, "print(call('python', code='x'))")
-        assert "not available" in _run(agent, "print(call('secret'))")
+        assert "cannot call itself" in _run(agent, "print(tool_call('python', code='x'))")
+        assert "not available" in _run(agent, "print(tool_call('secret'))")
     finally:
         agent.close()
 
@@ -458,7 +458,7 @@ def test_inner_call_is_gated_by_before_tool_call(monkeypatch):
                    hooks_data={})
     token = hooks.set_gate(gate)
     try:
-        out = _run(agent, "print(call('echo', x=1))")
+        out = _run(agent, "print(tool_call('echo', x=1))")
         assert "aborted by a before_tool_call hook" in out
     finally:
         hooks.reset_gate(token)
@@ -471,7 +471,7 @@ def test_inner_call_without_a_gate_still_dispatches(monkeypatch):
     try:
         # no run gate published (SDK-style direct use): confined dispatch, ungated
         assert hooks.current_gate() is None
-        assert _run(agent, "print(call('echo', x=9))").strip() == "echo:9"
+        assert _run(agent, "print(tool_call('echo', x=9))").strip() == "echo:9"
     finally:
         agent.close()
 

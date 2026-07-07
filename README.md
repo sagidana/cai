@@ -139,7 +139,7 @@ conversation plus the settings needed to resume it.
   that, a `sys.addaudithook` jail enforces the same policy: it can read files
   and list directories inside the jail but create, modify or delete only under
   scratch, and subprocess/`ctypes`/`cffi` are blocked. The snippet also gets a
-  `call(name, **kwargs)` builtin that dispatches the agent's *own* selected
+  `tool_call(name, **kwargs)` builtin that dispatches the agent's *own* selected
   tools in-process — through the same `before_tool_call` gates — so a script
   can read a large tool result, reduce it in Python, and return only the
   answer, the intermediate data never entering model context (and any file

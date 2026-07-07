@@ -37,7 +37,7 @@ seccomp/AppArmor) fail closed with a clear message; there the operator - whose
 container is then the boundary - may set `python_sandbox: "hook"` in
 config.json to run with the hook layer only.
 
-The snippet is also handed a `call(name, **kwargs) -> str` builtin: it names one
+The snippet is also handed a `tool_call(name, **kwargs) -> str` builtin: it names one
 of the agent's OWN selected tools, and the call is dispatched IN the cai process
 (so every tool keeps its own confinement and reaches live agent state), through
 the run's before/after_tool_call hooks (so a gate still vetoes it), and the
@@ -45,10 +45,10 @@ result string comes back into the snippet. Only what the snippet print()s become
 the tool result - so a script can read a big tool result, reduce it in Python,
 and return just the answer, the intermediate data never entering model context.
 The RPC pipes are plain inherited fds, which namespaces do not sever - the
-call() channel is the one deliberate hole in the jail.
+tool_call() channel is the one deliberate hole in the jail.
 
 The tool is bound to its Agent (like the sub-agent tools) - that is what gives
-call() a live dispatch. It is registered on every agent but only offered to the
+tool_call() a live dispatch. It is registered on every agent but only offered to the
 model when the `python` skill selects it."""
 
 import json
@@ -164,7 +164,7 @@ def _dispatch_gated(agent, name, kwargs):
     if name == PY_TOOL_NAME:
         return f"Error: {PY_TOOL_NAME} cannot call itself"
     if name not in agent.tools:
-        return f"Error: tool {name!r} is not available to call() - callable tools are the agent's selected ones"
+        return f"Error: tool {name!r} is not available to tool_call() - callable tools are the agent's selected ones"
     gate = hooks.current_gate()
     if gate is None:
         return agent.tools_registry.dispatch(name, kwargs)
@@ -172,7 +172,7 @@ def _dispatch_gated(agent, name, kwargs):
 
 
 def _handle_request(agent, line, rep_w):
-    """serve one child call() request: dispatch it and write the reply back."""
+    """serve one child tool_call() request: dispatch it and write the reply back."""
     try:
         request = json.loads(line.decode("utf-8"))
     except ValueError:
@@ -185,7 +185,7 @@ def _handle_request(agent, line, rep_w):
 
 
 def _serve(agent, proc, req_r, rep_w, timeout):
-    """single-threaded driver: while the child runs, serve its call() requests on
+    """single-threaded driver: while the child runs, serve its tool_call() requests on
     this (the run-loop) thread - so inner calls are dispatched exactly like
     top-level ones. returns True if the child was killed on timeout. the child's
     stdout/stderr go to a temp file, not a pipe, so this loop never blocks on
@@ -222,7 +222,7 @@ def _run_python(agent, code, timeout):
     scratch = cai.scratch_dir()
     sandbox = config.load_optional("python_sandbox", "kernel")
 
-    req_r, req_w = os.pipe()   # child -> parent: call() requests
+    req_r, req_w = os.pipe()   # child -> parent: tool_call() requests
     rep_r, rep_w = os.pipe()   # parent -> child: results
     child_env = dict(os.environ)
     if scratch:
@@ -286,17 +286,20 @@ _DOC = """Run a Python snippet in cai's sandbox and return its output (stdout + 
     Each call is a fresh interpreter - variables do NOT carry over between calls.
     print() what you want to see, e.g. code="print(2 ** 100)".
 
-    The snippet also gets a call(name, **kwargs) builtin that runs one of YOUR
-    OWN currently-available tools and returns its result as a string - the call
-    executes in cai (respecting each tool's confinement and gates), so you can
-    read a large tool result, process it in Python, and print() only the answer,
-    keeping the intermediate data out of the conversation. Example:
-    code="text = call('fs__read_file', file_path='big.log')\\nprint(text.count('ERROR'))".
+    The snippet also gets a tool_call(name, **kwargs) builtin that runs one of
+    YOUR OWN currently-available tools and returns its result as a string - the
+    call executes in cai (respecting each tool's confinement and gates), so you
+    can read a large tool result, process it in Python, and print() only the
+    answer, keeping the intermediate data out of the conversation. Arguments
+    must be JSON-encodable - it is the same tool interface an MCP call goes
+    through, so NEVER pass Python bytes; encode binary as text first
+    (bytes.hex() or base64). Example:
+    code="text = tool_call('fs__read_file', file_path='big.log')\\nprint(text.count('ERROR'))".
 
     Sandbox: the tool can read files and list directories under the working
     directory and the session scratch dir, and WRITE only under the scratch dir
     (os.environ['CAI_SCRATCH']) - everywhere else is read-only (do project file
-    changes by call()ing a write tool like fs__create_file instead). subprocess,
+    changes by tool_call()ing a write tool like fs__create_file instead). subprocess,
     network, ctypes and cffi are blocked; a denied op raises PermissionError.
     The snippet runs in its own kernel namespace jail: no path outside the
     working directory, the scratch dir and the interpreter exists at all, and
@@ -310,7 +313,7 @@ _DOC = """Run a Python snippet in cai's sandbox and return its output (stdout + 
 
 
 def make_python(agent):
-    """build the python tool bound to `agent`; call() reaches the agent's live
+    """build the python tool bound to `agent`; tool_call() reaches the agent's live
     tools/dispatch through the closure."""
     def python(code: str, timeout: int = 60) -> str:
         return _run_python(agent, code, timeout)

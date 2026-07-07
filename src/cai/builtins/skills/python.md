@@ -15,24 +15,32 @@ calls. `print()` what you want back.
   every other path does not exist.
 - Writes land under scratch ONLY - everywhere else is read-only. Use scratch to
   pass state between calls. Writes elsewhere, `subprocess`, `ctypes`, `cffi`
-  raise `PermissionError`. To change a project file, `call()` a write tool.
+  raise `PermissionError`. To change a project file, `tool_call()` a write tool.
 
-## call() — drive your other tools
+## tool_call() — drive your other tools
 
-`call(name, **kwargs) -> str` runs one of your selected tools (by its exact
+`tool_call(name, **kwargs) -> str` runs one of your selected tools (by its exact
 name, not `python`) and returns its result. Reduce big results in Python; only
 what you `print()` reaches you:
 
 ```python
-text = call("fs__read_file", file_path="big.log")
+text = tool_call("fs__read_file", file_path="big.log")
 print(text.count("ERROR"))
+```
+
+Arguments are the SAME JSON a direct MCP tool call takes — text only, NEVER
+Python `bytes`. Encode binary as text first:
+
+```python
+tool_call("fs__create_file", file_path="C", content=data.hex(), encoding="hex")   # right
+tool_call("fs__create_file", file_path="C", content=data)                         # WRONG: bytes
 ```
 
 Do writes inside the call — never `print()` a payload and re-type it into a
 write tool. To write 1638 bytes of `0x36`:
 
 ```python
-print(call("fs__create_file", file_path="C", content="36" * 1638, encoding="hex"))
+print(tool_call("fs__create_file", file_path="C", content="36" * 1638, encoding="hex"))
 ```
 
 `fs__create_file` takes `encoding="hex"`, so build any binary in Python and
