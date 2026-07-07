@@ -36,6 +36,7 @@ from cai.commands import CommandContext
 from cai.environment import Environment
 from cai.events import EventType
 from cai.screen import Screen
+from cai.screen.buffer import ContentBuffer
 from cai.screen.render import python_code_arg, render_python_code
 from cai.screen.overlays import config as overlay_config
 from cai.screen.overlays.config import Setting
@@ -179,6 +180,57 @@ class _Transcript:
         always separated from what precedes it by one blank line."""
         self._streaming = None
         self._screen.write(text, kind=kind, block=True)
+
+
+class _AttachView:
+    """the write() surface the attach overlay paints from: the same
+    write(text, kind=, block=) contract Screen offers - so _replay_messages
+    and _Transcript render a watched agent's conversation into it unchanged -
+    backed by a private ContentBuffer instead of the terminal. the overlay
+    reads the wrapped lines back (get_lines/line_count/rewrap) and paints
+    them itself; `version` bumps on every write so it knows when to repaint.
+    the kind styling (SGR transitions, the colored gutter) delegates to the
+    Screen methods that own it, so both views render identically."""
+
+    _KIND_STYLES = Screen._KIND_STYLES
+    _KIND_GUTTERS = Screen._KIND_GUTTERS
+
+    def __init__(self, cols):
+        self._buffer = ContentBuffer(cols)
+        self._current_kind = None
+        self.version = 0
+
+    def write(self, text, kind=None, block=False):
+        if not text: return
+        if block:
+            self._start_block()
+        if kind is not None:
+            text = self._apply_kind(text, kind, separated=block)
+        self._buffer.append_text(text, gutter=self._kind_gutter(kind))
+        self.version += 1
+
+    def _apply_kind(self, text, kind, separated=False):
+        return Screen._apply_kind(self, text, kind, separated=separated)
+
+    def _kind_gutter(self, kind):
+        return Screen._kind_gutter(self, kind)
+
+    def _start_block(self):
+        # Screen._start_block minus its cursor/viewport clamping - the overlay
+        # owns the viewport here.
+        self._buffer.end_line()
+        self._buffer.trim_trailing_blanks()
+        if self._buffer.line_count() > 0:
+            self._buffer.append_text('\n')
+
+    def rewrap(self, cols):
+        self._buffer.rewrap(cols)
+
+    def line_count(self):
+        return self._buffer.line_count()
+
+    def get_lines(self, start, count):
+        return self._buffer.get_lines(start, count)
 
 
 class _Status:
@@ -1052,13 +1104,72 @@ def _agent_control(name, op):
     return value
 
 
-def _open_agents(screen, client):
+def _attach_agent(screen, node, cfg, stop_fn):
+    """watch one live agent from the :agents view: attach a read-only wire to
+    its socket and mirror its conversation full-screen - the stored messages
+    first (get_messages over a short-lived control connection), then the run's
+    EVENT broadcast streamed live (a UnixWiredAgent broadcasts to every
+    attached wire, and a sub-agent's owner thread keeps its own wire, so this
+    one may come and go freely without stopping anything). nothing is ever
+    sent on the wire - no SUBMIT/STEER/INTERRUPT, and PROMPT broadcasts are
+    ignored (the owner answers them) - so the watched agent cannot be driven
+    from here. the snapshot is fetched after the stream attaches, so a message
+    completing in between may render twice - a duplicated tool line at worst,
+    never a lost one. returns False when the socket is unreachable (the agent
+    just finished), so the caller falls back to the static transcript."""
+    from cai.agents_registry import AgentsRegistry
+
+    name = node["id"]
+    try:
+        channel = connect(AgentsRegistry.sock_path(name))
+    except OSError:
+        return False
+    stream = Wire(channel)
+    snapshot = _agent_control(name, "get_messages")
+    view = _AttachView(screen._cols)
+    _replay_messages(view, snapshot or [], cfg)
+    transcript = _Transcript(view, cfg)
+    title = node.get("name") or name
+
+    def _drain():
+        try:
+            messages = stream.recv()
+        except OSError:
+            messages = None
+        if messages is None:
+            transcript.note(f"[{title} finished]\n", Screen.META)
+            return False
+        for msg in messages:
+            if msg.get("type") != Wire.EVENT: continue
+            transcript.event(Wire.event_from_dict(msg["event"]))
+        return True
+
+    def _kill():
+        stop_fn(name)
+
+    try:
+        screen.prompt_attach_overlay(view,
+                                     title=title,
+                                     watch=channel,
+                                     drain_fn=_drain,
+                                     kill_fn=_kill)
+    finally:
+        try:
+            channel.close()
+        except OSError:
+            pass
+    return True
+
+
+def _open_agents(screen, client, cfg):
     """open the live sub-agents tree, built solely from the agents sockets. each
     live agent answers get_info (name, model, the ids of its children); the tree
     is linked from those children lists, and a child with no live socket of its
     own (finished, torn down) still shows as a leaf. preview reads a live agent's
-    conversation over its socket; Enter opens it read-only; Ctrl-K interrupts a
-    live sub-agent. the TUI's own agent is the root, marked self."""
+    conversation over its socket; Enter attaches to it read-only (a finished one
+    opens its stored transcript instead); Ctrl-K interrupts a live sub-agent.
+    the TUI's own agent is the root, marked self - Enter on it just returns to
+    the conversation, which is that very view."""
     from cai.agents_registry import AgentsRegistry
     from cai.screen.ansi import SGR_DIM_GRAY, SGR_RESET
     from cai.screen.render import _preview_lines
@@ -1149,22 +1260,30 @@ def _open_agents(screen, client):
         finally:
             channel.close()
 
-    sel = screen.prompt_agents_overlay(_nodes, _preview, stop_fn=_stop,
-                                       self_id=self_name)
-    if sel is None:
-        return
-    chosen = None
-    for node in _nodes():
-        if node["id"] != sel: continue
-        chosen = node
-        break
-    if chosen is None:
-        return
-    messages = _messages_for(chosen)
-    if messages is None:
-        screen.write("[no transcript for this agent]\n", kind=Screen.META, block=True)
-        return
-    screen.prompt_messages_overlay(messages)
+    # Enter dives into the selected agent, ESC backs out one level: the attach
+    # view (or the static transcript) returns to the tree, the tree to the
+    # conversation.
+    while True:
+        sel = screen.prompt_agents_overlay(_nodes, _preview, stop_fn=_stop,
+                                           self_id=self_name)
+        if sel is None:
+            return
+        chosen = None
+        for node in _nodes():
+            if node["id"] != sel: continue
+            chosen = node
+            break
+        if chosen is None:
+            return
+        if chosen["id"] == self_name:
+            return
+        if chosen.get("live") and _attach_agent(screen, chosen, cfg, _stop):
+            continue
+        messages = _messages_for(chosen)
+        if messages is None:
+            screen.write("[no transcript for this agent]\n", kind=Screen.META, block=True)
+            return
+        screen.prompt_messages_overlay(messages)
 
 
 def _chip_lines(skills, tools):
@@ -1596,7 +1715,7 @@ def _handle_command(screen, client, status, registry, jobs, env, cmd, pending):
         _open_prompts(screen)
         return False
     if head == "agents":
-        _open_agents(screen, client)
+        _open_agents(screen, client, env.settings)
         return False
     if head == "system":
         if screen._busy:

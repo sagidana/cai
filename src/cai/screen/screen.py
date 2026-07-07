@@ -860,6 +860,25 @@ class Screen:
         finally:
             self.pop_focus()
 
+    def prompt_attach_overlay(self, view, *, title, watch=None, drain_fn=None,
+                              kill_fn=None):
+        """live read-only mirror of another agent's conversation (see
+        overlays/attach.py). view holds the rendered lines; watch is the
+        socket carrying the agent's event broadcast and drain_fn appends
+        what it receives; kill_fn() interrupts the agent on Ctrl-K."""
+        from .overlays.attach import prompt_attach_overlay
+
+        self.push_focus('attach')
+        try:
+            return prompt_attach_overlay(self,
+                                         view,
+                                         title=title,
+                                         watch=watch,
+                                         drain_fn=drain_fn,
+                                         kill_fn=kill_fn)
+        finally:
+            self.pop_focus()
+
     def prompt_tree_overlay(self, fetch_fn, **kwargs):
         """generic tree picker (see overlays.tree.prompt_tree_overlay). exposed
         for future hierarchical views; the agents view uses it via
