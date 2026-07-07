@@ -354,6 +354,23 @@ def _mcp_tool_schema(exposed, tool):
     return {"type": "function", "function": function}
 
 
+def _signature_line(schema):
+    """a one-line call signature from a tool's OpenAI schema, e.g.
+    `fs__create_file(file_path, content, encoding=...)` - required params bare,
+    optional ones marked `=...`."""
+    function = schema["function"]
+    params = function.get("parameters") or {}
+    properties = params.get("properties") or {}
+    required = params.get("required") or []
+    parts = []
+    for pname in properties:
+        if pname in required:
+            parts.append(pname)
+        else:
+            parts.append(pname + "=...")
+    return function["name"] + "(" + ", ".join(parts) + ")"
+
+
 class ToolsRegistry:
     """The tools an Agent/Run can reach: in-process Python functions and MCP
     server tools, in one dispatch table.
@@ -556,6 +573,22 @@ class ToolsRegistry:
         for exposed in self._selected:
             schemas.append(self._schemas[exposed])
         return schemas
+
+    def signatures(self):
+        """one-line call signatures of the selected tools, newline-joined - what a
+        skill prompt's `{{tools}}` slot is filled with, so the model sees the
+        concrete tools it can drive by name, not an abstraction. a tool whose
+        function opts out with `_cai_hide_from_tool_list` (the python tool, which
+        can't call itself) is skipped; MCP tools have no function object and are
+        always listed."""
+        lines = []
+        for name in self._selected:
+            fn = self._functions.get(name)
+            if getattr(fn, "_cai_hide_from_tool_list", False): continue
+            schema = self._schemas.get(name)
+            if schema is None: continue
+            lines.append(_signature_line(schema))
+        return "\n".join(lines)
 
     def dispatch(self, name, arguments):
         """run one tool by its exposed name. matches call_llm's tools_dispatch

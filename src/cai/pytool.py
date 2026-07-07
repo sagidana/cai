@@ -230,6 +230,15 @@ def _run_python(agent, code, timeout):
     child_env["CAI_PY_RPC_READ"] = str(rep_r)
     child_env["CAI_PY_RPC_WRITE"] = str(req_w)
     child_env["CAI_PY_SANDBOX"] = str(sandbox)
+    # the agent's own selected tools, minus python itself: the child turns each
+    # into a directly-callable function in the snippet's namespace (layer that
+    # makes the modified env look ordinary - fs__read_file(...) just works),
+    # resolved per call so it tracks the live selection.
+    names = []
+    for name in agent.tools:
+        if name == PY_TOOL_NAME: continue
+        names.append(name)
+    child_env["CAI_PY_TOOLS"] = json.dumps(names)
 
     # the mount point the child's kernel jail pivots onto. the tmpfs and binds
     # exist only in the child's mount namespace - in ours it stays an empty dir,
@@ -283,28 +292,18 @@ def _run_python(agent, code, timeout):
 
 _DOC = """Run a Python snippet in cai's sandbox and return its output (stdout + stderr).
 
-    Each call is a fresh interpreter - variables do NOT carry over between calls.
-    print() what you want to see, e.g. code="print(2 ** 100)".
+    One-shot: fresh interpreter every call, no variables survive between calls.
 
-    The snippet also gets a tool_call(name, **kwargs) builtin that runs one of
-    YOUR OWN currently-available tools and returns its result as a string - the
-    call executes in cai (respecting each tool's confinement and gates), so you
-    can read a large tool result, process it in Python, and print() only the
-    answer, keeping the intermediate data out of the conversation. Arguments
-    must be JSON-encodable - it is the same tool interface an MCP call goes
-    through, so NEVER pass Python bytes; encode binary as text first
-    (bytes.hex() or base64). Example:
-    code="text = tool_call('fs__read_file', file_path='big.log')\\nprint(text.count('ERROR'))".
+    YOUR OWN tools are callable right in the snippet: each is a plain function
+    of the same name (e.g. fs__read_file(file_path='big.log')), and
+    tool_call(name, **kwargs) does the same by name.
 
     Sandbox: the tool can read files and list directories under the working
     directory and the session scratch dir, and WRITE only under the scratch dir
-    (os.environ['CAI_SCRATCH']) - everywhere else is read-only (do project file
-    changes by tool_call()ing a write tool like fs__create_file instead). subprocess,
-    network, ctypes and cffi are blocked; a denied op raises PermissionError.
-    The snippet runs in its own kernel namespace jail: no path outside the
-    working directory, the scratch dir and the interpreter exists at all, and
-    there is no network interface. The interpreter is a managed virtualenv with
-    the standard library only.
+    (os.environ['CAI_SCRATCH']) - everywhere else is read-only.
+
+    To change or perform any action outside of the python interpreter or
+    scratch - use the provided dedicated tools.
 
     Args:
         code:    Python source to execute.
@@ -318,6 +317,10 @@ def make_python(agent):
     def python(code: str, timeout: int = 60) -> str:
         return _run_python(agent, code, timeout)
     python.__doc__ = _DOC
+    # the concrete tool list the model sees comes from the python skill's
+    # {{tools}} slot (registry.signatures); python must not list itself there -
+    # it cannot call itself (see _dispatch_gated).
+    python._cai_hide_from_tool_list = True
     return python
 
 

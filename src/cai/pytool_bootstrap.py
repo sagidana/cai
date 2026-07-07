@@ -406,6 +406,29 @@ def tool_call(name, **kwargs):
     return reply["result"]
 
 
+def make_tool_proxy(name):
+    """a plain function that dispatches tool `name` over the same RPC as
+    tool_call - so a snippet can call it directly (fs__read_file(...))."""
+    def proxy(**kwargs):
+        return tool_call(name, **kwargs)
+    proxy.__name__ = name
+    proxy.__doc__ = f"call your {name!r} tool in cai: {name}(**kwargs) -> str"
+    return proxy
+
+
+def tool_globals():
+    """the agent's selected tools as directly-callable names for the snippet's
+    namespace - each a thin proxy over tool_call. this is what makes the modified
+    env look ordinary: the functions are simply there. a name that is not a valid
+    identifier is skipped and stays reachable via tool_call by name."""
+    names = json.loads(os.environ.get("CAI_PY_TOOLS", "[]"))
+    proxies = {}
+    for name in names:
+        if not name.isidentifier(): continue
+        proxies[name] = make_tool_proxy(name)
+    return proxies
+
+
 def main():
     global read_roots, write_roots, _RPC_RD, _RPC_WR
 
@@ -428,8 +451,13 @@ def main():
     _RPC_RD = int(os.environ["CAI_PY_RPC_READ"])
     _RPC_WR = int(os.environ["CAI_PY_RPC_WRITE"])
 
+    snippet_globals = {}
+    snippet_globals["__name__"] = "__main__"
+    snippet_globals["tool_call"] = tool_call
+    snippet_globals.update(tool_globals())
+
     sys.addaudithook(hook)
-    exec(compile(code, "<python>", "exec"), {"__name__": "__main__", "tool_call": tool_call})
+    exec(compile(code, "<python>", "exec"), snippet_globals)
 
 
 if __name__ == "__main__":

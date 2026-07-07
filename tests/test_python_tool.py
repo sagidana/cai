@@ -430,6 +430,54 @@ def test_call_proxies_a_tool_and_only_print_reaches_output(monkeypatch):
         agent.close()
 
 
+def test_signatures_lists_selected_tools_but_not_python():
+    agent = _agent_with_echo()
+    try:
+        agent.tools_registry.select("python")
+        sigs = agent.tools_registry.signatures()
+        assert "echo(x)" in sigs
+        assert "python" not in sigs   # hidden: it cannot call itself
+    finally:
+        agent.close()
+
+
+def test_skill_prompt_fills_the_tools_slot():
+    from cai.skills import SkillsRegistry
+    from cai.tools import ToolsRegistry
+
+    @cai.tool
+    def echo(x: int) -> str:
+        """echo x back."""
+        return f"echo:{x}"
+    registry = ToolsRegistry.for_tools(["echo"])
+    skills = SkillsRegistry(registry)
+    skills._skills["s"] = type("S", (), {"body": "tools:\n{{tools}}"})()
+    assert "echo(x)" in skills.system_prompt
+    assert "{{tools}}" not in skills.system_prompt
+
+
+def test_selected_tools_are_callable_by_name(monkeypatch):
+    _fast_venv(monkeypatch)
+    agent = _agent_with_echo()
+    try:
+        # the tool is in the snippet's namespace as a plain function - no
+        # tool_call() needed; only the derived value is printed
+        out = _run(agent, "print(echo(x=5).split(':')[1])")
+        assert out.strip() == "5"
+    finally:
+        agent.close()
+
+
+def test_python_is_not_offered_as_a_callable(monkeypatch):
+    _fast_venv(monkeypatch)
+    agent = _agent_with_echo()
+    try:
+        # python must not be a proxy in the namespace (it cannot call itself)
+        assert "NameError" in _run(agent, "print(python)")
+    finally:
+        agent.close()
+
+
 def test_call_recursion_and_unavailable_guards(monkeypatch):
     _fast_venv(monkeypatch)
     agent = _agent_with_echo()

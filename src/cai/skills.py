@@ -183,4 +183,9 @@ class SkillsRegistry:
             parts.append(body)
         if not parts:
             return None
-        return "\n\n".join(parts)
+        prompt = "\n\n".join(parts)
+        # a skill body may carry a {{tools}} slot; fill it with the currently
+        # selected tools' signatures, resolved fresh here so it tracks selection.
+        if "{{tools}}" in prompt:
+            prompt = prompt.replace("{{tools}}", self.tools_registry.signatures())
+        return prompt

@@ -10,38 +10,31 @@ calls. `print()` what you want back.
 ## Rules
 
 - One-shot: fresh interpreter every call, no variables survive between calls.
-- Standard library only. No network. `input()` sees EOF.
-- Read/list the working dir and scratch (`os.environ['CAI_SCRATCH']`);
-  every other path does not exist.
-- Writes land under scratch ONLY - everywhere else is read-only. Use scratch to
-  pass state between calls. Writes elsewhere, `subprocess`, `ctypes`, `cffi`
-  raise `PermissionError`. To change a project file, `tool_call()` a write tool.
+- Read/List capabilities only available to file-system at
+  current-working-directory OR scratch (`os.environ['CAI_SCRATCH']`)
+- No network. `input()` sees EOF.
+- Writes available at scratch ONLY. Use scratch to pass state between calls.
+    - To change or perform any action outside of the python environment - use
+      the provided dedicated tools.
+- Never `print()` data and re-submit it to a tool - your context is precious.
+  If the data itself is not what you care about but its transfer between A to
+  B is, dont print - simply chain provided tools directly in your code.
 
-## tool_call() — drive your other tools
+## Call your dedicated tools from Python
 
-`tool_call(name, **kwargs) -> str` runs one of your selected tools (by its exact
-name, not `python`) and returns its result. Reduce big results in Python; only
-what you `print()` reaches you:
+Your tools are already in the snippet's namespace as plain functions —
+call them directly:
 
-```python
-text = tool_call("fs__read_file", file_path="big.log")
-print(text.count("ERROR"))
+```
+{{tools}}
 ```
 
-Arguments are the SAME JSON a direct MCP tool call takes — text only, NEVER
-Python `bytes`. Encode binary as text first:
+Arguments are text only, NEVER Python `bytes`. Encode binary as text first:
 
 ```python
-tool_call("fs__create_file", file_path="C", content=data.hex(), encoding="hex")   # right
-tool_call("fs__create_file", file_path="C", content=data)                         # WRONG: bytes
+fs__create_file(file_path="C", content=data.hex(), encoding="hex")   # right
+fs__create_file(file_path="C", content=data)                         # WRONG: bytes
 ```
 
-Do writes inside the call — never `print()` a payload and re-type it into a
-write tool. To write 1638 bytes of `0x36`:
-
-```python
-print(tool_call("fs__create_file", file_path="C", content="36" * 1638, encoding="hex"))
-```
-
-`fs__create_file` takes `encoding="hex"`, so build any binary in Python and
-hand off `bytes.hex()` — a PNG, WAV, zip, fixed header.
+`tool_call(name, **kwargs) -> str` does the same thing by name — use it when the
+tool name is dynamic (never `python`, which cannot call itself).
