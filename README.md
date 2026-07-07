@@ -96,6 +96,22 @@ values without swallowing it. When stdout is piped, progress goes to stderr and
 only the clean answer is printed. LLM knobs: `--model`, `--reasoning-effort`,
 `--temperature`, `--max-steps`, `--non-streaming`, `--cwd`.
 
+Two stream modes ride the same flags:
+
+```sh
+cai --tail worker            # follow a live agent's conversation, read-only
+cai --tail                   # no name: pick a live agent with fzf
+tail -f app.log | cai --watch -- what broke?   # run the prompt on each settle
+```
+
+`--tail` attaches to a served agent's unix socket (`~/.config/cai/agents/`)
+and prints the conversation as it happens — the backlog first, then the live
+stream; it never sends, so the agent can't be driven from a tail. `--watch`
+holds the prompt until piped stdin goes quiet for `--watch-threshold` seconds,
+then runs it as a one-shot agent over the last `--watch-window` bytes of the
+stream; new data kills an in-flight run, EOF triggers one final run and exits
+with its status.
+
 ## TUI
 
 `cai` with no prompt (and a terminal attached) opens the full-screen

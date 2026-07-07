@@ -11,6 +11,10 @@ completion lists every available tool/skill via the registries themselves.
 With no prompt to act on (no -p/'--', no --file, no piped stdin) and a terminal
 attached, cai drops into the interactive full-screen TUI (cai.tui); -i forces it.
 
+Two stream modes ride the same flags: --tail follows a live served agent's
+conversation read-only over its unix socket (cai.tail), and --watch runs the
+prompt as a one-shot agent each time piped stdin settles (cai.watch).
+
 The prompt is given via -p/--prompt or after a '--' separator (so --skill/--tool
 can each take several values without swallowing it): `cai --skill fs -- fix x`.
 
@@ -74,6 +78,18 @@ def _tool_completer(prefix, **kwargs):
 
     matching = []
     for name in Environment(list_extensions()).available_tools():
+        if not name.startswith(prefix): continue
+        matching.append(name)
+    return matching
+
+
+def _agent_completer(prefix, **kwargs):
+    # the live served agents, straight off their sockets - a completion
+    # request pays no config or LLM imports.
+    from cai.tail import live_names
+
+    matching = []
+    for name in live_names():
         if not name.startswith(prefix): continue
         matching.append(name)
     return matching
@@ -230,6 +246,32 @@ def build_parser():
                         metavar="FORMAT",
                         help="constrain the answer's shape: 'json', 'regex:<pat>' or "
                              "'regex-each-line:<pat>' (retries until it matches)")
+    tail_arg = parser.add_argument("--tail",
+                                   nargs="?",
+                                   const="",
+                                   default=None,
+                                   metavar="AGENT",
+                                   help="follow a live served agent's conversation "
+                                        "read-only (bare --tail picks one with fzf), "
+                                        "then exit")
+    tail_arg.completer = _agent_completer
+    parser.add_argument("--watch",
+                        action="store_true",
+                        help="watch piped stdin: each time the stream settles, run "
+                             "the prompt as a one-shot agent over its tail; new "
+                             "data kills an in-flight run")
+    parser.add_argument("--watch-threshold",
+                        type=float,
+                        default=2.0,
+                        metavar="SECONDS",
+                        help="quiet time on stdin that counts as settled "
+                             "(default 2)")
+    parser.add_argument("--watch-window",
+                        type=int,
+                        default=65536,
+                        metavar="BYTES",
+                        help="sliding window: a triggered run sees the last BYTES "
+                             "of the stream (default 64KiB)")
 
     # subcommands. the prompt is pulled out before argparse (see _split_dashdash)
     # so the top level keeps no free positional that would clash with these.
@@ -404,6 +446,21 @@ def main(argv=None):
         if args.python_command == "uninstall":
             return pytool.uninstall(args.packages)
         return pytool.list_packages()
+    if args.tail is not None:
+        from cai import tail
+        return tail.run(args.tail)
+
+    # --watch preconditions, checked before any bootstrap so a bad invocation
+    # fails fast: it is a headless stdin-driven mode, and the prompt IS the
+    # task each settle triggers.
+    if args.watch:
+        if args.interactive or args.continue_session or args.sessions:
+            parser.error("--watch cannot combine with -i/--continue/--sessions")
+        if args.prompt is None and dashdash_prompt is None:
+            parser.error("--watch needs a prompt (-p/--prompt or after '--'): "
+                         "it is the task each settle triggers")
+        if sys.stdin.isatty():
+            parser.error("--watch reads piped stdin, but stdin is a terminal")
 
     # --cwd: move the whole process before any config/file/tool work, so --file,
     # the fs tool sandbox (which resolves against os.getcwd()) and every other
@@ -474,33 +531,65 @@ def main(argv=None):
                        pick_session=pick_session,
                        initial_prompt=prompt)
 
-    messages = _build_messages(args, prompt, parser)
-    if not messages:
-        parser.error("no prompt: pass -p/--prompt, a prompt after '--', --file, or piped stdin")
-
     model = args.model or cfg.model
     env = Environment.default().load()
     # the cai.settings skills / tools are auto-activated on every CLI run, merged
     # in on top of any --skill / --tool the user passed.
     tools = Environment.merge_activations(args.tool, env.settings.tools)
     skills = Environment.merge_activations(args.skill, env.settings.skills)
+    api = OpenAiApi(cfg.base_url,
+                    api_key,
+                    ssl_verify=config.load_optional("ssl_verify", True))
 
-    run = Run(messages,
-              model,
-              OpenAiApi(cfg.base_url,
-                        api_key,
-                        ssl_verify=config.load_optional("ssl_verify", True)),
-              env=env,
-              system_prompt=system_prompt,
-              tools=tools,
-              skills=skills,
-              ui=TerminalUI(),
-              interrupt=threading.Event(),
-              reasoning_effort=args.reasoning_effort,
-              temperature=args.temperature,
-              max_steps=args.max_steps,
-              tool_result_max_chars=env.settings.tool_result_max_chars,
-              stream=not args.non_streaming,
-              strict_format=args.strict_format)
+    def _spawn(messages):
+        return Run(messages,
+                   model,
+                   api,
+                   env=env,
+                   system_prompt=system_prompt,
+                   tools=tools,
+                   skills=skills,
+                   ui=TerminalUI(),
+                   interrupt=threading.Event(),
+                   reasoning_effort=args.reasoning_effort,
+                   temperature=args.temperature,
+                   max_steps=args.max_steps,
+                   tool_result_max_chars=env.settings.tool_result_max_chars,
+                   stream=not args.non_streaming,
+                   strict_format=args.strict_format)
 
-    return _drive(run)
+    if args.watch:
+        from cai import watch
+
+        # the static turns every trigger shares - the --file block (read once,
+        # up front, so a bad path fails now and not mid-watch) and the prompt.
+        # per trigger the settled window text is prepended, mirroring the
+        # stdin/file/prompt order of a normal piped run.
+        base_messages = []
+        if args.file:
+            try:
+                with open(args.file) as f:
+                    file_content = f.read()
+            except OSError as e:
+                parser.error(f"cannot read --file: {e}")
+            block = f"<file_content path={args.file!r}>\n{file_content}\n</file_content>"
+            base_messages.append({"role": "user", "content": block})
+        base_messages.append({"role": "user", "content": prompt})
+
+        def _make_run(text):
+            messages = []
+            messages.append({"role": "user", "content": text})
+            for message in base_messages:
+                messages.append(message)
+            return _spawn(messages)
+
+        return watch.run(_make_run,
+                         _drive,
+                         threshold=args.watch_threshold,
+                         window=args.watch_window)
+
+    messages = _build_messages(args, prompt, parser)
+    if not messages:
+        parser.error("no prompt: pass -p/--prompt, a prompt after '--', --file, or piped stdin")
+
+    return _drive(_spawn(messages))
