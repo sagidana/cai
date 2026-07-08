@@ -3,11 +3,11 @@
 `cai --watch` turns the CLI into a trigger on stdin: while bytes keep coming
 nothing happens; once the stream has been quiet for --watch-threshold seconds,
 a one-shot run is spawned over the tail of the stream (the last --watch-window
-bytes) plus the usual prompt and flags. bytes arriving while that run is in
-flight kill it at once - its input is stale - and the wait starts over, the
-new bytes still inside the window for the next settle. EOF (the feeding
-process exited) gives any unprocessed data one final run, which nothing can
-kill anymore, and exits with its status.
+bytes) plus the usual prompt and flags. up to --watch-max-concurrents runs
+(default 1) may be in flight at once; spawning past that limit kills the
+oldest run first - its input is the stalest. EOF (the feeding process exited)
+gives any unprocessed data one final run and exits with the newest run's
+status once every run in flight has been waited out.
 
 the CLI owns flag parsing and run construction; run() here takes a
 make_run(text) factory and a drive(run) consumer, so this module is only the
@@ -60,47 +60,57 @@ def _spawn(make_run, drive, text):
 
 
 def _kill(worker):
-    """interrupt an in-flight run (new bytes made its input stale) and wait it
-    out. returns None: the worker slot is free."""
-    if worker is None:
-        return None
+    """interrupt an in-flight run (the concurrency limit needs its slot) and
+    wait it out."""
     if worker["thread"].is_alive():
         worker["run"].interrupt.set()
-        _note("[watch] new data - run killed")
+        _note("[watch] limit reached - oldest run killed")
     worker["thread"].join()
-    return None
 
 
-def _reap(worker):
-    """drop a worker whose run finished on its own; an in-flight one is kept."""
-    if worker is None:
-        return None
-    if worker["thread"].is_alive():
-        return worker
-    worker["thread"].join()
-    return None
+def _reap(workers):
+    """drop workers whose runs finished on their own; in-flight ones are
+    kept, oldest first."""
+    alive = []
+    for worker in workers:
+        if worker["thread"].is_alive():
+            alive.append(worker)
+            continue
+        worker["thread"].join()
+    return alive
 
 
-def run(make_run, drive, *, threshold=2.0, window=65536, stdin_fd=None):
+def _spawn_capped(workers, max_concurrents, make_run, drive, text):
+    """spawn a run, first killing oldest workers until the limit has room."""
+    while len(workers) >= max_concurrents:
+        _kill(workers[0])
+        del workers[0]
+    workers.append(_spawn(make_run, drive, text))
+
+
+def run(make_run, drive, *, threshold=2.0, window=65536, max_concurrents=1,
+        stdin_fd=None):
     """the settle loop: watch stdin_fd, fire drive(make_run(text)) on each
-    settle, kill an in-flight run the moment new bytes land. blocking; returns
-    the process exit code - the final EOF run's, or 0."""
+    settle, at most max_concurrents runs in flight - spawning past the limit
+    kills the oldest run. blocking; returns the process exit code - the
+    newest run's, or 0."""
     if stdin_fd is None:
         stdin_fd = sys.stdin.fileno()
     buf = bytearray()
-    pending = False           # bytes arrived since the last completed run
-    worker = None
+    pending = False           # bytes arrived since the last spawned run
+    workers = []              # in-flight runs, oldest first
     try:
         while True:
             readable, _, _ = select.select([stdin_fd], [], [], threshold)
             if not readable:
-                # quiet for a full threshold: reap a naturally-finished run,
-                # then fire on unprocessed data. a run still in flight just
-                # keeps running - only new bytes kill it.
-                worker = _reap(worker)
-                if pending and worker is None:
+                # quiet for a full threshold: reap naturally-finished runs,
+                # then fire on unprocessed data. runs still in flight keep
+                # running - only spawning past the limit kills one.
+                workers = _reap(workers)
+                if pending:
                     pending = False
-                    worker = _spawn(make_run, drive, buf.decode("utf-8", errors="replace"))
+                    _spawn_capped(workers, max_concurrents, make_run, drive,
+                                  buf.decode("utf-8", errors="replace"))
                 continue
             chunk = os.read(stdin_fd, 65536)
             if not chunk:
@@ -109,22 +119,20 @@ def run(make_run, drive, *, threshold=2.0, window=65536, stdin_fd=None):
             if len(buf) > window:
                 del buf[:len(buf) - window]
             pending = True
-            worker = _kill(worker)
     except KeyboardInterrupt:
-        _kill(worker)
+        for worker in workers:
+            _kill(worker)
         return 130
-    # EOF. a run in flight already covers the latest data (newer bytes would
-    # have killed it): wait for it and exit with its status. otherwise any
-    # unprocessed data gets one final run, on this thread - nothing can kill
-    # it now.
-    if worker is not None:
-        worker["thread"].join()
-        return worker["box"].get("code", 0)
+    # EOF. any unprocessed data gets one final run - a worker like any other,
+    # subject to the limit - then every run in flight is waited out; the exit
+    # code is the newest run's. no reap here: a finished worker may still own
+    # the exit code.
     if pending:
-        run_ = make_run(buf.decode("utf-8", errors="replace"))
         _note(f"[watch] stream ended - final run over {len(buf)} bytes")
-        try:
-            return drive(run_)
-        finally:
-            run_.close()
+        _spawn_capped(workers, max_concurrents, make_run, drive,
+                      buf.decode("utf-8", errors="replace"))
+    for worker in workers:
+        worker["thread"].join()
+    if workers:
+        return workers[-1]["box"].get("code", 0)
     return 0

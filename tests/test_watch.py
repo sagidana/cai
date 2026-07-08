@@ -83,7 +83,7 @@ def test_new_data_kills_the_inflight_run_and_retriggers():
     def feeder():
         os.write(w, b"a")
         _wait_for(lambda: ("start", "a") in log, "the first run")
-        os.write(w, b"b")                  # lands mid-run: kills it
+        os.write(w, b"b")                  # lands mid-run: the retrigger kills it
         _wait_for(lambda: ("start", "ab") in log, "the retriggered run")
         os.close(w)
     feeder_thread = threading.Thread(target=feeder, daemon=True)
@@ -172,6 +172,73 @@ def test_eof_with_nothing_pending_exits_clean():
     os.close(r)
     assert code == 0
     assert runs == []
+
+
+def test_max_concurrents_runs_in_parallel_and_kills_the_oldest_at_the_limit():
+    r, w = _pipe()
+    runs = []
+    log = []
+    release = threading.Event()
+    def drive(run):
+        log.append(("start", run.data))
+        while not release.is_set() and not run.interrupt.is_set():
+            time.sleep(0.005)
+        log.append(("end", run.data, run.interrupt.is_set()))
+        return len(run.data)
+    def feeder():
+        os.write(w, b"a")
+        _wait_for(lambda: ("start", "a") in log, "the first run")
+        os.write(w, b"b")
+        _wait_for(lambda: ("start", "ab") in log, "the second run")
+        os.write(w, b"c")
+        _wait_for(lambda: ("start", "abc") in log, "the third run")
+        release.set()
+        os.close(w)
+    feeder_thread = threading.Thread(target=feeder, daemon=True)
+    feeder_thread.start()
+
+    code = watch.run(_make_run(runs), drive, threshold=THRESHOLD, window=100,
+                     max_concurrents=2, stdin_fd=r)
+
+    feeder_thread.join(timeout=5)
+    os.close(r)
+    assert code == 3                                     # the newest run's code
+    assert log.index(("start", "ab")) < log.index(("end", "a", True))
+    assert log.index(("end", "a", True)) < log.index(("start", "abc"))
+    assert ("end", "ab", False) in log                   # never killed
+    assert ("end", "abc", False) in log
+    assert runs[0].closed
+    assert runs[1].closed
+    assert runs[2].closed
+
+
+def test_eof_final_run_kills_the_oldest_when_at_the_limit():
+    r, w = _pipe()
+    runs = []
+    log = []
+    def drive(run):
+        log.append(("start", run.data))
+        if run.data == "a":
+            run.interrupt.wait(5)          # hang until killed
+        log.append(("end", run.data, run.interrupt.is_set()))
+        return 9
+    def feeder():
+        os.write(w, b"a")
+        _wait_for(lambda: ("start", "a") in log, "the first run")
+        os.write(w, b"b")
+        os.close(w)                        # EOF while the first run hangs
+    feeder_thread = threading.Thread(target=feeder, daemon=True)
+    feeder_thread.start()
+
+    code = watch.run(_make_run(runs), drive, threshold=THRESHOLD, window=100, stdin_fd=r)
+
+    feeder_thread.join(timeout=5)
+    os.close(r)
+    assert code == 9
+    assert ("end", "a", True) in log       # killed to make room
+    assert ("end", "ab", False) in log     # the final run, never killed
+    assert runs[0].closed
+    assert runs[1].closed
 
 
 def test_eof_waits_out_an_inflight_run_and_returns_its_code():
