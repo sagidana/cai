@@ -1,7 +1,8 @@
 """watch: run a one-shot agent each time a byte stream settles.
 
 `cai --watch` turns the CLI into a trigger on stdin: while bytes keep coming
-nothing happens; once the stream has been quiet for --watch-threshold seconds,
+nothing happens; once the stream has been quiet for --watch-settle-after
+seconds,
 a one-shot run is spawned over the tail of the stream (the last --watch-window
 bytes) plus the usual prompt and flags. up to --watch-max-concurrents runs
 (default 1) may be in flight at once; spawning past that limit kills the
@@ -88,7 +89,7 @@ def _spawn_capped(workers, max_concurrents, make_run, drive, text):
     workers.append(_spawn(make_run, drive, text))
 
 
-def run(make_run, drive, *, threshold=2.0, window=65536, max_concurrents=1,
+def run(make_run, drive, *, settle_after=2.0, window=65536, max_concurrents=1,
         stdin_fd=None):
     """the settle loop: watch stdin_fd, fire drive(make_run(text)) on each
     settle, at most max_concurrents runs in flight - spawning past the limit
@@ -101,9 +102,9 @@ def run(make_run, drive, *, threshold=2.0, window=65536, max_concurrents=1,
     workers = []              # in-flight runs, oldest first
     try:
         while True:
-            readable, _, _ = select.select([stdin_fd], [], [], threshold)
+            readable, _, _ = select.select([stdin_fd], [], [], settle_after)
             if not readable:
-                # quiet for a full threshold: reap naturally-finished runs,
+                # quiet for a full settle-after: reap naturally-finished runs,
                 # then fire on unprocessed data. runs still in flight keep
                 # running - only spawning past the limit kills one.
                 workers = _reap(workers)

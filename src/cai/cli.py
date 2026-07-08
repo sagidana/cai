@@ -261,7 +261,7 @@ def build_parser():
                              "the prompt as a one-shot agent over its tail; "
                              "spawning past --watch-max-concurrents kills the "
                              "oldest in-flight run")
-    parser.add_argument("--watch-threshold",
+    parser.add_argument("--watch-settle-after",
                         type=float,
                         default=2.0,
                         metavar="SECONDS",
@@ -626,7 +626,7 @@ def main(argv=None):
 
         return watch.run(_make_run,
                          _driver,
-                         threshold=args.watch_threshold,
+                         settle_after=args.watch_settle_after,
                          window=args.watch_window,
                          max_concurrents=args.watch_max_concurrents)
 

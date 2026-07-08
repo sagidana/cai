@@ -108,7 +108,7 @@ cat urls.txt | cai --line-by-line --cores 4 -- is this site up?  # map over line
 `--tail` attaches to a served agent's unix socket (`~/.config/cai/agents/`)
 and prints the conversation as it happens — the backlog first, then the live
 stream; it never sends, so the agent can't be driven from a tail. `--watch`
-holds the prompt until piped stdin goes quiet for `--watch-threshold` seconds,
+holds the prompt until piped stdin goes quiet for `--watch-settle-after` seconds,
 then runs it as a one-shot agent over the last `--watch-window` bytes of the
 stream; up to `--watch-max-concurrents` runs may be in flight at once
 (default 1) — spawning past the limit kills the oldest run — and EOF triggers

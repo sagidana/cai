@@ -12,7 +12,7 @@ import pytest
 from cai import watch
 
 
-THRESHOLD = 0.05
+SETTLE_AFTER = 0.05
 
 
 class FakeRun:
@@ -61,7 +61,7 @@ def test_settle_triggers_one_run_over_the_buffer():
     feeder_thread = threading.Thread(target=feeder, daemon=True)
     feeder_thread.start()
 
-    code = watch.run(_make_run(runs), drive, threshold=THRESHOLD, window=100, stdin_fd=r)
+    code = watch.run(_make_run(runs), drive, settle_after=SETTLE_AFTER, window=100, stdin_fd=r)
 
     feeder_thread.join(timeout=5)
     os.close(r)
@@ -89,7 +89,7 @@ def test_new_data_kills_the_inflight_run_and_retriggers():
     feeder_thread = threading.Thread(target=feeder, daemon=True)
     feeder_thread.start()
 
-    code = watch.run(_make_run(runs), drive, threshold=THRESHOLD, window=100, stdin_fd=r)
+    code = watch.run(_make_run(runs), drive, settle_after=SETTLE_AFTER, window=100, stdin_fd=r)
 
     feeder_thread.join(timeout=5)
     os.close(r)
@@ -114,7 +114,7 @@ def test_window_slides_over_the_stream():
     feeder_thread = threading.Thread(target=feeder, daemon=True)
     feeder_thread.start()
 
-    watch.run(_make_run(runs), drive, threshold=THRESHOLD, window=4, stdin_fd=r)
+    watch.run(_make_run(runs), drive, settle_after=SETTLE_AFTER, window=4, stdin_fd=r)
 
     feeder_thread.join(timeout=5)
     os.close(r)
@@ -131,17 +131,17 @@ def test_a_silent_stream_does_not_retrigger():
     def feeder():
         os.write(w, b"x")
         _wait_for(lambda: log, "the settled run")
-        time.sleep(THRESHOLD * 6)          # several quiet thresholds
+        time.sleep(SETTLE_AFTER * 6)       # several quiet settle windows
         os.close(w)
     feeder_thread = threading.Thread(target=feeder, daemon=True)
     feeder_thread.start()
 
-    code = watch.run(_make_run(runs), drive, threshold=THRESHOLD, window=100, stdin_fd=r)
+    code = watch.run(_make_run(runs), drive, settle_after=SETTLE_AFTER, window=100, stdin_fd=r)
 
     feeder_thread.join(timeout=5)
     os.close(r)
     assert code == 0
-    assert log == ["x"]                    # once, not once per quiet threshold
+    assert log == ["x"]                    # once, not once per quiet window
 
 
 def test_eof_gives_unprocessed_data_a_final_run_and_its_exit_code():
@@ -154,7 +154,7 @@ def test_eof_gives_unprocessed_data_a_final_run_and_its_exit_code():
     os.write(w, b"tail")
     os.close(w)                            # EOF before any settle
 
-    code = watch.run(_make_run(runs), drive, threshold=THRESHOLD, window=100, stdin_fd=r)
+    code = watch.run(_make_run(runs), drive, settle_after=SETTLE_AFTER, window=100, stdin_fd=r)
 
     os.close(r)
     assert code == 7
@@ -167,7 +167,7 @@ def test_eof_with_nothing_pending_exits_clean():
     runs = []
     os.close(w)                            # empty stream
 
-    code = watch.run(_make_run(runs), lambda run: 0, threshold=THRESHOLD, window=100, stdin_fd=r)
+    code = watch.run(_make_run(runs), lambda run: 0, settle_after=SETTLE_AFTER, window=100, stdin_fd=r)
 
     os.close(r)
     assert code == 0
@@ -197,7 +197,7 @@ def test_max_concurrents_runs_in_parallel_and_kills_the_oldest_at_the_limit():
     feeder_thread = threading.Thread(target=feeder, daemon=True)
     feeder_thread.start()
 
-    code = watch.run(_make_run(runs), drive, threshold=THRESHOLD, window=100,
+    code = watch.run(_make_run(runs), drive, settle_after=SETTLE_AFTER, window=100,
                      max_concurrents=2, stdin_fd=r)
 
     feeder_thread.join(timeout=5)
@@ -230,7 +230,7 @@ def test_eof_final_run_kills_the_oldest_when_at_the_limit():
     feeder_thread = threading.Thread(target=feeder, daemon=True)
     feeder_thread.start()
 
-    code = watch.run(_make_run(runs), drive, threshold=THRESHOLD, window=100, stdin_fd=r)
+    code = watch.run(_make_run(runs), drive, settle_after=SETTLE_AFTER, window=100, stdin_fd=r)
 
     feeder_thread.join(timeout=5)
     os.close(r)
@@ -259,7 +259,7 @@ def test_eof_waits_out_an_inflight_run_and_returns_its_code():
     feeder_thread = threading.Thread(target=feeder, daemon=True)
     feeder_thread.start()
 
-    code = watch.run(_make_run(runs), drive, threshold=THRESHOLD, window=100, stdin_fd=r)
+    code = watch.run(_make_run(runs), drive, settle_after=SETTLE_AFTER, window=100, stdin_fd=r)
 
     feeder_thread.join(timeout=5)
     os.close(r)
