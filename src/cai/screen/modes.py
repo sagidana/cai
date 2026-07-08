@@ -16,7 +16,7 @@ from .ansi import (
 from .state import Mode, TUIState, SubmitException, CommandException
 from .input import (
     history_navigate,
-    delete_word_before, open_in_vim, open_buffer_in_vim,
+    delete_word_before, open_in_editor, open_buffer_in_editor,
     parse_mouse, input_pos_from_click, PASTE,
 )
 
@@ -494,7 +494,7 @@ class ModeHandler:
             return
 
         if key == KEY_CTRL_V:
-            self._open_buffer_in_vim(state, screen)
+            self._open_buffer_in_editor(state, screen)
             return
 
         if key == KEY_CTRL_C:
@@ -606,12 +606,13 @@ class ModeHandler:
             return
 
         if key == KEY_CTRL_V:
-            # nvim owns the terminal while it runs; push a non-'main' focus so
-            # the background event pump buffers writes instead of painting over
-            # it. pop_focus repaints the whole TUI once nvim exits.
+            # the editor owns the terminal while it runs; push a non-'main'
+            # focus so the background event pump buffers writes instead of
+            # painting over it. pop_focus repaints the whole TUI once the
+            # editor exits.
             screen.push_focus('vim')
             try:
-                new_buf = open_in_vim(screen._tty_fd, screen._cooked_attrs, screen._input_buf)
+                new_buf = open_in_editor(screen._tty_fd, screen._cooked_attrs, screen._input_buf)
                 screen._input_buf = new_buf
                 screen._cursor_pos = len(new_buf)
             finally:
@@ -1360,18 +1361,19 @@ class ModeHandler:
                 state.mode = Mode.VISUAL  # text objects switch to char-wise
         screen._refresh_all()
 
-    def _open_buffer_in_vim(self, state, screen):
-        """open the content buffer in nvim with cursor at current position."""
-        # nvim owns the terminal (it leaves the alt screen) while it runs; push
-        # a non-'main' focus so the background event pump buffers writes instead
-        # of painting over it. pop_focus re-enters the alt screen and repaints.
+    def _open_buffer_in_editor(self, state, screen):
+        """open the content buffer in the editor with cursor at current position."""
+        # the editor owns the terminal (it leaves the alt screen) while it runs;
+        # push a non-'main' focus so the background event pump buffers writes
+        # instead of painting over it. pop_focus re-enters the alt screen and
+        # repaints.
         screen.push_focus('vim')
         try:
-            open_buffer_in_vim(screen._tty_fd,
-                               screen._cooked_attrs,
-                               screen._buffer._lines,
-                               state.cursor_row,
-                               state.cursor_col)
+            open_buffer_in_editor(screen._tty_fd,
+                                  screen._cooked_attrs,
+                                  screen._buffer._lines,
+                                  state.cursor_row,
+                                  state.cursor_col)
             tty.setraw(screen._tty_fd)
         finally:
             screen.pop_focus()

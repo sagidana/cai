@@ -36,7 +36,7 @@ from .state import Mode, TUIState, SubmitException, CommandException
 from .buffer import ContentBuffer, GUTTER_GLYPH
 from .layout import Layout
 from .modes import ModeHandler
-from .input import read_key
+from .input import read_key, editor_argv
 
 # minimum time between streaming redraws (~60fps).
 _RENDER_INTERVAL = 0.016
@@ -556,7 +556,7 @@ class Screen:
             pass
 
     def view_in_editor(self, text, *, suffix='.txt'):
-        """open text in nvim read-only as a pager, then restore the screen.
+        """open text in the editor read-only as a pager, then restore the screen.
         for inspecting large content (the system prompt) without dumping it
         into the conversation buffer. the next prompt() repaints; the brief
         cooked window between here and there reads no input."""
@@ -571,7 +571,7 @@ class Screen:
             sys.stdout.write(f'{ALT_EXIT}{CUR_SHOW}')
             sys.stdout.flush()
             termios.tcsetattr(self._tty_fd, termios.TCSADRAIN, self._cooked_attrs)
-            subprocess.run(['nvim', '-R', tmp])
+            subprocess.run(editor_argv(tmp, readonly=True))
         finally:
             try:
                 os.unlink(tmp)
@@ -580,7 +580,7 @@ class Screen:
             self.pop_focus()
 
     def edit_in_editor(self, text, *, suffix='.txt'):
-        """open text in nvim (writable), restore the screen, and return the
+        """open text in the editor (writable), restore the screen, and return the
         edited text - or None if the buffer was left unchanged. companion to
         view_in_editor, which is read-only. focus handling is identical: the
         pump's writes buffer behind the 'editor' focus and repaint on pop."""
@@ -596,7 +596,7 @@ class Screen:
             sys.stdout.write(f'{ALT_EXIT}{CUR_SHOW}')
             sys.stdout.flush()
             termios.tcsetattr(self._tty_fd, termios.TCSADRAIN, self._cooked_attrs)
-            subprocess.run(['nvim', tmp])
+            subprocess.run(editor_argv(tmp))
             with open(tmp) as f:
                 new_text = f.read()
         finally:

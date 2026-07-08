@@ -36,7 +36,7 @@ from ..state import (
     _overlay_find_matches, _overlay_sync_search_cursor,
     _overlay_apply_filter, _overlay_recompute_tokens,
 )
-from ..input import read_key, parse_mouse
+from ..input import read_key, parse_mouse, editor_argv
 
 
 _ROLE_COLOR = {
@@ -660,7 +660,7 @@ def overlay_nav_key(ctx, key, rows, screen):
         ctx.instruction_mode = True
         ctx.instruction_buf = []
     elif key in KEY_ENTER:
-        _edit_in_nvim(ctx, screen)
+        _edit_in_editor(ctx, screen)
 
     return None
 
@@ -769,8 +769,8 @@ def _parse_sections(text):
     return (reasoning, response)
 
 
-def _edit_in_nvim(ctx, screen):
-    """open the selected message in nvim. messages with structure
+def _edit_in_editor(ctx, screen):
+    """open the selected message in the editor. messages with structure
     (tool_calls or list content) are edited as the raw JSON object so the
     user can rewrite tool names, arguments, call ids, etc. assistant
     messages with stored reasoning edit as two plain-text sections
@@ -815,7 +815,7 @@ def _edit_in_nvim(ctx, screen):
         sys.stdout.write(f'{ALT_EXIT}{CUR_SHOW}')
         sys.stdout.flush()
         termios.tcsetattr(screen._tty_fd, termios.TCSADRAIN, screen._cooked_attrs)
-        subprocess.run(['nvim', tmp])
+        subprocess.run(editor_argv(tmp))
         with open(tmp, 'r') as f:
             new_text = f.read()
 

@@ -2,6 +2,7 @@
 
 import os
 import select
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -186,8 +187,29 @@ def history_navigate(direction, history, history_idx, input_buf, cursor_pos):
     return history_idx, input_buf, cursor_pos
 
 
-def open_in_vim(tty_fd, cooked_attrs, buf):
-    """open buf content in nvim; return updated character list."""
+def editor_argv(path, *, readonly=False, row=None, col=None):
+    """build the command line for the user's editor: $EDITOR if set, nvim
+    otherwise. read-only mode and cursor positioning are vim flags, so they
+    are only added when the editor is vim-family; anything else just gets
+    the path."""
+    editor = os.environ.get('EDITOR', '').strip()
+    if not editor:
+        editor = 'nvim'
+    argv = shlex.split(editor)
+    name = os.path.basename(argv[0])
+    if name in ('vi', 'vim', 'nvim', 'gvim'):
+        if readonly:
+            argv.append('-R')
+        if row is not None:
+            # +line positions the cursor; 'normal! N|' moves to column N.
+            argv.append(f'+{row}')
+            argv.append(f'+normal! {col}|')
+    argv.append(path)
+    return argv
+
+
+def open_in_editor(tty_fd, cooked_attrs, buf):
+    """open buf content in the editor; return updated character list."""
     content = ''.join(buf)
     with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
         f.write(content)
@@ -196,7 +218,7 @@ def open_in_vim(tty_fd, cooked_attrs, buf):
         termios.tcsetattr(tty_fd, termios.TCSADRAIN, cooked_attrs)
         sys.stdout.write(CUR_SHOW)
         sys.stdout.flush()
-        subprocess.run(['nvim', tmp])
+        subprocess.run(editor_argv(tmp))
         tty.setraw(tty_fd)
         with open(tmp, 'r') as f:
             new_content = f.read().rstrip('\n')
@@ -208,8 +230,8 @@ def open_in_vim(tty_fd, cooked_attrs, buf):
     return list(new_content)
 
 
-def open_buffer_in_vim(tty_fd, cooked_attrs, lines, cursor_row, cursor_col):
-    """open content buffer in vim (read-only) with cursor at the given position."""
+def open_buffer_in_editor(tty_fd, cooked_attrs, lines, cursor_row, cursor_col):
+    """open content buffer in the editor with cursor at the given position."""
     content = '\n'.join(ansi_strip(line) for line in lines)
     with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
         f.write(content)
@@ -218,10 +240,8 @@ def open_buffer_in_vim(tty_fd, cooked_attrs, lines, cursor_row, cursor_col):
         termios.tcsetattr(tty_fd, termios.TCSADRAIN, cooked_attrs)
         sys.stdout.write(ALT_EXIT + CUR_SHOW)
         sys.stdout.flush()
-        # +line positions cursor; cursor_row is 0-based, vim is 1-based
-        vim_row = cursor_row + 1
-        vim_col = cursor_col + 1
-        subprocess.run(['nvim', f'+{vim_row}', f'+normal! {vim_col}|', tmp])
+        # cursor_row is 0-based, vim is 1-based
+        subprocess.run(editor_argv(tmp, row=cursor_row + 1, col=cursor_col + 1))
     finally:
         try:
             os.unlink(tmp)
