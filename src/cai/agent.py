@@ -80,6 +80,20 @@ def _new_name():
     return name
 
 
+def _selected_dispatch(registry):
+    """the model-facing dispatcher: only the selected tools - the ones actually
+    offered to the model - are callable. registered-but-unselected tools (wrap
+    targets, deselected tools, the always-registered sub-agent tools) stay
+    reachable through registry.dispatch programmatically, but a model that names
+    one gets the same error as for a tool that doesn't exist. checks selection
+    per call, so tools a skill selects mid-run become callable immediately."""
+    def selected_only(name, args):
+        if name not in registry.selected():
+            return f"Error: unknown tool '{name}'"
+        return registry.dispatch(name, args)
+    return selected_only
+
+
 def _trim_dispatch(dispatch, limit):
     """wrap a tool dispatcher so any result longer than `limit` chars is trimmed
     to it, with a marker noting how much was dropped, before it reaches the model
@@ -616,7 +630,7 @@ class Agent:
             skills_prompt = self.skills_registry.system_prompt
             system_prompt = _combine_prompts(self._system_prompt, skills_prompt)
             schemas = self.tools_registry.tools
-            dispatch = self.tools_registry.dispatch
+            dispatch = _selected_dispatch(self.tools_registry)
             if self.tool_result_max_chars:
                 dispatch = _trim_dispatch(dispatch, self.tool_result_max_chars)
             # the one place the env hooks and the public [(event, fn), ...] list

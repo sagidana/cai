@@ -380,6 +380,10 @@ class ToolsRegistry:
     sees - is the selected subset; `dispatch` runs any registered tool. So a tool
     can be available without being offered to the model (e.g. the sub-agent tools
     an Agent always registers but only sends once a skill or the user selects).
+    dispatch itself is the programmatic API and does not check selection - the
+    model-facing paths enforce it (Agent wraps dispatch in _selected_dispatch,
+    the python tool's tool_call() checks agent.tools), so a model naming an
+    unselected tool is refused even though the registration would run it.
 
     A bare tool name resolves against the registry's Environment - the function
     tools registered there via cai.tool: an Agent can select such a tool by
