@@ -4,9 +4,9 @@
 nothing happens; once the stream has been quiet for --watch-settle-after
 seconds,
 a one-shot run is spawned over the tail of the stream (the last --watch-window
-bytes) plus the usual prompt and flags. up to --watch-max-concurrents runs
-(default 1) may be in flight at once; spawning past that limit kills the
-oldest run first - its input is the stalest. EOF (the feeding process exited)
+bytes) plus the usual prompt and flags. up to --cores runs (default 1) may be
+in flight at once; spawning past that limit kills the oldest run first - its
+input is the stalest. EOF (the feeding process exited)
 gives any unprocessed data one final run and exits with the newest run's
 status once every run in flight has been waited out.
 

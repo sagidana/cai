@@ -110,10 +110,9 @@ and prints the conversation as it happens — the backlog first, then the live
 stream; it never sends, so the agent can't be driven from a tail. `--watch`
 holds the prompt until piped stdin goes quiet for `--watch-settle-after` seconds,
 then runs it as a one-shot agent over the last `--watch-window` bytes of the
-stream; up to `--watch-max-concurrents` runs may be in flight at once
-(default 1) — spawning past the limit kills the oldest run — and EOF triggers
-one final run over any unprocessed data and exits with the newest run's
-status. `--line-by-line` maps the prompt over each non-blank line of
+stream; up to `--cores` runs may be in flight at once (default 1) — spawning
+past the limit kills the oldest run — and EOF triggers one final run over any
+unprocessed data and exits with the newest run's status. `--line-by-line` maps the prompt over each non-blank line of
 `--file` or piped stdin — one one-shot agent per line, up to `--cores` in
 flight at once (default 1), consuming the input as a stream (work starts on
 the first line, not at EOF) and printing the answers to stdout in input

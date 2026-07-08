@@ -259,8 +259,7 @@ def build_parser():
                         action="store_true",
                         help="watch piped stdin: each time the stream settles, run "
                              "the prompt as a one-shot agent over its tail; "
-                             "spawning past --watch-max-concurrents kills the "
-                             "oldest in-flight run")
+                             "spawning past --cores kills the oldest in-flight run")
     parser.add_argument("--watch-settle-after",
                         type=float,
                         default=2.0,
@@ -273,13 +272,6 @@ def build_parser():
                         metavar="BYTES",
                         help="sliding window: a triggered run sees the last BYTES "
                              "of the stream (default 64KiB)")
-    parser.add_argument("--watch-max-concurrents",
-                        type=int,
-                        default=1,
-                        metavar="N",
-                        help="how many triggered runs may be in flight at once; "
-                             "spawning past the limit kills the oldest run "
-                             "(default 1)")
     parser.add_argument("--line-by-line",
                         action="store_true",
                         help="run the prompt as a one-shot agent over each line of "
@@ -289,8 +281,9 @@ def build_parser():
                         type=int,
                         default=1,
                         metavar="NUM",
-                        help="how many --line-by-line agents run in parallel "
-                             "(default 1)")
+                        help="how many agents run in parallel (default 1): "
+                             "--line-by-line workers, or in-flight --watch runs "
+                             "(spawning past the limit kills the oldest)")
 
     # subcommands. the prompt is pulled out before argparse (see _split_dashdash)
     # so the top level keeps no free positional that would clash with these.
@@ -481,8 +474,8 @@ def main(argv=None):
                          "it is the task each settle triggers")
         if sys.stdin.isatty():
             parser.error("--watch reads piped stdin, but stdin is a terminal")
-        if args.watch_max_concurrents < 1:
-            parser.error("--watch-max-concurrents must be at least 1")
+        if args.cores < 1:
+            parser.error("--cores must be >= 1")
 
     # --line-by-line preconditions, same early-fail treatment as --watch.
     if args.line_by_line:
@@ -628,7 +621,7 @@ def main(argv=None):
                          _driver,
                          settle_after=args.watch_settle_after,
                          window=args.watch_window,
-                         max_concurrents=args.watch_max_concurrents)
+                         max_concurrents=args.cores)
 
     if args.line_by_line:
         from cai import lines
