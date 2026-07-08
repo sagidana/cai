@@ -72,7 +72,10 @@ class _Printer:
     """paints the conversation to stdout in the headless CLI's idiom: user
     turns as '> ...', streamed content raw, tool traffic and notes dimmed (on
     a TTY). tracks whether the cursor sits mid-stream so a line never glues
-    onto a half-written content chunk."""
+    onto a half-written content chunk. a stream chunk's trailing newlines are
+    held back and only flushed when more text arrives - the model closes every
+    reasoning/content block with '\\n\\n' before a tool call, and written
+    eagerly those paint a stray blank line above each '->' line."""
 
     def __init__(self, out=None, show_reasoning=True):
         if out is None:
@@ -81,17 +84,28 @@ class _Printer:
         self.tty = out.isatty()
         self.show_reasoning = show_reasoning
         self.midline = False
+        self.pending = 0        # held-back trailing newlines from stream()
+        self.dirty = False      # anything painted since the last separator
 
     def stream(self, text, dim=False):
         if not text: return
-        ends = text.endswith("\n")
-        if dim and self.tty:
-            text = _DIM + text + _RESET
-        self.out.write(text)
-        self.out.flush()
-        self.midline = not ends
+        body = text.rstrip("\n")
+        if body:
+            if self.pending:
+                self.out.write("\n" * self.pending)
+                self.pending = 0
+            if dim and self.tty:
+                body = _DIM + body + _RESET
+            self.out.write(body)
+            self.out.flush()
+            self.midline = True
+            self.dirty = True
+        self.pending += len(text) - len(body)
 
     def line(self, text, dim=True):
+        # held newlines collapse into this line's own break: a block's
+        # trailing '\n\n' must not blank-line the '->' that follows it.
+        self.pending = 0
         if self.midline:
             self.out.write("\n")
             self.midline = False
@@ -99,6 +113,14 @@ class _Printer:
             text = _DIM + text + _RESET
         self.out.write(text + "\n")
         self.out.flush()
+        self.dirty = True
+
+    def separator(self):
+        """the blank line between turns - skipped for a turn that painted
+        nothing, so an invisible turn stays silent."""
+        if not self.dirty: return
+        self.line("", dim=False)
+        self.dirty = False
 
     def tool_call(self, name, args):
         # a python call is always a script: its code argument prints as a
@@ -230,7 +252,7 @@ def _print_msg(printer, msg):
         return
     if kind == Wire.RESULT:
         # end of turn: a blank line keeps turns visually separate.
-        printer.line("", dim=False)
+        printer.separator()
         return
     if kind == Wire.PROMPT:
         # the owner answers prompts; a tail just shows them. status updates

@@ -234,8 +234,33 @@ def test_printer_closes_a_midstream_line_before_a_tool_line():
 def test_result_message_separates_turns():
     out = io.StringIO()
     printer = tail._Printer(out)
+    printer.event(Event(type=EventType.CONTENT, text="answer"))
     tail._print_msg(printer, {"type": Wire.RESULT, "text": "x"})
-    assert out.getvalue() == "\n"
+    assert out.getvalue() == "answer\n\n"
+
+
+def test_result_after_a_silent_turn_prints_nothing():
+    out = io.StringIO()
+    printer = tail._Printer(out)
+    tail._print_msg(printer, {"type": Wire.RESULT, "text": "x"})
+    tail._print_msg(printer, {"type": Wire.RESULT, "text": "x"})
+    assert out.getvalue() == ""
+
+
+def test_stream_trailing_newlines_never_blank_a_tool_line():
+    out = io.StringIO()
+    printer = tail._Printer(out)
+    printer.event(Event(type=EventType.REASONING, text="pondering\n\n"))
+    printer.event(Event(type=EventType.TOOL_CALL, tool_name="t", tool_args={}))
+    assert out.getvalue() == "pondering\n  -> t()\n"
+
+
+def test_stream_paragraph_breaks_inside_text_survive():
+    out = io.StringIO()
+    printer = tail._Printer(out)
+    printer.event(Event(type=EventType.CONTENT, text="one\n\n"))
+    printer.event(Event(type=EventType.CONTENT, text="two"))
+    assert out.getvalue() == "one\n\ntwo"
 
 
 def test_prompt_broadcasts_render_but_status_is_skipped():
