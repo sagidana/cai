@@ -42,6 +42,7 @@ import logging
 import subprocess
 
 import requests
+import urllib3
 
 from cai import paths
 from cai.environment import Environment
@@ -145,14 +146,17 @@ class RemoteMCPServer:
     on initialize (the Mcp-Session-Id header) is echoed on later requests. One
     request/response at a time, matching the loop - no retries or timeouts."""
 
-    def __init__(self, url, label, headers=None):
+    def __init__(self, url, label, headers=None, ssl_verify=True):
         self.label = label
         self._url = url
         self._req_id = 0
         self._session_id = None
+        self._ssl_verify = ssl_verify
         self._headers = {}
         if headers is not None:
             self._headers = dict(headers)
+        if not ssl_verify:
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         self._handshake()
 
     def _handshake(self):
@@ -170,7 +174,8 @@ class RemoteMCPServer:
         headers["Accept"] = "application/json, text/event-stream"
         if self._session_id is not None:
             headers["Mcp-Session-Id"] = self._session_id
-        response = requests.post(self._url, json=message, headers=headers, stream=expect_reply)
+        response = requests.post(self._url, json=message, headers=headers, stream=expect_reply,
+                                 verify=self._ssl_verify)
         session_id = response.headers.get("Mcp-Session-Id")
         if session_id:
             self._session_id = session_id
@@ -270,7 +275,9 @@ def server_from_spec(name, spec, extra_env=None):
     spec's own env - a declared variable wins; a url server has no process to
     inject into, so it is ignored there."""
     if "url" in spec:
-        return RemoteMCPServer(spec["url"], name, headers=spec.get("headers"))
+        return RemoteMCPServer(spec["url"], name,
+                               headers=spec.get("headers"),
+                               ssl_verify=spec.get("ssl_verify", True))
     env = spec.get("env")
     if extra_env is not None:
         merged = dict(extra_env)
@@ -742,7 +749,7 @@ def wrap(target):
     return decorator
 
 
-def mcp_server(name, command=None, url=None, env=None, headers=None, cwd=None):
+def mcp_server(name, command=None, url=None, env=None, headers=None, cwd=None, ssl_verify=True):
     """declare an MCP server from init.py, the programmatic counterpart to
     dropping a <name>.py into ~/.config/cai/mcps/. give exactly one of:
 
@@ -754,6 +761,9 @@ def mcp_server(name, command=None, url=None, env=None, headers=None, cwd=None):
                        url="https://mcp.linear.app/mcp",
                        headers={"Authorization": "Bearer ..."})   # remote server
 
+    a url server verifies the TLS certificate by default; pass ssl_verify=False
+    to skip verification (self-signed or otherwise problematic certificates).
+
     it lands on the env being load()ed - else the process default. its tools
     surface namespaced '<name>__<tool>'; callers still list them in tools=[...]
     to expose them for a run. see Environment / ToolsRegistry."""
@@ -762,4 +772,5 @@ def mcp_server(name, command=None, url=None, env=None, headers=None, cwd=None):
                                          url=url,
                                          env=env,
                                          headers=headers,
-                                         cwd=cwd)
+                                         cwd=cwd,
+                                         ssl_verify=ssl_verify)

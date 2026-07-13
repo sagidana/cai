@@ -161,6 +161,43 @@ def test_remote_server_sse_reply_skips_comments_and_notifications():
         stub.shutdown()
 
 
+def test_remote_server_ssl_verify_passed_to_requests(monkeypatch):
+    seen = []
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/json"}
+
+        def json(self):
+            return {"jsonrpc": "2.0", "id": 1, "result": {}}
+
+    def fake_post(url, **kwargs):
+        seen.append(kwargs.get("verify"))
+        return FakeResponse()
+
+    monkeypatch.setattr("cai.tools.requests.post", fake_post)
+    RemoteMCPServer("https://stub/mcp", "stub", ssl_verify=False)
+    assert seen == [False, False]      # initialize + initialized notification
+
+    seen.clear()
+    RemoteMCPServer("https://stub/mcp", "stub")
+    assert seen == [True, True]        # verification stays on by default
+
+
+def test_declared_ssl_verify_lands_in_spec_and_rejects_command():
+    cai.mcp_server("insecure", url="https://stub/mcp", ssl_verify=False)
+    spec = Environment.target().server_spec("insecure")
+    assert spec == {"url": "https://stub/mcp", "ssl_verify": False}
+
+    cai.mcp_server("secure", url="https://stub/mcp")
+    assert Environment.target().server_spec("secure") == {"url": "https://stub/mcp"}
+
+    try:
+        cai.mcp_server("local", command=["true"], ssl_verify=False)
+        assert False, "expected ValueError"
+    except ValueError as error:
+        assert "ssl_verify" in str(error)
+
+
 def test_declared_remote_server_loads_through_registry():
     stub = _make_stub(sse=False)
     url = _serve(stub)

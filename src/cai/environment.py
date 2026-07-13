@@ -322,13 +322,15 @@ class Environment:
         """the registered function tools as exposed name -> callable (a copy)."""
         return dict(self._function_tools)
 
-    def register_server(self, name, command=None, url=None, env=None, headers=None, cwd=None):
+    def register_server(self, name, command=None, url=None, env=None, headers=None, cwd=None,
+                        ssl_verify=True):
         """declare a named MCP server (cai.mcp_server's backing), the
         programmatic counterpart to dropping a <name>.py into an mcps/ dir.
         exactly one of `command` (a stdio server: an argv list, with optional
         env/cwd) or `url` (a remote Streamable-HTTP server, with optional
-        headers) must be given. its tools surface namespaced '<name>__<tool>'
-        like any MCP server's. a later declaration of the same name wins."""
+        headers, and ssl_verify=False to skip certificate verification) must be
+        given. its tools surface namespaced '<name>__<tool>' like any MCP
+        server's. a later declaration of the same name wins."""
         if command is None and url is None:
             raise ValueError(f"MCP server {name!r}: give command= or url=")
         if command is not None and url is not None:
@@ -337,6 +339,8 @@ class Environment:
             raise ValueError(f"MCP server {name!r}: env/cwd apply to a command server, not a url")
         if command is not None and headers is not None:
             raise ValueError(f"MCP server {name!r}: headers apply to a url server, not a command")
+        if command is not None and ssl_verify is not True:
+            raise ValueError(f"MCP server {name!r}: ssl_verify applies to a url server, not a command")
         spec = {}
         if command is not None:
             if isinstance(command, str):
@@ -350,6 +354,8 @@ class Environment:
             spec["url"] = url
             if headers is not None:
                 spec["headers"] = dict(headers)
+            if not ssl_verify:
+                spec["ssl_verify"] = False
         self._declared_servers[name] = spec
 
     def server_spec(self, name):
