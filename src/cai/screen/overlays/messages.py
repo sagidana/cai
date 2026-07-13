@@ -220,12 +220,12 @@ def draw_messages_overlay(ctx, rows, cols):
             idx_str = str(ai + 1).rjust(idx_w)
             role_str = role[:role_w].ljust(role_w)
             prefix = f' {idx_str} {role_str} '
-            cell = (prefix + text)[:inner_w].ljust(inner_w)
+            cell = ansi_pad(prefix + text, inner_w)
             styled = _style_cell(cell, role, is_cursor, is_match, in_sel)
             put(1 + i, f'{VL}{styled}{VL}')
         else:
             indent = '   ' + ' ' * (idx_w + role_w)
-            body = (indent + text)[:inner_w].ljust(inner_w)
+            body = ansi_pad(indent + text, inner_w)
             # body rows never render with cursor highlight; selection dim only.
             styled = _style_cell(body, role, False, False, in_sel)
             put(1 + i, f'{VL}{styled}{VL}')

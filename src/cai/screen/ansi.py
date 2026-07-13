@@ -2,6 +2,7 @@
 
 import re
 import sys
+import unicodedata
 
 _ANSI_RE = re.compile(
     r'\033'
@@ -111,18 +112,80 @@ def ansi_strip(text):
     return _ANSI_RE.sub('', text)
 
 
+# C0 controls (including tab), DEL, and C1 controls. these render as a
+# variable number of columns (a tab advances to the next tab stop) or as
+# nothing, so measured width never matches drawn width until they're gone.
+_CONTROL_RE = re.compile(r'[\x00-\x1f\x7f-\x9f]')
+
+
+def ansi_sanitize(text):
+    """flatten text for single-line display: strip ANSI, then replace tabs and
+    every other control character with a single space. a raw tab in tool
+    output (kernel sources are tab-indented) otherwise expands to several
+    columns and pushes the row past the frame border."""
+    return _CONTROL_RE.sub(' ', ansi_strip(text))
+
+
+# zero-width codepoints east_asian_width/combining don't flag on their own.
+_ZERO_WIDTH = {
+    '​',   # zero-width space
+    '‌',   # zero-width non-joiner
+    '‍',   # zero-width joiner
+    '﻿',   # zero-width no-break space
+}
+
+
+def _char_width(ch):
+    """terminal columns one character occupies: 0 for combining/zero-width,
+    2 for East-Asian Wide/Fullwidth (CJK, most emoji), 1 otherwise."""
+    if ch in _ZERO_WIDTH:
+        return 0
+    if unicodedata.combining(ch):
+        return 0
+    if unicodedata.east_asian_width(ch) in ('W', 'F'):
+        return 2
+    return 1
+
+
+def display_width(text):
+    """visible width of text in terminal columns, ignoring ANSI sequences.
+    counts display columns (wide glyphs as 2, combining marks as 0) rather
+    than codepoints, so frame math stays aligned on non-ASCII content."""
+    width = 0
+    for ch in ansi_strip(text):
+        width += _char_width(ch)
+    return width
+
+
+def display_truncate(text, width):
+    """truncate plain text (no ANSI) to at most width display columns. a wide
+    glyph that would straddle the boundary is dropped whole, so the result
+    never exceeds width."""
+    out = []
+    used = 0
+    for ch in text:
+        w = _char_width(ch)
+        if used + w > width:
+            break
+        out.append(ch)
+        used += w
+    return ''.join(out)
+
+
 def ansi_pad(text, width):
-    """right-pad text to width visual columns, ignoring ANSI sequences.
-    if the visible length already exceeds width, truncates via ansi_strip
-    (losing color) so the result still fits. this keeps frame borders
-    aligned when status lines contain colored tokens."""
-    visible = len(ansi_strip(text))
+    """pad or truncate text to exactly width visual columns, ignoring ANSI
+    sequences. if the visible width already exceeds width, truncates via
+    ansi_strip (losing color) so the result still fits. this keeps frame
+    borders aligned when cells contain colored or wide-glyph tokens."""
+    visible = display_width(text)
     if visible < width:
         return text + ' ' * (width - visible)
     if visible == width:
         return text
-    # overflow - strip ANSI to make truncation safe.
-    return ansi_strip(text)[:width]
+    # overflow - strip ANSI to make truncation safe, then re-pad in case a
+    # wide glyph landed on the boundary and left the row a column short.
+    truncated = display_truncate(ansi_strip(text), width)
+    return truncated + ' ' * (width - display_width(truncated))
 
 
 def osc52_copy(text):

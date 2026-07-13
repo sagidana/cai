@@ -12,7 +12,7 @@ from ..ansi import (
     CUR_SHOW, CUR_HIDE,
     ERASE_SCREEN,
     SGR_RESET, SGR_REVERSE, SGR_DIM_GRAY, SGR_BOLD_AZURE,
-    ansi_pad,
+    ansi_pad, ansi_sanitize, display_width, display_truncate,
     cur_move,
     KEY_BACKSPACE, KEY_ESC, KEY_ENTER, KEY_CTRL_C,
     KEY_CTRL_D, KEY_CTRL_U, KEY_TAB, KEY_UP, KEY_DOWN,
@@ -164,10 +164,10 @@ def _highlight_name(name, positions, inner_w, is_selected, price_label='', is_fa
 
     price_w = 0
     if price_label:
-        price_w = len(price_label) + 1  # leading space separator
+        price_w = display_width(price_label) + 1  # leading space separator
 
-    name_w = max(1, inner_w - len(prefix) - price_w)
-    display = name[:name_w]
+    name_w = max(1, inner_w - display_width(prefix) - price_w)
+    display = display_truncate(name, name_w)
 
     pos_set = set(positions or [])
     parts = []
@@ -179,7 +179,7 @@ def _highlight_name(name, positions, inner_w, is_selected, price_label='', is_fa
         else:
             parts.append(f'{SGR_BOLD_AZURE}{ch}{SGR_RESET}')
     name_part = ''.join(parts)
-    name_pad = ' ' * max(0, name_w - len(display))
+    name_pad = ' ' * max(0, name_w - display_width(display))
 
     price_part = ''
     if price_label and is_selected:
@@ -219,7 +219,7 @@ def _put_navigate_status(put,
         elif search_text:
             info = ' [no match]'
         raw_status = f' {dir_char}{search_text}{info}'
-        status_cell = raw_status[:inner_w].ljust(inner_w)
+        status_cell = ansi_pad(raw_status, inner_w)
         put(1 + visible_n + 1, f'{VL}{SGR_REVERSE}{status_cell}{SGR_RESET}{VL}')
         return
 
@@ -229,9 +229,9 @@ def _put_navigate_status(put,
         if search_matches:
             mlabel = f' [{search_match_idx + 1}/{len(search_matches)}]'
         left = f'{left}   {dir_char}{search_pattern}{mlabel}'
-    if len(left) + len(hints) <= inner_w:
+    if display_width(left) + display_width(hints) <= inner_w:
         left = f'{left}{hints}'
-    status_cell = left[:inner_w].ljust(inner_w)
+    status_cell = ansi_pad(left, inner_w)
     put(1 + visible_n + 1, f'{VL}{status_cell}{VL}')
 
 
@@ -316,8 +316,8 @@ def _draw_model_overlay(rows,
                 # favorites/rest divider sentinel: a dim rule, never selectable.
                 cell = f'{SGR_DIM_GRAY}{H * list_w}{SGR_RESET}'
             elif navigate:
-                display = model_name[:list_w - 2]
-                raw_cell = f'  {display}'.ljust(list_w)
+                display = display_truncate(ansi_sanitize(model_name), list_w - 2)
+                raw_cell = ansi_pad(f'  {display}', list_w)
                 is_match = bool(search_matches) and (ai in search_matches)
                 color = None
                 if row_colors is not None and 0 <= ai < len(row_colors):
@@ -373,10 +373,10 @@ def _draw_model_overlay(rows,
             hint = 'Tab:fav  '
         prompt_str = f' > {search_text}'
         right_str = f'{hint}{match_info} '
-        gap = inner_w - len(prompt_str) - len(right_str)
+        gap = inner_w - display_width(prompt_str) - display_width(right_str)
         if gap < 0:
             # truncate search text if needed
-            prompt_str = prompt_str[:inner_w - len(right_str) - 1]
+            prompt_str = display_truncate(prompt_str, inner_w - display_width(right_str) - 1)
             gap = 0
         status_cell = f'{prompt_str}{" " * gap}{SGR_DIM_GRAY}{right_str}{SGR_RESET}'
         put(1 + visible_n + 1, f'{VL}{status_cell}{VL}')

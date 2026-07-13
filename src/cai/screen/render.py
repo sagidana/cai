@@ -19,7 +19,7 @@ import tokenize
 
 from .ansi import (
     SGR_CYAN, SGR_DIM_GRAY, SGR_GREEN, SGR_RED, SGR_RESET,
-    SGR_MAGENTA, SGR_YELLOW, ansi_strip)
+    SGR_MAGENTA, SGR_YELLOW, ansi_strip, ansi_sanitize, display_truncate)
 from cai.pytool import PY_TOOL_NAME
 
 
@@ -44,8 +44,8 @@ def _preview_lines(convo, width, max_lines):
         abs_i = (len(convo) - len(tail)) + i
         role = msg.get('role', '?')
         color = _PREVIEW_ROLE_COLOR.get(role, '')
-        text = ansi_strip(_overlay_msg_text(msg).replace('\n', ' ').replace('\r', ' '))
-        raw = f'#{abs_i} {role[:9].ljust(9)} {text}'[:width]
+        text = ansi_sanitize(_overlay_msg_text(msg))
+        raw = display_truncate(f'#{abs_i} {role[:9].ljust(9)} {text}', width)
         if color:
             lines.append(f'{color}{raw}{SGR_RESET}')
         else:

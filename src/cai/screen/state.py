@@ -5,7 +5,7 @@ import re
 from enum import Enum, auto
 
 from cai import usage
-from .ansi import ansi_strip
+from .ansi import ansi_strip, ansi_sanitize, display_width, display_truncate
 
 
 class Mode(Enum):
@@ -292,7 +292,7 @@ def _msg_pair_summary(messages, assistant_idx, tool_idx):
 def _msg_header_preview(msg, width):
     """short one-line header summary of a message."""
     raw = _overlay_msg_text(msg)
-    return ansi_strip(raw.replace('\n', ' ').replace('\r', ' '))[:width]
+    return display_truncate(ansi_sanitize(raw), width)
 
 
 def _msg_body_lines(msg, width):
@@ -320,13 +320,17 @@ def _msg_body_lines(msg, width):
                 text = header
 
     for raw_line in text.split('\n'):
+        raw_line = ansi_sanitize(raw_line)
         if not raw_line:
             parts.append('')
             continue
-        # wrap on width; don't break escape codes (content here is plain text).
-        while len(raw_line) > width:
-            parts.append(raw_line[:width])
-            raw_line = raw_line[width:]
+        # wrap on display width; tabs/controls already flattened to spaces.
+        while display_width(raw_line) > width:
+            head = display_truncate(raw_line, width)
+            if not head:
+                head = raw_line[0]
+            parts.append(head)
+            raw_line = raw_line[len(head):]
         parts.append(raw_line)
 
     if not parts:
