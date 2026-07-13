@@ -32,6 +32,7 @@ from ..ansi import (
     SGR_BOLD_AZURE,
     KEY_ESC, KEY_ENTER, KEY_CTRL_C,
     KEY_CTRL_D, KEY_CTRL_K, KEY_CTRL_U, KEY_UP, KEY_DOWN,
+    KEY_PGUP, KEY_PGDN,
 )
 from ..input import read_key, parse_mouse
 from .model import _draw_model_overlay, _filter_and_sort, overlay_click_index
@@ -169,6 +170,7 @@ def prompt_tree_overlay(screen,
     labels = []        # display strings parallel to flat (connector + label)
     filtered = []
     selected_idx = 0
+    preview_scroll = 0   # lines the preview pane is paged up from its tail
     prev_lines = {}
     first_draw = [True]
     resize_pending = [False]
@@ -239,7 +241,8 @@ def prompt_tree_overlay(screen,
         first_draw[0] = True
 
     def _redraw():
-        _draw_model_overlay(
+        nonlocal preview_scroll
+        preview_scroll = _draw_model_overlay(
             screen._rows, screen._cols,
             filtered, selected_idx, search_buf,
             len(filtered), prev_lines, first_draw[0], title,
@@ -248,6 +251,7 @@ def prompt_tree_overlay(screen,
             search_direction, search_pattern,
             hints,
             _row_colors(),
+            preview_scroll=preview_scroll,
         )
         first_draw[0] = False
 
@@ -285,6 +289,7 @@ def prompt_tree_overlay(screen,
             if mouse is not None:
                 action, _button, mcol, mrow = mouse
                 n = len(filtered)
+                before = selected_idx
                 if action == 'wheel_up':
                     selected_idx = max(0, selected_idx - 1)
                 elif action == 'wheel_down':
@@ -294,16 +299,21 @@ def prompt_tree_overlay(screen,
                                               selected_idx, mrow, mcol)
                     if idx is not None:
                         selected_idx = idx
+                if selected_idx != before:
+                    preview_scroll = 0
                 _redraw()
                 continue
 
             if search_mode:
+                before = selected_idx
                 search_mode, selected_idx, search_pattern, search_buf, \
                     search_matches, search_match_idx = _handle_search_key(
                         key, filtered, search_mode, selected_idx,
                         search_pattern, search_buf, search_matches,
                         search_match_idx, pre_search_idx, search_direction,
                     )
+                if selected_idx != before:
+                    preview_scroll = 0
                 _redraw()
                 continue
 
@@ -323,7 +333,22 @@ def prompt_tree_overlay(screen,
                 _redraw()
                 continue
 
+            # PgUp/PgDn page the preview pane (not the list): scroll up from
+            # the tail and back down. clamping happens in the renderer.
+            if key in (KEY_PGUP, KEY_PGDN):
+                overhead = 4
+                vis = max(5, int(screen._rows * 0.95)) - overhead
+                page = max(1, vis - 1)
+                if key == KEY_PGUP:
+                    preview_scroll += page
+                else:
+                    preview_scroll = max(0, preview_scroll - page)
+                prev_key = key
+                _redraw()
+                continue
+
             n = len(filtered)
+            before = selected_idx
             if key in (KEY_UP, 'k'):
                 selected_idx = max(0, selected_idx - 1)
             elif key in (KEY_DOWN, 'j'):
@@ -356,6 +381,8 @@ def prompt_tree_overlay(screen,
                 overhead = 4
                 vis = max(5, int(screen._rows * 0.95)) - overhead
                 selected_idx = min(max(0, n - 1), selected_idx + max(1, vis // 2))
+            if selected_idx != before:
+                preview_scroll = 0
             prev_key = key
             _redraw()
             continue

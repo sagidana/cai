@@ -990,7 +990,7 @@ def _open_sessions(screen, client, status, cfg):
         color_fn=_color,
         action_fn=_delete,
         title="sessions",
-        hints='  j/k /:search ↵:resume ^K:delete ESC:cancel',
+        hints='  j/k PgUp/Dn:preview /:search ↵:resume ^K:delete ESC:cancel',
     )
     if sel is None:
         return

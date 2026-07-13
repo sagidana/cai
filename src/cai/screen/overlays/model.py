@@ -254,12 +254,16 @@ def _draw_model_overlay(rows,
                         hints='  j/k /:search ↵:open ESC:cancel',
                         row_colors=None,
                         prices=None,
-                        favorites=None):
+                        favorites=None,
+                        preview_scroll=0):
     """render the model picker overlay. row_colors, when given, is a list
     parallel to filtered: an SGR color per row applied to non-selected,
     non-match rows (used by the agents view to tint by relationship). prices,
     when given, maps model id -> price record for the right-aligned label;
-    favorites, when given, is the set of favorited ids drawn with a star."""
+    favorites, when given, is the set of favorited ids drawn with a star.
+    preview_scroll pages the preview pane up from its tail (0 = show the tail,
+    the default); returns the value clamped to what the content allows so the
+    caller can't scroll past the top."""
     n = len(filtered)
 
     inner_w = max(20, int(cols * 0.95) - 2)
@@ -286,10 +290,20 @@ def _draw_model_overlay(rows,
     h_line = H * inner_w
 
     # preview lines for the selected item (one ANSI-colored line per row).
+    # preview_fn returns the tail (last N) for a given line budget; to page
+    # up we ask for visible_n + preview_scroll extra tail lines and show the
+    # top visible_n of them. when fewer come back than asked, the whole
+    # conversation fits and we clamp the scroll so it stops at the top.
     preview_rows = []
     if has_preview and filtered and 0 <= selected_idx < n:
-        preview_rows = preview_fn(filtered[selected_idx][0],
-                                  prev_w - 1, visible_n)
+        preview_scroll = max(0, preview_scroll)
+        want = visible_n + preview_scroll
+        all_prev = preview_fn(filtered[selected_idx][0], prev_w - 1, want)
+        if len(all_prev) < want:
+            preview_scroll = max(0, len(all_prev) - visible_n)
+        preview_rows = all_prev[:visible_n]
+    else:
+        preview_scroll = 0
 
     new_lines = {}
 
@@ -412,6 +426,8 @@ def _draw_model_overlay(rows,
 
     sys.stdout.write(''.join(out))
     sys.stdout.flush()
+
+    return preview_scroll
 
 
 def prompt_model_overlay(screen, models, *, presorted=False,
