@@ -10,6 +10,10 @@ under a bare MCP client), so callers can fall back to tempfile.
 safe_path confines a model-supplied path to the current working directory plus
 that scratch directory, and expands a leading $CAI_SCRATCH (the stable name the
 model uses to address scratch without knowing its real, per-session path).
+Extra roots can be granted via the CAI_ALLOWED_PATHS env var (os.pathsep-joined
+files or directories; the --allowed-paths CLI flag sets it), which spawned MCP
+servers and the python-tool child inherit like CAI_SCRATCH. A directory grants
+its whole subtree; a file grants just that file.
 Exposed as cai.safe_path / cai.scratch_dir so an extension's MCP servers and
 function tools share one implementation instead of vendoring copies. A server
 file cai spawns runs under the same interpreter, so `from cai import safe_path`
@@ -19,6 +23,7 @@ from contextvars import ContextVar
 
 
 _SCRATCH_VAR = "CAI_SCRATCH"
+_ALLOWED_VAR = "CAI_ALLOWED_PATHS"
 
 
 # the in-process scratch source: ToolsRegistry sets it to its provider (a
@@ -56,18 +61,36 @@ def _expand_scratch(user_path):
     return user_path
 
 
+def allowed_paths():
+    """the extra files/directories granted via CAI_ALLOWED_PATHS, realpath'd,
+    or [] when the var is unset/empty."""
+    raw = os.environ.get(_ALLOWED_VAR, "")
+    roots = []
+    for entry in raw.split(os.pathsep):
+        if not entry:
+            continue
+        roots.append(os.path.realpath(entry))
+    return roots
+
+
+def _under(resolved, root):
+    return resolved == root or resolved.startswith(root + os.sep)
+
+
 def safe_path(user_path):
     """resolve user_path relative to the cwd and reject traversal outside it;
-    the session scratch directory (scratch_dir(), when set) is allowed too, and
-    a leading $CAI_SCRATCH addresses it by name."""
+    the session scratch directory (scratch_dir(), when set) and the
+    CAI_ALLOWED_PATHS grants are allowed too, and a leading $CAI_SCRATCH
+    addresses scratch by name."""
     user_path = _expand_scratch(user_path)
     cwd = os.path.realpath(os.getcwd())
     resolved = os.path.realpath(os.path.join(cwd, user_path))
-    if resolved == cwd or resolved.startswith(cwd + os.sep):
+    if _under(resolved, cwd):
         return resolved
     scratch = scratch_dir()
-    if scratch:
-        scratch = os.path.realpath(scratch)
-        if resolved == scratch or resolved.startswith(scratch + os.sep):
+    if scratch and _under(resolved, os.path.realpath(scratch)):
+        return resolved
+    for root in allowed_paths():
+        if _under(resolved, root):
             return resolved
     raise ValueError(f"Error: path outside working directory: {user_path!r}")

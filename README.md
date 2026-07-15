@@ -95,6 +95,10 @@ The prompt goes after `--` (or via `-p`) so `--skill`/`--tool` can take several
 values without swallowing it. When stdout is piped, progress goes to stderr and
 only the clean answer is printed. LLM knobs: `--model`, `--reasoning-effort`,
 `--temperature`, `--max-steps`, `--non-streaming`, `--cwd`.
+`--allowed-paths p1,p2` grants tools access to files or directories beyond the
+working directory — a directory grants its subtree, a file just that file
+(published as `CAI_ALLOWED_PATHS`, which `cai.safe_path` and every spawned
+tool process honor; read-only inside the python-tool jail).
 
 Three stream modes ride the same flags:
 

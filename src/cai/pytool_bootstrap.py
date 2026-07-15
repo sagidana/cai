@@ -33,6 +33,11 @@ def compute_read_roots():
     scratch = os.environ.get("CAI_SCRATCH", "")
     if scratch:
         roots.append(os.path.realpath(scratch))
+    for entry in os.environ.get("CAI_ALLOWED_PATHS", "").split(os.pathsep):
+        if not entry: continue
+        real = os.path.realpath(entry)
+        if real in roots: continue
+        roots.append(real)
     for prefix in (sys.prefix, sys.exec_prefix, sys.base_prefix, sys.base_exec_prefix):
         real = os.path.realpath(prefix)
         if real in roots: continue
@@ -207,6 +212,15 @@ def enter_kernel_jail():
     kept = bind_roots()
     for root in kept:
         target = staging + root
+        # a file root (an allowed-paths grant) binds onto an empty file
+        # mountpoint, like LOADER_CACHE below.
+        if not os.path.isdir(root):
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "w"):
+                pass
+            need(libc.mount(root.encode(), target.encode(), None, MS_BIND, None),
+                 f"bind {root}")
+            continue
         os.makedirs(target, exist_ok=True)
 
         need(libc.mount(root.encode(),

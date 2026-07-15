@@ -216,6 +216,29 @@ def test_reading_and_listing_allowed_inside_the_jail(tmp_path, monkeypatch):
         agent.close()
 
 
+def test_allowed_file_grant_binds_into_the_jail(tmp_path, monkeypatch):
+    _fast_venv(monkeypatch)
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    granted = shared / "granted.txt"
+    granted.write_text("file grant")
+    (shared / "sibling.txt").write_text("not granted")
+    monkeypatch.chdir(cwd)
+    monkeypatch.setenv("CAI_ALLOWED_PATHS", str(granted))
+    agent = _agent_with_echo()
+    try:
+        # the granted file is bound read-only onto a file mountpoint
+        assert _run(agent, f"print(open({str(granted)!r}).read())").strip() == "file grant"
+        assert "scratch dir only" in _run(agent, f"open({str(granted)!r},'a').write('x')")
+        # its siblings do not exist inside the jail
+        out = _run(agent, f"print(open({str(shared / 'sibling.txt')!r}).read())")
+        assert "not granted" not in out
+    finally:
+        agent.close()
+
+
 def test_timeout(monkeypatch):
     _fast_venv(monkeypatch)
     agent = _agent_with_echo()

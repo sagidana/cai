@@ -223,6 +223,11 @@ def build_parser():
                         metavar="DIR",
                         help="run from this directory, so --file, tools and the LLM "
                              "see paths relative to it")
+    parser.add_argument("--allowed-paths",
+                        default=None,
+                        metavar="PATH,...",
+                        help="extra files or directories (comma-separated) tools may "
+                             "access beyond the working directory")
     parser.add_argument("--model",
                         default=None,
                         help="model id (default: the `model` field in config.json)")
@@ -436,6 +441,26 @@ def _drive(run, show_reasoning=True):
     return 0
 
 
+def _publish_allowed_paths(spec):
+    """resolve the --allowed-paths entries (comma-separated files or
+    directories) and export them as CAI_ALLOWED_PATHS for cai.safe_path and
+    every spawned tool process. False when an entry does not exist."""
+    roots = []
+    for entry in spec.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        root = os.path.realpath(entry)
+        if not os.path.exists(root):
+            print(f"--allowed-paths entry does not exist: {entry!r}",
+                  file=sys.stderr)
+            return False
+        roots.append(root)
+    if roots:
+        os.environ["CAI_ALLOWED_PATHS"] = os.pathsep.join(roots)
+    return True
+
+
 def main(argv=None):
     if argv is None:
         argv = sys.argv[1:]
@@ -500,6 +525,14 @@ def main(argv=None):
             os.chdir(args.cwd)
         except OSError as e:
             print(f"cannot change to --cwd {args.cwd!r}: {e}", file=sys.stderr)
+            return 1
+
+    # --allowed-paths: publish the extra roots as CAI_ALLOWED_PATHS after the
+    # --cwd chdir (so relative entries resolve against it). cai.safe_path reads
+    # the var in-process, and every spawned MCP server / python-tool child
+    # inherits it through os.environ.
+    if args.allowed_paths is not None:
+        if not _publish_allowed_paths(args.allowed_paths):
             return 1
 
     # heavy imports happen only here - after argcomplete has short-circuited, so
